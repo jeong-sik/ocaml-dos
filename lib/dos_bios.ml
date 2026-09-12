@@ -274,7 +274,7 @@ let keyboard t =
       Cpu86.set_reg16 cpu 0 (pop_key t)
     end
     else begin
-      t.kbd_wait <- true;
+      starve t;
       Cpu86.set_reg16 cpu 0 0
     end
   | 0x01 | 0x11 ->
@@ -286,7 +286,7 @@ let keyboard t =
     else begin
       (* 빈 링 폴링도 굶주림이다 — KeyPressed 루프는 AH=00 을 부르지도
          않는다(실측: ZZT 메뉴 대기). *)
-      t.kbd_wait <- true;
+      starve t;
       Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero)
     end
   | 0x02 | 0x12 ->

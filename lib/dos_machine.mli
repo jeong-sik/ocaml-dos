@@ -97,6 +97,13 @@ val push_ascii : t -> char -> unit
 
 val type_string : t -> string -> unit
 
+val input_requests : t -> int
+(** 게스트가 키를 물었는데 링이 비어 있었던 횟수. 늘기만 한다.
+
+    [kbd_waiting] 은 래치라 "지금 기다리는가" 만 답한다 — 한 구간 안에서
+    물었다가 받아간 것은 못 본다. 하네스가 "이 구간에서 입력을 요구했는가"
+    를 알려면 앞뒤로 이 값을 재야 한다. *)
+
 val kbd_waiting : t -> bool
 (** 직전 입력 요청이 빈 링으로 돌아갔다 — 실기라면 지금 블록 중이다.
     하네스가 이걸 보고 키를 넣는다. *)
@@ -123,6 +130,14 @@ val frame_rgb : t -> string
 val frame_ppm : t -> string
 val video_mode : t -> int
 (** 지금 세워진 BIOS 비디오 모드 번호. *)
+
+val screen_digest : t -> int
+(** 지금 모드가 그리는 메모리의 지문. 두 번 같으면 화면이 그 사이에
+    멈춰 있었다는 뜻이다 — 게스트가 반응을 끝냈는지 보는 값싼 신호.
+
+    키를 물었다는 사실만으로는 모자란다: 게임 루프에 들어간 프로그램은
+    키를 먹고 곧바로 다시 묻는다(ZZT 실측 631 명령). 그때 화면은 아직
+    그리는 중이다. *)
 
 val pixel : t -> x:int -> y:int -> int
 (** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는

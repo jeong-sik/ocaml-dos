@@ -272,6 +272,39 @@ let test_named_key_reaches_guest () =
   Dos_machine.run m ~max_steps:100_000;
   check "게스트가 읽은 워드" (peek16 m scratch) 0x4800
 
+(* 화면 지문과 입력 요구 계수 — 하네스가 "게스트가 반응을 끝냈나" 를
+   판정하는 두 신호다. 굶주림 래치는 "지금 기다리는가" 만 답하므로,
+   한 구간 안에서 물었다가 받아간 것을 보려면 계수가 필요하다. *)
+let test_screen_digest_follows_the_screen () =
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m
+    (assemble
+       (fun off -> mov_ah 0x09 ^ mov_dx off ^ int_ 0x21 ^ "\xeb\xfe") "Z$");
+  let blank = Dos_machine.screen_digest m in
+  Dos_machine.run m ~max_steps:100_000;
+  let written = Dos_machine.screen_digest m in
+  check_true "글자가 찍히면 지문이 바뀐다" (written <> blank);
+  (* 프로그램은 이제 제자리를 돌 뿐이다 — 화면이 안 변하니 지문도 같다 *)
+  ignore (Dos_machine.run_until m ~max_steps:200_000 ~stop:(fun _ -> false) : int);
+  check "화면이 안 변하면 지문도 같다" (Dos_machine.screen_digest m) written
+
+let test_input_requests_count_empty_reads () =
+  let poll_twice =
+    assemble (fun _ -> mov_ah 0x01 ^ int_ 0x16 ^ mov_ah 0x01 ^ int_ 0x16 ^ quit) ""
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m poll_twice;
+  check "시작은 0" (Dos_machine.input_requests m) 0;
+  Dos_machine.run m ~max_steps:100_000;
+  check "빈 링을 두 번 물었다" (Dos_machine.input_requests m) 2;
+  (* 링에 키가 있으면 굶지 않는다. AH=01 은 들여다볼 뿐 꺼내지 않으므로
+     두 번째 폴링도 같은 키를 본다 — 그래서 둘 다 안 센다. *)
+  let m2 = Dos_machine.create () in
+  Dos_machine.load_com m2 poll_twice;
+  Dos_machine.type_string m2 "a";
+  Dos_machine.run m2 ~max_steps:100_000;
+  check "키가 있으면 안 센다" (Dos_machine.input_requests m2) 0
+
 let test_console_scrolls () =
   (* 화면이 넘치면 위로 밀려야 한다. 마지막 칸에 붙들어 두면 출력이
      통째로 사라진다. 30 줄을 찍고 첫 줄이 사라졌는지 본다. *)
@@ -427,6 +460,8 @@ let () =
   test_find_first_next ();
   test_flush_then_input ();
   test_key_names ();
+  test_screen_digest_follows_the_screen ();
+  test_input_requests_count_empty_reads ();
   test_named_key_reaches_guest ();
   test_dup_shares_position ();
   test_console_scrolls ();

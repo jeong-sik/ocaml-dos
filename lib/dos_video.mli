@@ -58,6 +58,11 @@ val attr_palette : t -> int array
 
 val set_attr_palette : t -> int -> int -> unit
 
+val screen_digest : t -> int
+(** 지금 모드가 그리는 메모리의 지문. 화면이 멈췄는지 보는 용도다 —
+    픽셀을 다 만들어 비교하는 것보다 싸다. 충돌하면 "안 변했다" 고 잘못
+    읽을 뿐이라 암호학적 강도가 필요하지 않다. *)
+
 val put_pixel : t -> x:int -> y:int -> color:int -> unit
 val get_pixel : t -> x:int -> y:int -> int
 (** INT 10h AH=0Ch/0Dh. 텍스트 모드에서는 아무 일도 하지 않는다. *)

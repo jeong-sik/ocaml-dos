@@ -97,6 +97,69 @@ let settle m =
   done;
   !seen
 
+(* masc 의 DOS 레인이 쓰는 리듬. "키를 물었다" 만으로는 모자란다 —
+   게임 루프에 들어간 프로그램은 키를 먹고 631 명령 만에 다시 묻는다
+   (아래 측정). 그 순간 화면은 아직 그리는 중이라, 그때 돌려주면 호출자는
+   방금 누른 것이 반영되기 전 화면을 본다.
+
+   그래서 둘을 겹친다: 이 구간에서 입력을 요구했고(계수가 늘었고),
+   화면 지문이 직전 구간과 같다. 둘 다 맞으면 게스트는 반응을 끝내고
+   기다리는 중이다. 메뉴처럼 진짜 막혀 있는 자리는 첫 구간에서 바로
+   맞는다. *)
+let chunk_steps = 50_000
+
+let press_and_settle m word ~budget =
+  Dos_machine.push_key m word;
+  let prev = ref (Dos_machine.screen_digest m) in
+  let ran = ref 0 and settled = ref false in
+  while (not !settled) && !ran < budget && not (Dos_machine.exited m) do
+    let before = Dos_machine.input_requests m in
+    let n =
+      Dos_machine.run_until m ~max_steps:(min chunk_steps (budget - !ran))
+        ~stop:(fun _ -> false)
+    in
+    ran := !ran + n;
+    let asked = Dos_machine.input_requests m > before in
+    let now = Dos_machine.screen_digest m in
+    if asked && now = !prev then settled := true;
+    prev := now
+  done;
+  !ran
+
+let test_lane_rhythm dir =
+  let m = Dos_machine.create () in
+  List.iter
+    (fun n ->
+      let p = Filename.concat dir n in
+      if Sys.file_exists p then Dos_machine.mount_file m n (read_file p))
+    [ "ZZT.DAT"; "ZZT.CFG"; "TOWN.ZZT" ];
+  let exe =
+    match Sys.getenv_opt "ZZT_EXE" with
+    | Some p -> p
+    | None -> Filename.concat dir "ZZT.EXE"
+  in
+  Dos_machine.load_exe m (read_file exe);
+  let budget = 4_000_000 in
+  let booted =
+    Dos_machine.run_until m ~max_steps:budget
+      ~stop:(fun mm -> Dos_machine.kbd_waiting mm)
+  in
+  check_true "부팅이 예산을 다 쓰지 않고 키를 묻는다"
+    (booted < budget && Dos_machine.kbd_waiting m);
+  List.iter
+    (fun w -> ignore (press_and_settle m w ~budget : int))
+    (intro_keys @ [ key_right ]);
+  let text = Dos_machine.screen_text m in
+  let has needle =
+    let n = String.length needle and h = String.length text in
+    let rec go i = i + n <= h && (String.sub text i n = needle || go (i + 1)) in
+    go 0
+  in
+  check_true "레인 리듬으로 보드에 닿는다" (has "The Town of ZZT");
+  (* 여기가 요점이다. 키 요구만 보고 멈추면 사이드바가 아직 "Pausing..."
+     이다 — 눌렀는데 안 눌린 것처럼 보인다. *)
+  check_true "방향키가 멈춤을 푼 화면까지 기다린다" (not (has "Pausing"))
+
 let () =
   match Sys.getenv_opt "ZZT_DIR" with
   | None -> print_endline "zzt run: ZZT_DIR 없음, 건너뜀"
@@ -159,6 +222,7 @@ let () =
        (* ZZT 3.x 월드 서명: FFFF 뒤에 보드 수 *)
        check_true "세이브가 ZZT 월드 형식이다"
          (String.length data > 2 && data.[0] = '\xff' && data.[1] = '\xff'));
+    test_lane_rhythm dir;
     if !failed = 0 then print_endline "zzt run: all passed"
     else begin
       Printf.eprintf "zzt run: %d failures\n%!" !failed;

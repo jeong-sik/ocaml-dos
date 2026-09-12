@@ -49,7 +49,7 @@ let create () =
       next_handle = 5;
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; last_tick = 0; pending_irq0 = false;
+      kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = [];
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
@@ -316,6 +316,7 @@ let push_ascii t c =
 let type_string t s = String.iter (fun c -> push_ascii t c) s
 
 let kbd_waiting t = t.kbd_wait
+let input_requests t = t.kbd_requests
 
 (* ---------- 화면 ---------- *)
 
@@ -349,6 +350,7 @@ let mem_read t a = rd8 t a
 let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
+let screen_digest t = Dos_video.screen_digest t.video
 let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
