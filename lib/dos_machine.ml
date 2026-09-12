@@ -267,6 +267,48 @@ let scancode_of_ascii c =
   | '0' -> 0x0B
   | _ -> 0
 
+(* 이름이 있는 키 — BIOS 가 INT 16h 로 돌려주는 워드(스캔 코드 lsl 8 lor
+   ASCII) 그대로다. 글자가 아닌 키는 ASCII 자리가 0 이고, 그래서 게스트가
+   "확장 키" 로 알아본다. 표에 없는 키는 이름으로 부를 수 없다 — 워드를
+   직접 넣는 길([push_key])은 그대로 열려 있다. *)
+let named_keys =
+  [ ("up", 0x4800); ("down", 0x5000); ("left", 0x4B00); ("right", 0x4D00);
+    ("home", 0x4700); ("end", 0x4F00); ("pgup", 0x4900); ("pgdn", 0x5100);
+    ("insert", 0x5200); ("delete", 0x5300);
+    ("enter", 0x1C0D); ("return", 0x1C0D); ("esc", 0x011B);
+    ("space", 0x3920); ("tab", 0x0F09); ("backtab", 0x0F00);
+    ("backspace", 0x0E08);
+    ("f1", 0x3B00); ("f2", 0x3C00); ("f3", 0x3D00); ("f4", 0x3E00);
+    ("f5", 0x3F00); ("f6", 0x4000); ("f7", 0x4100); ("f8", 0x4200);
+    ("f9", 0x4300); ("f10", 0x4400) ]
+
+let key_of_string name =
+  let lower = String.lowercase_ascii (String.trim name) in
+  match List.assoc_opt lower named_keys with
+  | Some w -> Ok w
+  | None ->
+    if String.length name = 1 then begin
+      let c = name.[0] in
+      let sc = scancode_of_ascii c in
+      (* 스캔 코드가 0 이면 US 자판에 그 글자의 자리가 없다. 자리 없는
+         글자를 0 번 스캔 코드로 넣으면 게스트가 엉뚱한 키로 읽는다. *)
+      if sc = 0 then Error (Printf.sprintf "no key for character %C" c)
+      else Ok ((sc lsl 8) lor Char.code c)
+    end
+    else
+      Error
+        (Printf.sprintf "unknown key %S — name one of [%s] or one character"
+           name
+           (String.concat " " (List.map fst named_keys)))
+
+let key_to_string word =
+  match List.find_opt (fun (_, w) -> w = word) named_keys with
+  | Some (n, _) -> n
+  | None ->
+    let a = word land 0xff in
+    if a >= 0x20 && a < 0x7f then String.make 1 (Char.chr a)
+    else Printf.sprintf "%04x" word
+
 let push_ascii t c =
   let ascii = if c = '\n' then Char.code '\r' else Char.code c in
   push_key t ((scancode_of_ascii c lsl 8) lor ascii)
