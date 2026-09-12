@@ -1,0 +1,5 @@
+(library
+ (name cpu86core)
+ (public_name ocaml-dos.cpu86core)
+ (wrapped false)
+ (modules cpu86))

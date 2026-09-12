@@ -1,0 +1,5 @@
+/_build
+/.merlin
+test/zex/diff_driver
+roms/
+.merlin
