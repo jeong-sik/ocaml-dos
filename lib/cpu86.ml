@@ -79,8 +79,12 @@ let dump_ip t = t.ip
 let set_ip t v = t.ip <- v land 0xffff
 
 let flags t =
+  (* 8086 의 FLAGS 워드: bit1 은 항상 1, bits12-15 은 읽으면 항상 1
+     (실칩 SingleStepTests 실측 — 계산 비트만 돌려주면 상위 니블이 0
+     로 나와 전 add 그룹이 fail). *)
   let b cond bit = if cond then bit else 0 in
-  b t.cf f_carry lor b t.pf f_parity lor b t.af f_aux
+  0xF002
+  lor b t.cf f_carry lor b t.pf f_parity lor b t.af f_aux
   lor b t.zf f_zero lor b t.sf f_sign lor b t.tf f_trap
   lor b t.intf f_interrupt lor b t.df f_direction
   lor b t.of_ f_overflow
@@ -105,6 +109,7 @@ let parity_even v =
 let alu_result t op a b width =
   let mask = if width = 8 then 0xff else 0xffff in
   let sign_bit = if width = 8 then 0x80 else 0x8000 in
+  let entry_cf_saved = t.cf in
   let r =
     match op with
     | 0 (* add *) | 2 (* adc *) ->
@@ -127,14 +132,16 @@ let alu_result t op a b width =
   (match op with
    | 1 | 4 | 6 -> t.cf <- false; t.of_ <- false; t.af <- false
    | _ ->
-     (* add/sub 계열 OF: 같은 부호 피연산자의 결과 부호 반전. *)
+     (* add/sub 계열 OF: 같은 부호 피연산자의 결과 부호 반전. adc/sbb 는
+        명령 진입 시의 CF 로 계산한다 — 위에서 t.cf 를 갱신한 뒤 다시
+        읽으면 새 캐리를 더하는 오류(실칩 adc 관측: OF 만 어긋남). *)
      let ov =
        match op with
        | 0 | 2 ->
-         let full = a + b + (if op = 2 && t.cf then 1 else 0) in
+         let full = a + b + (if op = 2 && entry_cf_saved then 1 else 0) in
          ((a lxor (full land mask)) land (b lxor (full land mask)) land sign_bit) <> 0
        | _ ->
-         let full = a - b - (if op = 3 && t.cf then 1 else 0) in
+         let full = a - b - (if op = 3 && entry_cf_saved then 1 else 0) in
          ((a lxor b) land (a lxor full) land sign_bit) <> 0
      in
      t.of_ <- ov);
@@ -249,7 +256,7 @@ let condition t n =
   | _ -> (t.sf = t.of_) && not t.zf
 
 let seg_override_of = function
-  | 0x26 -> Some 0 | 0x2e -> Some 1 | 0x36 -> Some 3 | 0x3e -> Some 2
+  | 0x26 -> Some 0 | 0x2e -> Some 1 | 0x36 -> Some 2 | 0x3e -> Some 3
   | _ -> None
 
 (* ---------- step: 한 명령 ---------- *)
@@ -468,7 +475,14 @@ let step t =
         t.cf <- saved_cf;
         set_reg16 t n r;
         3
-      (* --- push/pop --- *)
+      (* --- push/pop. PUSH SP(0x54) 는 8086 이 감소된 SP 를 push 한다
+         (286 부터 이전 값을 push — 실칩 SingleStepTests 관측). --- *)
+      | 0x54 ->
+        t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
+        let a = physical ~seg:t.segs.(2) ~off:t.regs.(4) in
+        t.write a (t.regs.(4) land 0xff);
+        t.write (a + 1) (t.regs.(4) lsr 8);
+        10
       | b when b >= 0x50 && b <= 0x57 -> push16 t (reg16 t (opcode land 7)); 10
       | b when b >= 0x58 && b <= 0x5f -> set_reg16 t (opcode land 7) (pop16 t); 8
       (* --- jcc rel8 --- *)
