@@ -15,9 +15,21 @@ let starve_threshold = 2000
 
 let create () =
   let mem = Bytes.make (1024 * 1024) '\000' in
-  let ports = Dos_ports.create ~mem in
-  let read a = Char.code (Bytes.get mem (a land 0xfffff)) in
-  let write a v = Bytes.set mem (a land 0xfffff) (Char.chr (v land 0xff)) in
+  let video = Dos_video.create ~mem in
+  let ports = Dos_ports.create ~mem ~video in
+  (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
+     그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
+     있다. 나머지 주소는 그대로 1MB 배열이다. *)
+  let read a =
+    let a = a land 0xfffff in
+    if Dos_video.owns_address video a then Dos_video.mem_read video a
+    else Char.code (Bytes.get mem a)
+  in
+  let write a v =
+    let a = a land 0xfffff in
+    if Dos_video.owns_address video a then Dos_video.mem_write video a v
+    else Bytes.set mem a (Char.chr (v land 0xff))
+  in
   let cpu =
     (* 1990년대 DOS 게임은 286 이상에서 돌았고 Borland 컴파일러가 186
        명령을 낸다. 실칩 8086 검증은 Cpu86 쪽 스위트가 I8086 으로 따로
@@ -30,7 +42,7 @@ let create () =
   let t =
     {
       mem; cpu; ports;
-      exited = false; exit_code = 0; vmode = 3;
+      exited = false; exit_code = 0; video;
       host_files = Hashtbl.create 8;
       handles = Hashtbl.create 4;
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
@@ -265,14 +277,23 @@ let kbd_waiting t = t.kbd_wait
 
 (* ---------- 화면 ---------- *)
 
-let frame_dims t = if t.vmode = 0x13 then (320, 200) else (640, 400)
-let screen_text t = Dos_render.text_ascii t.mem
-let screen_text_utf8 t = Dos_render.text_utf8 t.mem
+let frame_dims t = Dos_video.dims t.video
+let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t)
+let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
 
 let frame_rgb t =
-  if t.vmode = 0x13 then
-    Dos_render.rgb_vga13 t.mem (Dos_ports.palette t.ports)
-  else Dos_render.rgb_text t.mem
+  let pal = Dos_ports.palette t.ports in
+  match Dos_video.kind t.video with
+  | Dos_video.Text -> Dos_render.rgb_text t.mem ~cols:(cols t)
+  | Dos_video.Cga4 ->
+    Dos_render.rgb_cga4 t.mem ~mode:(Dos_video.mode t.video)
+      ~color_select:(Dos_video.cga_color_select t.video)
+  | Dos_video.Cga2 -> Dos_render.rgb_cga2 t.mem
+  | Dos_video.Planar ->
+    let w, h = Dos_video.dims t.video in
+    Dos_render.rgb_planar (Dos_video.planes t.video) ~w ~h
+      ~attr:(Dos_video.attr_palette t.video) ~pal
+  | Dos_video.Linear256 -> Dos_render.rgb_vga13 t.mem pal
 
 let frame_ppm t =
   let w, h = frame_dims t in
@@ -285,7 +306,8 @@ let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
 let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 let speaker_on t = Dos_ports.speaker_on t.ports
-let video_mode t = t.vmode
+let video_mode t = Dos_video.mode t.video
+let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_year <- year;

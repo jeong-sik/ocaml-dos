@@ -19,6 +19,7 @@ let dac_entries = 256
 
 type t = {
   mem : Bytes.t;
+  video : Dos_video.t;          (** 비디오 어댑터의 포트는 여기로 넘긴다 *)
   mutable now : int;                    (** CPU 누적 사이클 *)
   (* PIT 채널 0 *)
   mutable pit0_divisor : int;           (** 0 은 65536 을 뜻한다 *)
@@ -55,10 +56,13 @@ let cga_palette = [|
   (0x55, 0x55, 0x55); (0x55, 0x55, 0xFF); (0x55, 0xFF, 0x55); (0x55, 0xFF, 0xFF);
   (0xFF, 0x55, 0x55); (0xFF, 0x55, 0xFF); (0xFF, 0xFF, 0x55); (0xFF, 0xFF, 0xFF) |]
 
+(* DAC 은 채널당 6비트다. CGA 색의 8비트 값을 옮길 때 나누는 수는
+   255 이어야 한다 — 0xAA 로 나누면 밝은 색(0xFF)이 94 가 되어 범위를
+   넘고, 렌더러가 그 값을 8비트로 되돌릴 때 380 이 나온다. *)
 let default_vga_pal i =
   if i < 16 then
     let r, g, b = cga_palette.(i) in
-    ((r * 63) / 0xAA, (g * 63) / 0xAA, (b * 63) / 0xAA)
+    ((r * 63) / 255, (g * 63) / 255, (b * 63) / 255)
   else if i < 32 then
     let v = ((i - 16) * 63) / 15 in (v, v, v)
   else if i < 248 then begin
@@ -68,9 +72,10 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
-let create ~mem =
+let create ~mem ~video =
   {
     mem;
+    video;
     now = 0;
     pit0_divisor = 0;
     pit0_write_hi = false;
@@ -114,11 +119,14 @@ let pit0_count t =
    둘로 갈라지지 않게 여기서 같이 맞춘다. *)
 let sync_cursor_to_bda t =
   let linear = ((t.crtc.(0x0E) land 0xff) lsl 8) lor (t.crtc.(0x0F) land 0xff) in
-  let cols = 80 in
+  let cols = max 1 (Dos_video.text_cols t.video) in
   Bytes.set t.mem 0x450 (Char.chr (linear mod cols));
   Bytes.set t.mem 0x451 (Char.chr ((linear / cols) land 0xff))
 
 let port_in t p =
+  match Dos_video.port_in t.video p with
+  | Some v -> v
+  | None ->
   match p land 0xffff with
   | 0x21 -> t.pic_mask
   | 0x40 ->
@@ -169,6 +177,9 @@ let port_in t p =
        CRT 루틴이 VRAM 직접 쓰기 전에 "clear 대기 → set 대기" 상승
        에지를 본다 — 고정값이면 한쪽 대기가 안 풀린다(ZZT 실측).
        bit3(수직 귀선)은 그보다 느리게 켜진다. *)
+    (* 실기에서는 이 레지스터를 읽으면 속성 컨트롤러의 index/data
+       번갈이도 index 로 돌아간다. 그 부수효과에 기대는 코드가 있다. *)
+    Dos_video.reset_attr_flip t.video;
     t.cga_status <- not t.cga_status;
     let vsync = if (t.now / 70000) land 7 = 0 then 0x08 else 0x00 in
     (if t.cga_status then 0x01 else 0x00) lor vsync
@@ -176,6 +187,8 @@ let port_in t p =
 
 let port_out t p v =
   let v = v land 0xff in
+  if Dos_video.port_out t.video p v then ()
+  else
   match p land 0xffff with
   | 0x20 -> ()                        (* EOI — 우선순위 모델이 없다 *)
   | 0x21 -> t.pic_mask <- v
@@ -233,5 +246,5 @@ let port_out t p v =
       if t.crtc_index = 0x0B then Bytes.set t.mem 0x460 (Char.chr v)
     end
   | 0x3D8 -> t.mode_control <- v
-  | 0x3D9 -> t.color_select <- v
+  | 0x3D9 -> t.color_select <- v; Dos_video.set_cga_color_select t.video v
   | _ -> ()

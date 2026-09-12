@@ -30,3 +30,7 @@
 (test
  (name zzt_run_test)
  (libraries dosmachine))
+
+(test
+ (name dos_video_test)
+ (libraries dosmachine))
