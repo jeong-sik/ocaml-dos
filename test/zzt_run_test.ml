@@ -35,6 +35,9 @@ let intro_keys =
     0x1c0d ]
 
 let key_right = 0x4d00
+let key_b = 0x3062          (* 'b' — 사이드바의 소리 켜기/끄기 *)
+let key_s = 0x1f73          (* 's' — 저장 *)
+let key_enter = 0x1c0d
 let vram_base = 0xB8000
 let player_glyph = 0x02
 let player_attr = 0x1F              (* 파란 바탕 흰 글자 — 플레이어만 *)
@@ -126,6 +129,31 @@ let () =
        check "방향키가 플레이어를 한 칸 옮긴다 (열)" c1 (c0 + 1);
        check "행은 그대로" r1 r0
      | _ -> check_true "이동 전후 플레이어를 둘 다 찾았다" false);
+    (* 메뉴 키가 게임 상태를 바꾸는가 — 사이드바의 안내가 뒤집힌다 *)
+    let m3 =
+      boot dir
+        ~extra_keys:
+          [ { Dos_machine.word = key_right; not_before = 5_000_000 };
+            { Dos_machine.word = key_b; not_before = 6_000_000 };
+            { Dos_machine.word = key_s; not_before = 7_000_000 };
+            { Dos_machine.word = key_enter; not_before = 8_000_000 } ]
+        ~steps:12_000_000
+    in
+    let text3 = Dos_machine.screen_text m3 in
+    let has3 needle =
+      let n = String.length needle and h = String.length text3 in
+      let rec go i = i + n <= h && (String.sub text3 i n = needle || go (i + 1)) in
+      go 0
+    in
+    check_true "메뉴 키 B 가 사이드바를 바꾼다" (has3 "Be noisy");
+    (* 저장이 INT 21h 를 지나 마운트 표로 돌아왔는가 *)
+    (match Dos_machine.read_mounted m3 "SAVED.SAV" with
+     | None -> check_true "세이브 파일이 만들어졌다" false
+     | Some data ->
+       check_true "세이브가 비어 있지 않다" (String.length data > 1000);
+       (* ZZT 3.x 월드 서명: FFFF 뒤에 보드 수 *)
+       check_true "세이브가 ZZT 월드 형식이다"
+         (String.length data > 2 && data.[0] = '\xff' && data.[1] = '\xff'));
     if !failed = 0 then print_endline "zzt run: all passed"
     else begin
       Printf.eprintf "zzt run: %d failures\n%!" !failed;
