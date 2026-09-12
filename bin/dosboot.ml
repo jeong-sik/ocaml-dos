@@ -36,7 +36,10 @@ let () =
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
       ("--keys", Arg.Set_string keys,
-       "HEX,HEX..  실행 전 주입할 키 — (스캔<<8)|ASCII 워드 (예: 1c0d)") ]
+       "HEX[@STEP],..  키 — (스캔<<8)|ASCII 워드. @STEP 는 이 키를 \
+        STEP 스텝 전엔 주입하지 않는 예약(예: 4d00@40000). 굶주림 주입은 \
+        사전 메뉴의 repeat-until-KeyPressed 가 뭐든 즉시 먹어버리므로, \
+        게임 상태 이후에 넣어야 하는 키는 @로 묶는다") ]
     (fun _ -> ()) "dosboot — DOS COM 실행 하네스";
   let m = Dos_machine.create () in
   (* 키 자동 투입기(keybot): --keys 를 미리 밀어넣지 않고, 게임이
@@ -46,10 +49,19 @@ let () =
   let keyq = Queue.create () in
   String.split_on_char ',' !keys
   |> List.iter (fun h ->
-         if h <> "" then
-           match int_of_string_opt ("0x" ^ h) with
-           | Some w -> Queue.push w keyq
-           | None -> prerr_endline ("bad key " ^ h ^ " (want hex like 1c0d)"));
+         if h <> "" then begin
+           let k, at =
+             match String.index_opt h '@' with
+             | Some i ->
+               (String.sub h 0 i,
+                int_of_string (String.sub h (i + 1) (String.length h - i - 1)))
+             | None -> (h, 0)
+           in
+           match int_of_string_opt ("0x" ^ k) with
+           | Some w -> Queue.push (w, at) keyq
+           | None ->
+             prerr_endline ("bad key " ^ h ^ " (want hex[@step] like 1c0d or 4d00@40000)")
+         end);
   List.iter (fun spec ->
       match String.index_opt spec '=' with
       | Some i ->
@@ -96,10 +108,13 @@ let () =
        incr n;
        if Dos_machine.kbd_waiting m then begin
          incr starve;
-         if !starve >= 2000 && not (Queue.is_empty keyq) then begin
-           Dos_machine.push_key m (Queue.pop keyq);
+         match Queue.peek_opt keyq with
+         | Some (w, at) when !starve >= 2000 && !n >= at ->
+           ignore (Queue.pop keyq);
+           Dos_machine.push_key m w;
+           Printf.eprintf "KEYBOT %04x @step %d\n%!" w !n;
            starve := 0
-         end
+         | _ -> ()
        end
        else starve := 0
      done
