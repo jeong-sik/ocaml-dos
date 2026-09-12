@@ -200,6 +200,40 @@ let test_find_first_next () =
     (Dos_dos.matches_pattern ~pattern:"*.TXT" ~name:"AB.TXT"
      && not (Dos_dos.matches_pattern ~pattern:"*.TXT" ~name:"EF.DAT"))
 
+(* AH=0Ch 은 키 버퍼를 비운 뒤 AL 이 가리키는 입력 기능을 실제로 부른다.
+   비우기만 하고 끝내면 게스트는 오지 않을 글자를 기다린다. *)
+let test_flush_then_input () =
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m
+    (assemble
+       (fun _ -> mov_ax 0x0C08 ^ int_ 0x21 ^ store_ax scratch ^ quit) "");
+  Dos_machine.type_string m "ab";
+  Dos_machine.run m ~max_steps:100_000;
+  (* 버퍼를 비웠으니 뒤이은 읽기는 굶는다 — AL=0. 비우기만 했다면 AL 에
+     기능 번호 8 이 그대로 남는다. *)
+  check "AH=0C 가 하위 기능을 부른다" (peek m scratch) 0;
+  check_true "버퍼가 비었다" (Dos_machine.kbd_waiting m)
+
+(* dup 은 같은 열린 파일을 가리킨다 — 두 핸들이 위치를 나눠 쓴다. *)
+let test_dup_shares_position () =
+  let name = "D.DAT\000" in
+  let m =
+    run_com
+      (assemble
+         (fun off ->
+           let name_off = off and a_off = off + String.length name in
+           let b_off = a_off + 2 in
+           mov_ah 0x3C ^ mov_cx 0 ^ mov_dx name_off ^ int_ 0x21 ^ mov_bx_ax
+           ^ mov_ah 0x40 ^ mov_cx 2 ^ mov_dx a_off ^ int_ 0x21
+           ^ mov_ah 0x45 ^ int_ 0x21 ^ mov_bx_ax      (* dup — BX=새 핸들 *)
+           ^ mov_ah 0x40 ^ mov_cx 2 ^ mov_dx b_off ^ int_ 0x21
+           ^ mov_ah 0x3E ^ int_ 0x21 ^ quit)
+         (name ^ "AB" ^ "CD"))
+  in
+  check_s "dup 이 위치를 이어 쓴다"
+    (match Dos_machine.read_mounted m "D.DAT" with Some s -> s | None -> "")
+    "ABCD"
+
 let test_console_scrolls () =
   (* 화면이 넘치면 위로 밀려야 한다. 마지막 칸에 붙들어 두면 출력이
      통째로 사라진다. 30 줄을 찍고 첫 줄이 사라졌는지 본다. *)
@@ -353,6 +387,8 @@ let () =
   test_memory_allocation ();
   test_file_round_trip ();
   test_find_first_next ();
+  test_flush_then_input ();
+  test_dup_shares_position ();
   test_console_scrolls ();
   test_video_write_char ();
   test_video_scroll_clears ();

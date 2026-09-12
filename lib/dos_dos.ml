@@ -125,11 +125,9 @@ let resize_block t seg paras =
       (* 뒤로 늘릴 자리가 있는가 *)
       let limit =
         List.fold_left
-          (fun acc b ->
-            let s, _ = b in
-            if s > seg && s < acc then s else acc)
+          (fun acc (s, _) -> if s > seg && s < acc then s else acc)
           t.free_top
-          (List.remove_assoc seg t.blocks |> List.map (fun (s, p) -> (s, p)))
+          (List.remove_assoc seg t.blocks)
       in
       if seg + paras <= limit then begin
         t.blocks <- (seg, paras) :: List.remove_assoc seg t.blocks;
@@ -243,7 +241,7 @@ let ascii_of_key w =
 
 (* ---------- INT 21h ---------- *)
 
-let service t =
+let rec service t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
   match ah with
@@ -321,11 +319,15 @@ let service t =
     Cpu86.set_reg8 cpu 0 (if key_pending t then 0xFF else 0x00);
     if not (key_pending t) then t.kbd_wait <- true
   | 0x0C ->
-    (* 버퍼를 비우고 AL 이 가리키는 입력 함수를 다시 부른다 *)
+    (* 버퍼를 비운 뒤 AL 이 가리키는 입력 기능을 실제로 부른다. 비우기만
+       하고 끝내면 게스트는 오지 않을 글자를 기다린다. AL 이 입력 기능이
+       아니면 비우기만 한다(실기와 같다). *)
+    let sub_fn = Cpu86.reg8 cpu 0 in
     while key_pending t do ignore (pop_key t) done;
-    Cpu86.set_reg8 cpu 4 (Cpu86.reg8 cpu 0);
-    (match Cpu86.reg8 cpu 0 with
-     | 0x01 | 0x06 | 0x07 | 0x08 | 0x0A -> ()
+    (match sub_fn with
+     | 0x01 | 0x06 | 0x07 | 0x08 | 0x0A ->
+       Cpu86.set_reg8 cpu 4 sub_fn;
+       service t
      | _ -> Cpu86.set_reg8 cpu 0 0)
   | 0x0D -> ()                              (* 디스크 리셋 *)
   | 0x0E -> Cpu86.set_reg8 cpu 0 (default_drive + 1)
@@ -398,20 +400,20 @@ let service t =
        ok t
      | None -> fail t 2)
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
+  (* dup/dup2 는 같은 열린 파일을 가리킨다 — 위치와 내용을 나눠 쓴다.
+     사본을 주면 한쪽에 쓴 것이 다른 쪽에 안 보인다. *)
   | 0x45 ->
     (match Hashtbl.find_opt t.handles (Cpu86.reg16 cpu 3) with
      | Some hd ->
        let h = t.next_handle in
        t.next_handle <- t.next_handle + 1;
-       Hashtbl.replace t.handles h { hd with pos = hd.pos };
+       Hashtbl.replace t.handles h hd;
        Cpu86.set_reg16 cpu 0 h;
        ok t
      | None -> fail t 6)
   | 0x46 ->
     (match Hashtbl.find_opt t.handles (Cpu86.reg16 cpu 3) with
-     | Some hd ->
-       Hashtbl.replace t.handles (Cpu86.reg16 cpu 1) { hd with pos = hd.pos };
-       ok t
+     | Some hd -> Hashtbl.replace t.handles (Cpu86.reg16 cpu 1) hd; ok t
      | None -> fail t 6)
   | 0x3F ->
     let h = Cpu86.reg16 cpu 3 in
