@@ -1,0 +1,5 @@
+(executable
+ (name dosboot)
+ (public_name ocaml-dos.dosboot)
+ (package ocaml-dos)
+ (libraries dosmachine))
