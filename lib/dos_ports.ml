@@ -1,0 +1,237 @@
+(* 게스트가 보는 하드웨어 포트. 실기에서 이 포트가 무엇을 돌려주는지가
+   게임의 진행 조건이 된다 — 값이 변하지 않으면 변화를 기다리는 루프가
+   영원히 안 풀린다.
+
+   시간에 기대는 답(PIT 카운터, CGA 재주사 비트, 스피커 리프레시 비트)은
+   벽시계가 아니라 CPU 누적 사이클에서 만든다. 같은 이미지 + 같은 입력 =
+   같은 실행이라는 계약을 포트도 지켜야 한다. *)
+
+(* 4.77MHz CPU 와 1.193182MHz PIT 의 비 — 반올림해서 4. PIT 한 틱이
+   CPU 사이클 4 다. 분주비 65536 이면 262144 사이클 = 18.2Hz. *)
+let cpu_cycles_per_pit_tick = 4
+
+(* 포트 0x61 bit4(리프레시)가 뒤집히는 주기. 실기 15.09kHz 는 CPU
+   사이클로 약 158. 지연 루프가 이 비트를 세며 시간을 잰다. *)
+let refresh_toggle_cycles = 158
+
+let crtc_regs = 25
+let dac_entries = 256
+
+type t = {
+  mem : Bytes.t;
+  mutable now : int;                    (** CPU 누적 사이클 *)
+  (* PIT 채널 0 *)
+  mutable pit0_divisor : int;           (** 0 은 65536 을 뜻한다 *)
+  mutable pit0_write_hi : bool;         (** lo/hi 두 바이트 쓰기의 순번 *)
+  mutable pit0_read_hi : bool;
+  mutable pit0_latched : int option;
+  mutable pit0_access : int;            (** 1=lo 2=hi 3=lo/hi *)
+  (* PIC *)
+  mutable pic_mask : int;               (** IMR — bit0 이 IRQ0 *)
+  (* VGA DAC *)
+  pal : (int * int * int) array;
+  mutable dac_write_index : int;
+  mutable dac_read_index : int;
+  mutable dac_phase : int;              (** 0=R 1=G 2=B *)
+  mutable dac_mask : int;
+  (* CRTC *)
+  mutable crtc_index : int;
+  crtc : int array;
+  (* 기타 *)
+  mutable scancode : int;
+  mutable port_b : int;                 (** 0x61 래치 *)
+  mutable cga_status : bool;
+  mutable mode_control : int;           (** 0x3D8 *)
+  mutable color_select : int;           (** 0x3D9 *)
+  mutable cmos_index : int;
+}
+
+(* 기본 VGA 256색: 0-15 CGA, 16-31 회색 램프, 32-247 6x6x6 RGB 큐브,
+   248-255 검정. 게임이 DAC 을 다시 쓰지 않을 때의 근삿값이다 —
+   표준 DAC 초기값과 미세한 차이가 있을 수 있다. *)
+let cga_palette = [|
+  (0x00, 0x00, 0x00); (0x00, 0x00, 0xAA); (0x00, 0xAA, 0x00); (0x00, 0xAA, 0xAA);
+  (0xAA, 0x00, 0x00); (0xAA, 0x00, 0xAA); (0xAA, 0x55, 0x00); (0xAA, 0xAA, 0xAA);
+  (0x55, 0x55, 0x55); (0x55, 0x55, 0xFF); (0x55, 0xFF, 0x55); (0x55, 0xFF, 0xFF);
+  (0xFF, 0x55, 0x55); (0xFF, 0x55, 0xFF); (0xFF, 0xFF, 0x55); (0xFF, 0xFF, 0xFF) |]
+
+let default_vga_pal i =
+  if i < 16 then
+    let r, g, b = cga_palette.(i) in
+    ((r * 63) / 0xAA, (g * 63) / 0xAA, (b * 63) / 0xAA)
+  else if i < 32 then
+    let v = ((i - 16) * 63) / 15 in (v, v, v)
+  else if i < 248 then begin
+    let j = i - 32 in
+    let r = j / 36 and g = (j / 6) mod 6 and b = j mod 6 in
+    (r * 63 / 5, g * 63 / 5, b * 63 / 5)
+  end
+  else (0, 0, 0)
+
+let create ~mem =
+  {
+    mem;
+    now = 0;
+    pit0_divisor = 0;
+    pit0_write_hi = false;
+    pit0_read_hi = false;
+    pit0_latched = None;
+    pit0_access = 3;
+    pic_mask = 0;
+    pal = Array.init dac_entries default_vga_pal;
+    dac_write_index = 0;
+    dac_read_index = 0;
+    dac_phase = 0;
+    dac_mask = 0xFF;
+    crtc_index = 0;
+    crtc = Array.make crtc_regs 0;
+    scancode = 0;
+    port_b = 0;
+    cga_status = false;
+    mode_control = 0x29;
+    color_select = 0;
+    cmos_index = 0;
+  }
+
+let set_now t n = t.now <- n
+let palette t = t.pal
+let set_scancode t sc = t.scancode <- sc land 0xff
+let irq0_masked t = t.pic_mask land 1 <> 0
+let speaker_on t = t.port_b land 0x03 = 0x03
+
+let divisor t = if t.pit0_divisor = 0 then 0x10000 else t.pit0_divisor
+
+let cycles_per_tick t = divisor t * cpu_cycles_per_pit_tick
+
+(* 채널 0 은 되풀이 모드로 센다: 분주비에서 지난 만큼을 뺀 나머지. *)
+let pit0_count t =
+  let d = divisor t in
+  let elapsed = (t.now / cpu_cycles_per_pit_tick) mod d in
+  (d - elapsed) land 0xffff
+
+(* CRTC 커서 레지스터(0x0E/0x0F)는 화면 시작부터의 글자 수다. BIOS 는
+   같은 값을 BDA 0x450/0x451 에 행·열로 둔다 — 커서의 진실 원천이
+   둘로 갈라지지 않게 여기서 같이 맞춘다. *)
+let sync_cursor_to_bda t =
+  let linear = ((t.crtc.(0x0E) land 0xff) lsl 8) lor (t.crtc.(0x0F) land 0xff) in
+  let cols = 80 in
+  Bytes.set t.mem 0x450 (Char.chr (linear mod cols));
+  Bytes.set t.mem 0x451 (Char.chr ((linear / cols) land 0xff))
+
+let port_in t p =
+  match p land 0xffff with
+  | 0x21 -> t.pic_mask
+  | 0x40 ->
+    let v = match t.pit0_latched with Some v -> v | None -> pit0_count t in
+    (match t.pit0_access with
+     | 1 -> t.pit0_latched <- None; v land 0xff
+     | 2 -> t.pit0_latched <- None; (v lsr 8) land 0xff
+     | _ ->
+       if t.pit0_read_hi then begin
+         t.pit0_read_hi <- false;
+         t.pit0_latched <- None;
+         (v lsr 8) land 0xff
+       end else begin
+         t.pit0_read_hi <- true;
+         v land 0xff
+       end)
+  | 0x60 -> t.scancode
+  | 0x61 ->
+    (* bit4 는 메모리 리프레시 — 실기에서 쉬지 않고 뒤집힌다. 고정값을
+       주면 이 비트를 세는 지연 루프가 안 끝난다. *)
+    let refresh = (t.now / refresh_toggle_cycles) land 1 in
+    (t.port_b land 0xEF) lor (refresh lsl 4)
+  | 0x64 -> 0x14                     (* 출력 버퍼 빔, 입력 버퍼 빔 *)
+  | 0x70 -> t.cmos_index
+  | 0x71 -> 0x00
+  (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
+     통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측). *)
+  | 0x201 -> 0x00
+  | 0x3C6 -> t.dac_mask
+  | 0x3C7 -> if t.dac_phase = 0 then 0x00 else 0x03
+  | 0x3C8 -> t.dac_write_index
+  | 0x3C9 ->
+    let r, g, b = t.pal.(t.dac_read_index land 0xff) in
+    let v = match t.dac_phase with 0 -> r | 1 -> g | _ -> b in
+    t.dac_phase <- t.dac_phase + 1;
+    if t.dac_phase > 2 then begin
+      t.dac_phase <- 0;
+      t.dac_read_index <- (t.dac_read_index + 1) land 0xff
+    end;
+    v land 0x3f
+  | 0x3B4 | 0x3D4 -> t.crtc_index
+  | 0x3B5 | 0x3D5 ->
+    if t.crtc_index < crtc_regs then t.crtc.(t.crtc_index) else 0xff
+  | 0x3D8 -> t.mode_control
+  | 0x3D9 -> t.color_select
+  | 0x3BA | 0x3DA ->
+    (* 재주사 상태: 읽을 때마다 bit0(디스플레이 인에이블)을 뒤집는다.
+       CRT 루틴이 VRAM 직접 쓰기 전에 "clear 대기 → set 대기" 상승
+       에지를 본다 — 고정값이면 한쪽 대기가 안 풀린다(ZZT 실측).
+       bit3(수직 귀선)은 그보다 느리게 켜진다. *)
+    t.cga_status <- not t.cga_status;
+    let vsync = if (t.now / 70000) land 7 = 0 then 0x08 else 0x00 in
+    (if t.cga_status then 0x01 else 0x00) lor vsync
+  | _ -> 0xff
+
+let port_out t p v =
+  let v = v land 0xff in
+  match p land 0xffff with
+  | 0x20 -> ()                        (* EOI — 우선순위 모델이 없다 *)
+  | 0x21 -> t.pic_mask <- v
+  | 0x40 ->
+    (match t.pit0_access with
+     | 1 -> t.pit0_divisor <- (t.pit0_divisor land 0xff00) lor v
+     | 2 -> t.pit0_divisor <- (t.pit0_divisor land 0x00ff) lor (v lsl 8)
+     | _ ->
+       if t.pit0_write_hi then begin
+         t.pit0_divisor <- (t.pit0_divisor land 0x00ff) lor (v lsl 8);
+         t.pit0_write_hi <- false
+       end else begin
+         t.pit0_divisor <- (t.pit0_divisor land 0xff00) lor v;
+         t.pit0_write_hi <- true
+       end)
+  | 0x43 ->
+    (* 제어 워드: bit7-6 채널, bit5-4 접근 모드(0=래치). 채널 0 만
+       센다 — 채널 1(리프레시)·2(스피커)는 소리를 안 내므로 무시한다. *)
+    if v lsr 6 = 0 then begin
+      let access = (v lsr 4) land 3 in
+      if access = 0 then t.pit0_latched <- Some (pit0_count t)
+      else begin
+        t.pit0_access <- access;
+        t.pit0_write_hi <- false;
+        t.pit0_read_hi <- false;
+        t.pit0_latched <- None
+      end
+    end
+  | 0x61 -> t.port_b <- v
+  | 0x70 -> t.cmos_index <- v
+  | 0x3C6 -> t.dac_mask <- v
+  | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
+  | 0x3C8 -> t.dac_write_index <- v; t.dac_phase <- 0
+  | 0x3C9 ->
+    let i = t.dac_write_index land 0xff in
+    let r, g, b = t.pal.(i) in
+    let c = v land 0x3f in
+    t.pal.(i) <-
+      (match t.dac_phase with
+       | 0 -> (c, g, b)
+       | 1 -> (r, c, b)
+       | _ -> (r, g, c));
+    t.dac_phase <- t.dac_phase + 1;
+    if t.dac_phase > 2 then begin
+      t.dac_phase <- 0;
+      t.dac_write_index <- (i + 1) land 0xff
+    end
+  | 0x3B4 | 0x3D4 -> t.crtc_index <- v
+  | 0x3B5 | 0x3D5 ->
+    if t.crtc_index < crtc_regs then begin
+      t.crtc.(t.crtc_index) <- v;
+      if t.crtc_index = 0x0E || t.crtc_index = 0x0F then sync_cursor_to_bda t;
+      (* 커서 모양(시작·끝 스캔라인)도 BIOS 가 BDA 에 둔다 *)
+      if t.crtc_index = 0x0A then Bytes.set t.mem 0x461 (Char.chr v);
+      if t.crtc_index = 0x0B then Bytes.set t.mem 0x460 (Char.chr v)
+    end
+  | 0x3D8 -> t.mode_control <- v
+  | 0x3D9 -> t.color_select <- v
+  | _ -> ()
