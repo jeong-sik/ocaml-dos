@@ -6,7 +6,6 @@
    같은 키를 같은 순서로 넣으면 같은 화면이 나온다. *)
 
 let vram_base = 0xB8000
-let cols = 80
 let rows = 25
 
 (* 4.77MHz — IBM PC 의 CPU 클럭. 사이클을 초로 바꾸는 유일한 환산비다. *)
@@ -34,7 +33,7 @@ type t = {
   ports : Dos_ports.t;
   mutable exited : bool;
   mutable exit_code : int;
-  mutable vmode : int;                        (** 3=텍스트, 0x13=VGA 선형 *)
+  video : Dos_video.t;
   host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
   handles : (int, handle) Hashtbl.t;
   mutable next_handle : int;
@@ -60,6 +59,10 @@ type t = {
 }
 
 (* ---------- 메모리 ---------- *)
+
+(* 화면의 열 수는 모드가 정한다 — 40 열 화면을 80 으로 계산하면 커서와
+   스크롤이 한 줄씩 어긋난다. *)
+let cols t = max 1 (Dos_video.text_cols t.video)
 
 let rd8 t a = Char.code (Bytes.get t.mem (a land 0xfffff))
 let wr8 t a v = Bytes.set t.mem (a land 0xfffff) (Char.chr (v land 0xff))
@@ -140,19 +143,20 @@ let day_of_week (y, m, d) =
 let get_cursor t = (rd8 t 0x450, rd8 t 0x451)   (* (열, 행) *)
 
 let set_cursor t col row =
-  let col = max 0 (min (cols - 1) col) and row = max 0 (min (rows - 1) row) in
+  let w = cols t in
+  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows - 1) row) in
   wr8 t 0x450 col;
   wr8 t 0x451 row;
-  let linear = (row * cols) + col in
+  let linear = (row * w) + col in
   Dos_ports.port_out t.ports 0x3D4 0x0E;
   Dos_ports.port_out t.ports 0x3D5 (linear lsr 8);
   Dos_ports.port_out t.ports 0x3D4 0x0F;
   Dos_ports.port_out t.ports 0x3D5 (linear land 0xff)
 
-let cell_addr r c = vram_base + (((r * cols) + c) * 2)
+let cell_addr t r c = vram_base + (((r * cols t) + c) * 2)
 
-let read_cell t r c = rd16 t (cell_addr r c)
-let write_cell t r c v = wr16 t (cell_addr r c) v
+let read_cell t r c = rd16 t (cell_addr t r c)
+let write_cell t r c v = wr16 t (cell_addr t r c) v
 
 (* 창 스크롤 — INT 10h AH=06/07 과 teletype 의 줄 넘침이 함께 쓴다.
    [lines]=0 은 창 전체를 지운다. *)
@@ -184,15 +188,15 @@ let put_char t ch attr =
    | 0x0D -> col := 0
    | 0x0A -> incr row
    | 0x08 -> if !col > 0 then decr col
-   | 0x09 -> col := min (cols - 1) ((!col + 8) / 8 * 8)
+   | 0x09 -> col := min (cols t - 1) ((!col + 8) / 8 * 8)
    | 0x07 -> ()                       (* 벨 — 소리는 내지 않는다 *)
    | _ ->
      write_cell t !row !col ((attr lsl 8) lor (ch land 0xff));
      incr col;
-     if !col >= cols then begin col := 0; incr row end);
+     if !col >= cols t then begin col := 0; incr row end);
   if !row >= rows then begin
     scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows - 1)
-      ~right:(cols - 1) ~attr;
+      ~right:(cols t - 1) ~attr;
     row := rows - 1
   end;
   set_cursor t !col !row

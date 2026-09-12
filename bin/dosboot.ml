@@ -20,6 +20,30 @@ let hello_com () =
       "\xcd\x21";        (* int 21h *)
       "Hello, DOS!\000" ]
 
+(* EGA 16색 데모: 모드 0Dh 를 세우고 320x200 을 스무 칸짜리 색 띠
+   열여섯으로 채운다. 픽셀마다 INT 10h AH=0Ch 을 부르므로 명령이 오십만
+   개 넘게 든다 — `--steps 2000000` 쯤 줘야 끝까지 간다. *)
+let ega_com () =
+  String.concat ""
+    [ "\xb8\x0d\x00";      (* mov ax,000Dh *)
+      "\xcd\x10";           (* int 10h *)
+      "\x31\xd2";           (* xor dx,dx        — y *)
+      "\x31\xc9";           (* xor cx,cx        — x *)
+      "\x89\xc8";           (* mov ax,cx *)
+      "\xb3\x14";           (* mov bl,20 *)
+      "\xf6\xf3";           (* div bl           — al = x/20 = 색 *)
+      "\xb4\x0c";           (* mov ah,0Ch *)
+      "\xb7\x00";           (* mov bh,0 *)
+      "\xcd\x10";           (* int 10h *)
+      "\x41";                 (* inc cx *)
+      "\x81\xf9\x40\x01";  (* cmp cx,320 *)
+      "\x72\xed";           (* jb  x 루프 *)
+      "\x42";                 (* inc dx *)
+      "\x81\xfa\xc8\x00";  (* cmp dx,200 *)
+      "\x72\xe4";           (* jb  y 루프 *)
+      "\xb8\x00\x4c";      (* mov ax,4C00h *)
+      "\xcd\x21" ]           (* int 21h *)
+
 let read_file path =
   let ic = open_in_bin path in
   let s = really_input_string ic (in_channel_length ic) in
@@ -70,7 +94,9 @@ let () =
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
-      ("--demo", Arg.Set_string demo, "NAME  내장 데모 (hello)");
+      ("--demo", Arg.Set_string demo,
+       "NAME  내장 데모 — hello(텍스트) 또는 ega(모드 0Dh 색 띠, \
+        --steps 2000000 필요)");
       ("--mount", Arg.String (fun m -> mounts := m :: !mounts),
        "NAME=PATH  게스트에 파일 마운트 (INT 21h open 대상)");
       ("--save", Arg.String (fun m -> saves := m :: !saves),
@@ -114,10 +140,11 @@ let () =
       | None -> ())
     (List.rev !mounts);
   if !demo = "hello" then Dos_machine.load_com m (hello_com ())
+  else if !demo = "ega" then Dos_machine.load_com m (ega_com ())
   else if !com <> "" then Dos_machine.load_com m (read_file !com)
   else if !exe <> "" then Dos_machine.load_exe m (read_file !exe)
   else begin
-    prerr_endline "need --demo hello or --com PATH or --exe PATH";
+    prerr_endline "need --demo hello|ega or --com PATH or --exe PATH";
     exit 2
   end;
   String.iter (fun c -> Dos_machine.push_ascii m c) !typed;
@@ -146,6 +173,8 @@ let () =
           ~keys:(parse_keys !keys))
    with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
   let c = Dos_machine.cpu_of m in
+  let fw, fh = Dos_machine.frame_dims m in
+  Printf.printf "mode=%02xh frame=%dx%d\n%!" (Dos_machine.video_mode m) fw fh;
   Printf.printf "exited=%b code=%d halted=%b cs=%04x ip=%04x ticks=%d\n%!"
     (Dos_machine.exited m) (Dos_machine.exit_code m) (Dos_machine.halted m)
     (Cpu86.seg c 1) (Cpu86.dump_ip c) (Dos_machine.tick_count m);

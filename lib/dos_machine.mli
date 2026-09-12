@@ -109,6 +109,11 @@ val screen_text_utf8 : t -> string
 val frame_rgb : t -> string
 val frame_ppm : t -> string
 val video_mode : t -> int
+(** 지금 세워진 BIOS 비디오 모드 번호. *)
+
+val pixel : t -> x:int -> y:int -> int
+(** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는
+    0-255. 텍스트 모드에서는 늘 0 이다. *)
 
 (** {1 관측} *)
 

@@ -59,7 +59,7 @@ let install t =
   wr16 t 0x480 ring_lo;             (* 키 버퍼 시작 *)
   wr16 t 0x482 (ring_hi + 2);       (* 키 버퍼 끝 *)
   wr8 t 0x449 3;                    (* 비디오 모드 3 *)
-  wr16 t 0x44A cols;
+  wr16 t 0x44A (cols t);
   wr16 t 0x44C 0x1000;              (* 페이지 크기(바이트) 4KB *)
   wr16 t 0x44E 0;                   (* 페이지 시작 오프셋 *)
   wr16 t 0x463 0x3D4;               (* CRTC 어드레스 포트(컬러) *)
@@ -106,26 +106,18 @@ let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
 
-let clear_screen t attr =
-  scroll_window t ~up:true ~lines:0 ~top:0 ~left:0 ~bottom:(rows - 1)
-    ~right:(cols - 1) ~attr;
-  set_cursor t 0 0
-
 let video t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 and al = Cpu86.reg8 cpu 0 in
   match ah with
   | 0x00 ->
+    (* AL 의 최상위 비트는 "화면을 지우지 말라" 는 뜻이다. *)
     let mode = al land 0x7f in
-    if mode = 0x13 then begin
-      t.vmode <- 0x13;
-      Bytes.fill t.mem 0xA0000 (320 * 200) '\000'
-    end
-    else begin
-      t.vmode <- mode;
-      if al land 0x80 = 0 then clear_screen t 0x07
-    end;
-    wr8 t 0x449 mode
+    Dos_video.set_mode t.video mode ~clear:(al land 0x80 = 0);
+    wr8 t 0x449 mode;
+    wr16 t 0x44A (cols t);
+    wr8 t 0x484 (rows - 1);
+    set_cursor t 0 0
   | 0x01 ->
     (* 커서 모양: CH=시작 스캔라인, CL=끝 *)
     Dos_ports.port_out t.ports 0x3D4 0x0A;
@@ -162,17 +154,42 @@ let video t =
         in
         write_cell t !r !c ((attr lsl 8) lor al);
         incr c;
-        if !c >= cols then begin c := 0; incr r end
+        if !c >= cols t then begin c := 0; incr r end
       end
     done
   | 0x0E -> put_char t al (Cpu86.reg8 cpu 3 land 0x0f)
+  | 0x0C ->
+    (* 점 찍기: AL=색, CX=x, DX=y. BH 페이지는 한 장뿐이라 무시한다. *)
+    Dos_video.put_pixel t.video ~x:(Cpu86.reg16 cpu 1) ~y:(Cpu86.reg16 cpu 2)
+      ~color:al
+  | 0x0D ->
+    Cpu86.set_reg8 cpu 0
+      (Dos_video.get_pixel t.video ~x:(Cpu86.reg16 cpu 1)
+         ~y:(Cpu86.reg16 cpu 2))
   | 0x0F ->
-    Cpu86.set_reg8 cpu 0 t.vmode;
-    Cpu86.set_reg8 cpu 4 cols;
+    Cpu86.set_reg8 cpu 0 (Dos_video.mode t.video);
+    Cpu86.set_reg8 cpu 4 (cols t);
     Cpu86.set_reg8 cpu 7 (rd8 t 0x462)
   | 0x10 ->
     let pal = Dos_ports.palette t.ports in
     (match al with
+     | 0x00 ->
+       (* 색 번호 하나를 DAC 자리로: BL=색 번호, BH=DAC 자리 *)
+       Dos_video.set_attr_palette t.video (Cpu86.reg8 cpu 3)
+         (Cpu86.reg8 cpu 7)
+     | 0x02 ->
+       (* 열여섯 색 + 테두리를 한 번에: ES:DX 가 17 바이트 *)
+       let src = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 2 in
+       for i = 0 to 16 do
+         Dos_video.set_attr_palette t.video i (rd8 t (src + i))
+       done
+     | 0x07 ->
+       Cpu86.set_reg8 cpu 7
+         (Dos_video.attr_palette t.video).(Cpu86.reg8 cpu 3 land 0x1f)
+     | 0x09 ->
+       let dst = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 2 in
+       let attr = Dos_video.attr_palette t.video in
+       for i = 0 to 16 do wr8 t (dst + i) attr.(i) done
      | 0x10 ->
        (* 한 색: BX=번호, DH=R CH=G CL=B *)
        let idx = Cpu86.reg16 cpu 3 land 0xff in
