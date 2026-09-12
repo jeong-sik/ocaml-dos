@@ -233,7 +233,7 @@ let console_read t =
     Some (pop_key t)
   end
   else begin
-    t.kbd_wait <- true;
+    starve t;
     None
   end
 
@@ -319,7 +319,7 @@ let rec service t =
     if !n < limit then wr8 t (base + 1) !n
   | 0x0B ->
     Cpu86.set_reg8 cpu 0 (if key_pending t then 0xFF else 0x00);
-    if not (key_pending t) then t.kbd_wait <- true
+    if not (key_pending t) then starve t
   | 0x0C ->
     (* 버퍼를 비운 뒤 AL 이 가리키는 입력 기능을 실제로 부른다. 비우기만
        하고 끝내면 게스트는 오지 않을 글자를 기다린다. AL 이 입력 기능이

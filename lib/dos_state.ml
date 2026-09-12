@@ -41,6 +41,7 @@ type t = {
   mutable dta : int;                          (** 전송 주소(물리) *)
   mutable psp_seg : int;
   mutable kbd_wait : bool;                    (** 키를 기다리다 굶었다 *)
+  mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
   mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable pending_irq0 : bool;                (** IF 가 꺼져 못 넣은 틱 *)
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
@@ -263,5 +264,13 @@ let deliver_ivt t v =
     true
   end
   else false
+
+(* 게스트가 키를 물었는데 링이 비어 있었다. 래치는 읽기가 성공해야
+   내려가므로 "지금 기다리는가" 만 알려주고 "몇 번 물었는가" 는 못
+   알려준다 — 한 구간 안에서 물었다가 받아간 것을 보려면 계수가 있어야
+   한다. *)
+let starve t =
+  t.kbd_wait <- true;
+  t.kbd_requests <- t.kbd_requests + 1
 
 let interrupts_enabled t = Cpu86.flags t.cpu land Cpu86.f_interrupt <> 0

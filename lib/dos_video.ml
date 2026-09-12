@@ -281,6 +281,28 @@ let put_pixel t ~x ~y ~color =
     let w, _ = dims t in
     Bytes.set t.mem (planar_base + (y * w) + x) (Char.chr (color land 0xff))
 
+(* 지금 모드가 실제로 그리는 메모리의 지문. 화면이 멈췄는지 보는 데
+   쓴다 — 픽셀을 다 만들어 비교하는 것보다 훨씬 싸고, 모드마다 어느
+   메모리가 화면인지는 여기만 안다. 충돌해도 손해는 "안 변했다고 잘못
+   읽는" 것뿐이라 64비트가 필요 없다. *)
+let digest_step h b = ((h * 31) + b) land 0x3FFFFFFFFFFFFFF
+
+let screen_digest t =
+  let h = ref 0 in
+  let over bytes base len =
+    for i = 0 to len - 1 do
+      h := digest_step !h (Char.code (Bytes.get bytes (base + i)))
+    done
+  in
+  (match spec t.mode with
+   | Text, _, _, cols -> over t.mem cga_base (cols * 25 * 2)
+   | (Cga4 | Cga2), _, _, _ -> over t.mem cga_base 0x4000
+   | Planar, w, ht, _ ->
+     let len = min plane_size (w / 8 * ht) in
+     Array.iter (fun p -> over p 0 len) t.planes
+   | Linear256, w, ht, _ -> over t.mem planar_base (w * ht));
+  !h
+
 let get_pixel t ~x ~y =
   match kind t with
   | Text -> 0
