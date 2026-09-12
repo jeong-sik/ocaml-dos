@@ -11,6 +11,7 @@ let make () =
   Cpu86.create ~read ~write
     ~port_in:(fun _ -> 0xff)
     ~port_out:(fun _ _ -> ())
+    ()
 
 (* CS:0 에 코드를 심고 IP 를 0 에서 시작. 한 명령씩 밀며 검사. *)
 let run_from code =
@@ -113,12 +114,17 @@ let () =
   let t = run_from "\xf4" in
   ignore (Cpu86.step t);
   checkb "hlt sets halted" (Cpu86.halted t) true;
-  (* 미구현 opcode 는 예외 (0x9B wait — M1 이후의 명령) *)
+  (* wait 는 8087 이 없는 기계에선 그냥 지나간다 — 예외가 아니다 *)
+  let t = run_from "\x9b\xb8\x34\x12" in
+  ignore (Cpu86.step t);
+  ignore (Cpu86.step t);
+  check "wait falls through" (Cpu86.reg16 t 0) 0x1234;
+  (* 아직 아무도 구현하지 않은 opcode 는 예외로 죽는다 (0xF1) *)
   (try
-     let t = run_from "\x9b" in
+     let t = run_from "\xf1" in
      ignore (Cpu86.step t);
      incr failed;
-     Printf.eprintf "FAIL unsupported wait: no exception\n%!"
+     Printf.eprintf "FAIL unsupported 0xf1: no exception\n%!"
    with Cpu86.Unsupported _ -> ());
   if !failed = 0 then print_endline "cpu86 M0: all passed"
   else begin

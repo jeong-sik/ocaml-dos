@@ -7,7 +7,7 @@ let read a = Char.code (Bytes.get mem (a land 0xfffff))
 let write a v = Bytes.set mem (a land 0xfffff) (Char.chr (v land 0xff))
 
 let make () =
-  Cpu86.create ~read ~write ~port_in:(fun _ -> 0xff) ~port_out:(fun _ _ -> ())
+  Cpu86.create ~read ~write ~port_in:(fun _ -> 0xff) ~port_out:(fun _ _ -> ()) ()
 
 let run_from code =
   String.iteri (fun i c -> Bytes.set mem i c) code;
@@ -22,6 +22,15 @@ let check name got want =
   if got <> want then begin
     incr failed;
     Printf.eprintf "FAIL %s: got %d want %d\n%!" name got want
+  end
+
+let check_list name got want =
+  if got <> want then begin
+    incr failed;
+    let show l =
+      String.concat "; " (List.map (fun (a, b) -> Printf.sprintf "(%x,%x)" a b) l)
+    in
+    Printf.eprintf "FAIL %s: got [%s] want [%s]\n%!" name (show got) (show want)
   end
 
 let checkb name got want =
@@ -169,6 +178,76 @@ let () =
   Bytes.set mem 0x105 '\x99';
   steps t 1;
   check "xlat" (Cpu86.reg8 t 0) 0x99;
+  (* --- 186 확장: popa / enter / bound / salc / 포트 워드 --- *)
+  (* pusha 로 여덟 레지스터를 밀고, 값을 뒤섞은 뒤 popa 로 되돌린다.
+     레지스터를 하나라도 빠뜨리거나 순서를 틀리면 여기서 드러난다. *)
+  let t = run_from "\x60\x61\xf4" in
+  Cpu86.set_seg t 2 0;
+  Cpu86.set_reg16 t 4 0x0800;
+  let seed = [| 0x1111; 0x2222; 0x3333; 0x4444; 0x0800; 0x6666; 0x7777; 0x8888 |] in
+  Array.iteri (fun i v -> if i <> 4 then Cpu86.set_reg16 t i v) seed;
+  steps t 1;                                  (* pusha *)
+  Array.iteri (fun i _ -> if i <> 4 then Cpu86.set_reg16 t i 0xDEAD) seed;
+  steps t 1;                                  (* popa *)
+  Array.iteri
+    (fun i v ->
+      if i <> 4 then
+        check (Printf.sprintf "popa 레지스터 %d" i) (Cpu86.reg16 t i) v)
+    seed;
+  check "popa 뒤 SP" (Cpu86.reg16 t 4) 0x0800;
+  (* enter 0x10,0 : BP 는 프레임 바닥, SP 는 그보다 0x10 아래 *)
+  let t = run_from "\xc8\x10\x00\x00\xf4" in
+  Cpu86.set_seg t 2 0;
+  Cpu86.set_reg16 t 4 0x0800;
+  Cpu86.set_reg16 t 5 0x0123;
+  steps t 1;
+  check "enter 가 BP 를 프레임에 둔다" (Cpu86.reg16 t 5) 0x07FE;
+  check "enter 가 지역변수 자리를 잡는다" (Cpu86.reg16 t 4) 0x07EE;
+  check "enter 가 옛 BP 를 밀었다" (read 0x7FE lor (read 0x7FF lsl 8)) 0x0123;
+  (* leave 가 되돌린다 *)
+  let t = run_from "\xc8\x10\x00\x00\xc9\xf4" in
+  Cpu86.set_seg t 2 0;
+  Cpu86.set_reg16 t 4 0x0800;
+  Cpu86.set_reg16 t 5 0x0123;
+  steps t 2;
+  check "leave 가 SP 를 되돌린다" (Cpu86.reg16 t 4) 0x0800;
+  check "leave 가 BP 를 되돌린다" (Cpu86.reg16 t 5) 0x0123;
+  (* bound: 범위 안이면 지나가고, 밖이면 INT 5 훅이 불린다 *)
+  let fired = ref (-1) in
+  let t = run_from "\x62\x06\x00\x02\xf4" in  (* bound ax,[0200] *)
+  Cpu86.set_int_hook t (fun n -> fired := n);
+  Cpu86.set_seg t 3 0;
+  Bytes.set mem 0x200 '\x0a'; Bytes.set mem 0x201 '\x00';
+  Bytes.set mem 0x202 '\x14'; Bytes.set mem 0x203 '\x00';
+  Cpu86.set_reg16 t 0 12;
+  steps t 1;
+  check "bound 범위 안" !fired (-1);
+  let t = run_from "\x62\x06\x00\x02\xf4" in
+  Cpu86.set_int_hook t (fun n -> fired := n);
+  Cpu86.set_seg t 3 0;
+  Cpu86.set_reg16 t 0 100;
+  steps t 1;
+  check "bound 범위 밖은 INT 5" !fired 5;
+  (* salc: CF 를 AL 전체로 편다 *)
+  let t = run_from "\xf9\xd6\xf4" in         (* stc; salc *)
+  steps t 2;
+  check "salc CF=1" (Cpu86.reg8 t 0) 0xFF;
+  let t = run_from "\xf8\xd6\xf4" in         (* clc; salc *)
+  steps t 2;
+  check "salc CF=0" (Cpu86.reg8 t 0) 0x00;
+  (* 워드 포트 출력은 바이트 두 번 — 포트 번호가 하나 늘어난다 *)
+  let seen = ref [] in
+  let t =
+    let tt =
+      Cpu86.create ~read ~write ~port_in:(fun _ -> 0xff)
+        ~port_out:(fun p v -> seen := (p, v) :: !seen) ()
+    in
+    String.iteri (fun i c -> Bytes.set mem i c) "\xba\x40\x00\xef\xf4";
+    Cpu86.set_seg tt 1 0; Cpu86.set_ip tt 0; tt
+  in
+  Cpu86.set_reg16 t 0 0xBEEF;
+  steps t 2;
+  check_list "워드 OUT 은 포트 두 개" (List.rev !seen) [ (0x40, 0xEF); (0x41, 0xBE) ];
   if !failed = 0 then print_endline "cpu86 M1: all passed"
   else begin
     Printf.eprintf "cpu86 M1: %d failures\n%!" !failed;

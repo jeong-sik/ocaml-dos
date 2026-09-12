@@ -1,69 +1,134 @@
-(** DOS 머신 (M2a) — 8086 + 1MB RAM + 텍스트 비디오 + INT 표면 + COM 로더.
+(** DOS 기계 — 8086/186 코어 + 1MB RAM + 장치 포트 + BIOS/DOS 인터럽트
+    표면 + COM/MZ-EXE 로더.
 
-    Cpu86 을 감싸고 DOS 관점의 최소 기계를 제공한다: INT 10h 텔레타입,
-    INT 21h 종료·출력, INT 16h 키보드(하네스가 큐에 넣는 논블로킹 입력),
-    0xB8000 텍스트 VRAM(80x25, 글자+속성), COM 이미지 적재(PSP 포함).
+    이 모듈은 바깥에 보이는 얼굴이다. 상태는 [Dos_state], 포트는
+    [Dos_ports], BIOS 는 [Dos_bios], DOS 는 [Dos_dos] 가 맡는다.
 
-    결정론: 같은 이미지 + 같은 키 입력 순서 = 같은 실행. 그래픽(VGA
-    13h), MZ EXE, 파일 표면(INT 21h 핸들)은 M2b. *)
+    결정론: 같은 이미지에 같은 키를 같은 순서로 넣으면 같은 화면이
+    나온다. 시각도 난수도 호스트에서 오지 않는다 — 날짜·시각은
+    [set_clock] 이 정한 기준시각에 CPU 사이클로 환산한 경과를 더해
+    만들고, 타이머 틱도 사이클에서 나온다.
 
-type t
+    파일 계약: 하네스가 마운트한 것만 보인다. 게스트가 쓴 내용은 파일을
+    닫을 때 마운트 표로 돌아가므로 같은 세션 안에서 저장하고 다시 열 수
+    있다. 호스트 디스크에는 나가지 않는다. *)
+
+type t = Dos_state.t
 
 val create : unit -> t
 
+(** {1 적재} *)
+
 val load_com : t -> string -> unit
-(** COM 이미지를 0x100 에 적재하고 PSP 를 심는다: 0x00 에 INT 20h(CD 20),
-    0x80 에 커맨드라인 길이 0. CS=DS=ES=SS=0, IP=0x100, SP=0xFFFE,
-    스택 top 에 0x0000 — 프로그램이 RET 으로 돌아오면 PSP 의 INT 20h
-    로 종료되는 실기 관례를 그대로 둔다. *)
+(** COM 이미지를 PSP 세그먼트 0x1000 의 0x100 에 싣는다. CS=DS=ES=SS=PSP,
+    IP=0x100, SP=0xFFFE, 스택 맨 위는 0 — RET 으로 돌아오면 PSP 의
+    INT 20h 로 끝나는 실기 관례 그대로다. *)
 
 val load_exe : t -> string -> unit
-(** MZ EXE 이미지를 로드한다: 헤더 paras 를 건너뛴 이미지를 로드
-    세그먼트(0x1000 기준)에 놓고 재배치 워드에 로드 세그먼트를 더한다.
-    CS:IP/SS:SP 는 헤더값 + 로드 세그먼트. PSP 의 INT 20h 도 심는다. *)
+(** MZ EXE 를 싣는다. 재배치 워드에 로드 세그먼트를 더하고 CS:IP/SS:SP
+    를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
+    MZ 서명이 아니면 [Invalid_argument]. *)
 
 val mount_file : t -> string -> string -> unit
-(** 하네스가 게임 데이터 파일을 마운트한다 — INT 21h AH=3Dh open 이
-    이 이름(대소문자 무시)으로 찾는다. 파일 시스템은 마운트된 것만
-    보이는 하네스 계약 (호스트 경로 접근 없음). *)
+(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)
 
-val frame_dims : t -> int * int
-(** 현재 비디오 모드의 프레임 크기 — 텍스트 640x400, VGA 13h 320x200. *)
+val read_mounted : t -> string -> string option
+(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다. *)
+
+val mounted_names : t -> string list
+
+(** {1 실행} *)
 
 val step : t -> int
-(** 한 명령. 종료 후(int 21h AH=4Ch)에도 무해하게 2 를 돌려준다. *)
+(** 한 명령. 타이머 틱이 찼고 인터럽트가 열려 있으면 그 전에 IRQ0 을
+    넣는다. 종료 후에는 무해하게 2 를 돌려준다. *)
 
 val run : t -> max_steps:int -> unit
-(** 종료·HALT·[max_steps] 까지 실행. Cpu86.Unsupported 는 그대로
-    올려보낸다 — 하네스가 다음 구현 우선순위를 읽는다. *)
+(** 종료·HLT·[max_steps] 중 먼저 오는 것까지. HLT 에서 멈추므로
+    타이머로 깨어나는 대기 루프를 계속 돌리려면 [run_until] 을 쓴다. *)
+
+val run_until : t -> max_steps:int -> stop:(t -> bool) -> int
+(** 종료·[stop]·[max_steps] 까지 돌리고 실행한 명령 수를 돌려준다.
+    HLT 는 멈춤 조건이 아니다 — 타이머 인터럽트가 깨운다. *)
+
+type key_plan = { word : int; not_before : int }
+(** [word] 는 (스캔 코드 lsl 8) lor ASCII. [not_before] 이전 스텝에는
+    넣지 않는다. *)
+
+val run_with_keys :
+  ?on_step:(t -> int -> unit) ->
+  ?on_key:(int -> int -> unit) ->
+  t -> max_steps:int -> keys:key_plan list -> int
+(** 키를 미리 다 밀어 넣지 않고, 게스트가 입력을 기다리다 굶는 순간
+    하나씩 넣는다. 미리 넣으면 앞선 메뉴의 "아무 키나" 루프가 전부 먹어
+    치운다. 어떤 상태가 된 다음에 넣어야 하는 키는 [not_before] 로
+    묶는다. 실행한 명령 수를 돌려준다.
+
+    [on_step] 은 명령마다, [on_key] 는 키를 넣을 때마다 불린다 — 추적
+    출력을 붙이는 자리다. *)
 
 val exited : t -> bool
-(** INT 21h AH=4Ch (또는 PSP 의 INT 20h) 를 만났다. *)
-
 val exit_code : t -> int
 
 val halted : t -> bool
-(** CPU HLT — 인터럽트 대기 중. 종료와 다르다. *)
+(** CPU 가 HLT 로 인터럽트를 기다린다. 종료와 다르다. *)
 
-val screen_text : t -> string
-(** 텍스트 VRAM 80x25 를 개행 포함 문자 그리드로 — 판정용. *)
-
-val frame_rgb : t -> string
-(** 텍스트 화면 640x400x3 RGB — 8x8 글리프 스케일업, CGA 16색 속성. *)
+(** {1 입력} *)
 
 val push_key : t -> int -> unit
-(** BIOS 스캔 코드 큐에 넣는다(하네스 입력). INT 16h 가 소비한다. *)
+(** BIOS 키 링에 워드 하나. INT 16h 와 INT 21h 입력이 같은 링을 본다. *)
+
+val push_ascii : t -> char -> unit
+(** ASCII 한 글자 — US 자판 스캔 코드를 붙인다. 방향키처럼 글자가 아닌
+    키는 [push_key] 로 워드를 직접 넣는다. *)
+
+val type_string : t -> string -> unit
+
+val kbd_waiting : t -> bool
+(** 직전 입력 요청이 빈 링으로 돌아갔다 — 실기라면 지금 블록 중이다.
+    하네스가 이걸 보고 키를 넣는다. *)
+
+val attach_mouse : t -> unit
+(** INT 33h 에 마우스가 있다고 답하게 한다. 기본은 미장착 — 없는 장치를
+    있다고 하면 게임이 오지 않을 커서를 기다린다. *)
+
+val set_mouse : t -> x:int -> y:int -> buttons:int -> unit
+
+(** {1 화면} *)
+
+val frame_dims : t -> int * int
+(** 텍스트 640x400, VGA 13h 320x200. *)
+
+val screen_text : t -> string
+(** 80x25 를 개행 포함 ASCII 로 — 사람이 눈으로 훑기 좋다. *)
+
+val screen_text_utf8 : t -> string
+(** 같은 화면을 코드 페이지 437 그대로 UTF-8 로 — 테두리와 기호가
+    살아 있어 기계 판정에 쓴다. *)
+
+val frame_rgb : t -> string
+val frame_ppm : t -> string
+val video_mode : t -> int
+
+(** {1 관측} *)
 
 val cpu_of : t -> Cpu86.t
-(** 내부 CPU — 하네스 진단(위치 덤프)용 읽기 전용 접근. *)
-
-(** load_exe/load_com 이 정한 PSP 세그먼트 — 기본 DTA 는 PSP:0x80 *)
 val psp_seg_of : t -> int
 
-(** 직전 INT 16h AH=00 이 빈 링으로 즉시 복귀했는가 — 실기라면 블록 중.
-    하네스(자동 투입기)가 이걸 보고 키를 넣는다. AH=01 폴링엔 반응하지
-    않는다(게임 플레이 중 정상 상태라 키를 함부로 넣으면 안 된다). *)
-val kbd_waiting : t -> bool
-
 val mem_read : t -> int -> int
-(** 물리 주소 1바이트 — 디버깅용. *)
+(** 물리 주소 한 바이트. *)
+
+val tick_count : t -> int
+(** BIOS 타이머 틱(0x40:0x6C). 18.2Hz 가 기본이고 게스트가 PIT 분주비를
+    바꾸면 그만큼 빨라진다. *)
+
+val speaker_on : t -> bool
+(** 스피커의 게이트와 데이터가 둘 다 열렸다. 소리는 내지 않는다. *)
+
+val free_paras : t -> int
+(** INT 21h AH=48h 이 지금 줄 수 있는 가장 큰 덩어리. *)
+
+val set_clock :
+  t -> year:int -> month:int -> day:int -> hour:int -> minute:int ->
+  second:int -> unit
+(** 게스트가 보는 기준시각. 기본은 1990-01-01 08:00:00. *)

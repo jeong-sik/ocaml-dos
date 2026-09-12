@@ -16,6 +16,14 @@
     [Unsupported] 예외로 죽는 게 조용한 오동작보다 낫다 (Silent
     Failure 방지). INT 10h/21h 표면 구현은 Dos 머신 모듈이 소유한다. *)
 
+(** 흉내낼 실리콘 세대. 8086 과 80186 은 같은 opcode 자리에 다른 명령을
+    놓았다 — 0x60-0x6F(8086: jcc 거울 / 186: pusha·push imm·bound·ins),
+    0xC0/0xC1·0xC8/0xC9(8086: ret/retf 거울 / 186: shift imm·enter·leave),
+    그룹2 의 reg=6(8086: SETMO / 186: shl). 실칩 검증 스위트는 [I8086],
+    1990년대 DOS 게임은 [I80186] 로 돌린다(그 시절 기계가 286 이상이었고
+    Borland 컴파일러가 186 명령을 낸다). *)
+type model = I8086 | I80186
+
 exception Unsupported of string
 (** 아직 구현되지 않은 명령을 만났다. 메시지는 명령 위치와 opcode.
     하네스가 이 예외를 보면 그 게임이 필요로 하는 다음 명령을 안다 —
@@ -24,14 +32,17 @@ exception Unsupported of string
 type t
 
 val create :
+  ?model:model ->
   read:(int -> int) ->
   write:(int -> int -> unit) ->
   port_in:(int -> int) ->
   port_out:(int -> int -> unit) ->
+  unit ->
   t
 (** 콜백은 물리 주소(0..0xFFFFF)를 받는다. 포트는 16비트 I/O 공간.
     하네스는 빈 콜백(fun _ -> 0xFF / fun _ _ -> ())으로 시작해 장치를
-    붙여 나간다. *)
+    붙여 나간다. 포트는 바이트 폭이다 — 워드 I/O 는 p 와 p+1 로 두 번
+    부른다. [model] 기본값은 [I80186]. *)
 
 val step : t -> int
 (** 한 명령을 실행하고 그 명령의 클럭 사이클을 반환. 8086 명령당

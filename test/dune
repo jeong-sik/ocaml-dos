@@ -20,4 +20,13 @@
 
 (test
  (name cpu86_vtest)
+ (deps sst8086-baseline.txt)
  (libraries cpu86core unix yojson))
+
+(test
+ (name dos_surface_test)
+ (libraries dosmachine))
+
+(test
+ (name zzt_run_test)
+ (libraries dosmachine))
