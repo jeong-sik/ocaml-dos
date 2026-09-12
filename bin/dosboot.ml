@@ -23,13 +23,29 @@ let hello_com () =
             msg ]))
 
 let () =
-  let com = ref "" and demo = ref "" and steps = ref 100000 and out = ref "/tmp/dosboot" in
+  let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
+  and out = ref "/tmp/dosboot" and mounts = ref [] in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
+      ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
+      ("--mount", Arg.String (fun m -> mounts := m :: !mounts),
+       "NAME=PATH  게스트에 파일 마운트 (INT 21h open 대상)");
       ("--demo", Arg.Set_string demo, "NAME  내장 데모 (hello)");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 명령 수");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어") ]
     (fun _ -> ()) "dosboot — DOS COM 실행 하네스";
+  let m = Dos_machine.create () in
+  List.iter (fun spec ->
+      match String.index_opt spec '=' with
+      | Some i ->
+        let name = String.sub spec 0 i in
+        let path = String.sub spec (i + 1) (String.length spec - i - 1) in
+        let ic = open_in_bin path in
+        let data = really_input_string ic (in_channel_length ic) in
+        close_in ic;
+        Dos_machine.mount_file m name data
+      | None -> prerr_endline ("bad --mount " ^ spec ^ " (want NAME=PATH)"))
+    (List.rev !mounts);
   let image =
     if !demo = "hello" then hello_com ()
     else if !com <> "" then begin
@@ -40,8 +56,13 @@ let () =
       prerr_endline "need --demo hello or --com PATH"; exit 2
     end
   in
-  let m = Dos_machine.create () in
-  Dos_machine.load_com m image;
+  if !exe <> "" then begin
+    let ic = open_in_bin !exe in
+    let img = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    Dos_machine.load_exe m img
+  end
+  else Dos_machine.load_com m image;
   (try Dos_machine.run m ~max_steps:!steps
    with Cpu86.Unsupported msg ->
      Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
@@ -55,7 +76,8 @@ let () =
                          || Char.code rgb.[i+1] > 8 || Char.code rgb.[i+2] > 8)
       then incr nonblack) rgb;
   Printf.printf "nonblack=%d\n" !nonblack;
+  let w, h = Dos_machine.frame_dims m in
   let oc = open_out_bin (!out ^ ".ppm") in
-  Printf.fprintf oc "P6\n640 400\n255\n%s" rgb;
+  Printf.fprintf oc "P6\n%d %d\n255\n%s" w h rgb;
   close_out oc;
   Printf.printf "wrote %s.ppm\n" !out

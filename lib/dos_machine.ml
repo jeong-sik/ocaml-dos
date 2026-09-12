@@ -15,6 +15,8 @@ type t = {
   host_files : (string, Bytes.t) Hashtbl.t;  (** 하네스가 마운트한 파일 *)
   handles : (int, Bytes.t * int) Hashtbl.t;  (** 열린 핸들 → (내용, 위치) *)
   mutable next_handle : int;
+  fcbs : (int, Bytes.t * int) Hashtbl.t;  (** FCB 물리주소 → (내용, 위치) *)
+  mutable dta : int;  (** INT 21h AH=1Ah 가 고르는 전송 주소(물리) *)
 }
 
 let vram_base = 0xB8000
@@ -60,6 +62,25 @@ let read_asciiz_bytes mem cpu =
   done;
   Buffer.contents b
 
+(* FCB 의 8+3 이름을 "NAME.EXT" 로 — 스페이스는 잘라낸다. *)
+let fcb_name_of mem fcb =
+  let take n off =
+    let b = Buffer.create 12 in
+    for i = 0 to n - 1 do
+      let c = Char.code (Bytes.get mem (fcb + off + i)) in
+      if c <> 0x20 then Buffer.add_char b (Char.chr c)
+    done;
+    Buffer.contents b in
+  let base = take 8 1 and ext = take 3 9 in
+  if ext = "" then base else base ^ "." ^ ext
+
+let fcb_read16 mem a =
+  Char.code (Bytes.get mem a) lor (Char.code (Bytes.get mem (a + 1)) lsl 8)
+
+let fcb_write16 mem a v =
+  Bytes.set mem a (Char.chr (v land 0xff));
+  Bytes.set mem (a + 1) (Char.chr ((v lsr 8) land 0xff))
+
 (* 텍스트 한 글자 찍기 — INT 10h teletype 과 INT 21h AH=02 가 공유. *)
 let put_char t ch attr =
   if ch = 0x0D then t.cursor <- (t.cursor / cols) * cols
@@ -83,10 +104,15 @@ let create () =
   let t =
     { mem; cpu; cursor = 0; exited = false; exit_code = 0; keys = Queue.create ();
       vmode = 3; pal = Array.init 256 default_vga_pal;
-      host_files = Hashtbl.create 8; handles = Hashtbl.create 4; next_handle = 6 }
+      host_files = Hashtbl.create 8; handles = Hashtbl.create 4; next_handle = 6;
+      fcbs = Hashtbl.create 4; dta = 0x80 }
   in
   Cpu86.set_int_hook cpu (fun vec ->
       let ah = Cpu86.reg8 t.cpu 4 in
+      (try if Sys.getenv "DOSDBG" <> "" then
+         Printf.eprintf "INT %02x ah=%02x dx=%04x ds=%04x\n%!"
+           vec ah (Cpu86.reg16 t.cpu 2) (Cpu86.seg t.cpu 3)
+       with Not_found -> ());
       (match vec with
        | 0x10 ->
          (match ah with
@@ -118,6 +144,78 @@ let create () =
             t.exit_code <- Cpu86.reg8 t.cpu 0
           | 0x02 (* 문자 출력 *) ->
             put_char t (Cpu86.reg8 t.cpu 0) 0x07
+          | 0x0F (* FCB open: DS:DX = FCB *) ->
+            let fcb = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
+            let name = String.uppercase_ascii (fcb_name_of mem fcb) in
+            begin match Hashtbl.find_opt t.host_files name with
+              | Some data ->
+                Hashtbl.replace t.fcbs fcb (data, 0);
+                (* 파일 크기(@0x10 dword) 기록, 레코드 크기(@0x0E)=128,
+                   블록/레코드/랜덤은 0 으로. *)
+                fcb_write16 mem (fcb + 0x0E) 128;
+                fcb_write16 mem (fcb + 0x10) (Bytes.length data land 0xffff);
+                fcb_write16 mem (fcb + 0x12) ((Bytes.length data lsr 16) land 0xffff);
+                Bytes.set mem (fcb + 0x20) '\x00';
+                Bytes.set mem (fcb + 0x21) '\x00';
+                Bytes.set mem (fcb + 0x22) '\x00';
+                Bytes.set mem (fcb + 0x23) '\x00';
+                Cpu86.set_reg8 t.cpu 0 0
+              | None -> Cpu86.set_reg8 t.cpu 0 0xFF
+            end
+          | 0x10 (* FCB close *) ->
+            let fcb = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
+            Hashtbl.remove t.fcbs fcb;
+            Cpu86.set_reg8 t.cpu 0 0
+          | 0x14 (* FCB 순차 읽기: 한 레코드 → DTA *) ->
+            let fcb = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
+            let recsize = max 1 (fcb_read16 mem (fcb + 0x0E)) in
+            begin match Hashtbl.find_opt t.fcbs fcb with
+              | Some (data, pos) ->
+                let avail = Bytes.length data - pos in
+                if avail <= 0 then Cpu86.set_reg8 t.cpu 0 1  (* EOF *)
+                else begin
+                  let take = min recsize avail in
+                  Bytes.blit data pos mem t.dta take;
+                  Hashtbl.replace t.fcbs fcb (data, pos + take);
+                  (* 현재 레코드(+0x20) 진행 — 128 차면 블록(+0x0C) 증가 *)
+                  let recno = Char.code (Bytes.get mem (fcb + 0x20)) + 1 in
+                  if recno >= 128 then begin
+                    fcb_write16 mem (fcb + 0x0C)
+                      (fcb_read16 mem (fcb + 0x0C) + 1);
+                    Bytes.set mem (fcb + 0x20) '\x00'
+                  end
+                  else Bytes.set mem (fcb + 0x20) (Char.chr recno);
+                  Cpu86.set_reg8 t.cpu 0
+                    (if take < recsize then 1 else 0)  (* 1=부분 레코드(EOF 근처) *)
+                end
+              | None -> Cpu86.set_reg8 t.cpu 0 0xFF
+            end
+          | 0x21 (* FCB 랜덤 읽기: FCB+0x21 레코드 번호 1개 → DTA *) ->
+            let fcb = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
+            let recsize = max 1 (fcb_read16 mem (fcb + 0x0E)) in
+            let recno =
+              Char.code (Bytes.get mem (fcb + 0x21))
+              lor (Char.code (Bytes.get mem (fcb + 0x22)) lsl 8)
+              lor (Char.code (Bytes.get mem (fcb + 0x23)) lsl 16) in
+            begin match Hashtbl.find_opt t.fcbs fcb with
+              | Some (data, pos) ->
+                let start = pos in
+                let off = recno * recsize in
+                ignore start;
+                if off >= Bytes.length data then Cpu86.set_reg8 t.cpu 0 1
+                else begin
+                  let take = min recsize (Bytes.length data - off) in
+                  Bytes.blit data off mem t.dta take;
+                  Hashtbl.replace t.fcbs fcb (data, off + take);
+                  Cpu86.set_reg8 t.cpu 0
+                    (if take < recsize then 1 else 0)
+                end
+              | None -> Cpu86.set_reg8 t.cpu 0 0xFF
+            end
+          | 0x1A (* set DTA: DS:DX *) ->
+            t.dta <- (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2
+          | 0x24 (* FCB 레코드 크기 설정: FCB+0x0E 를 이미 쓴 값으로 확정 *) ->
+            Cpu86.set_reg8 t.cpu 0 0
           | 0x3D (* open: DS:DX ASCIIZ *) ->
             let name = String.uppercase_ascii (read_asciiz_bytes mem cpu) in
             begin match Hashtbl.find_opt t.host_files name with
