@@ -56,6 +56,9 @@ let create ~read ~write ~port_in ~port_out =
   }
 
 let halted t = t.halted
+
+(* HLT 해제 — 인터럽트 도착로 깨운다(8086 계약: HLT 는 (N)INTR 로 해제). *)
+let wake t = t.halted <- false
 let cycles t = t.cycles
 let set_int_hook t f = t.int_hook <- Some f
 

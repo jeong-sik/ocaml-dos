@@ -69,6 +69,10 @@ val set_flags : t -> int -> unit
 
 val halted : t -> bool
 
+(** HLT 해제 — 하드웨어 인터럽트 도착을 알릴 때(DOS idle 루프의 HLT 가
+    타이머로 깨어나는 모델). 큐에 넣는 쪽이 deliver 후 호출한다. *)
+val wake : t -> unit
+
 val cycles : t -> int
 (** 생성 이후 누적 사이클. *)
 

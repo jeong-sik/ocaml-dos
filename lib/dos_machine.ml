@@ -464,9 +464,13 @@ let create () =
          let ring_wr16 a v =
            Bytes.set t.mem a (Char.chr (v land 0xff));
            Bytes.set t.mem (a + 1) (Char.chr ((v lsr 8) land 0xff)) in
-         let head = ref (ring_rd16 0x41A) and tail = ring_rd16 0x41C in
-         if !head < 0x1E || !head > 0x3C then head := 0x1E;
-         let key_pending () = !head <> tail in
+         let head = ref (ring_rd16 0x41A) and tail = ref (ring_rd16 0x41C) in
+         (* 게스트는 포인터를 직접 쓸 수 있다(키 버퍼 플러시) — 그 값이
+            범위 밖(실측: ZZT 가 0x41C=0 으로 플러시)이면 유령 키가 무한
+            반환되고 push 는 막힌다. 범위 밖은 '빈 버퍼' 로 해석한다. *)
+         let clamp v = if v < 0x1E || v > 0x3C then 0x1E else v in
+         head := clamp !head; tail := clamp !tail;
+         let key_pending () = !head <> !tail in
          let pop_key () =
            let w = ring_rd16 (0x400 + !head) in
            head := if !head >= 0x3C then 0x1E else !head + 2;
@@ -488,11 +492,16 @@ let create () =
             end
           | 0x01 | 0x11 ->
             if key_pending () then begin
+              t.kbd_wait <- false;
               Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_zero);
               Cpu86.set_reg16 t.cpu 0 (ring_rd16 (0x400 + !head))
             end
-            else
+            else begin
+              (* 빈 링 폴링도 굶주림으로 본다 — TP 의 KeyPressed(AH=01)
+                 루프는 AH=00 을 부르지도 않는다(실측: ZZT 메뉴 대기). *)
+              t.kbd_wait <- true;
               Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_zero)
+            end
           | _ -> ())
        | 0x20 (* PSP INT 20h — RET 로 돌아온 프로그램의 종료 *) ->
          t.exited <- true;
@@ -587,8 +596,19 @@ let mount_file t name data =
   Hashtbl.replace t.host_files (String.uppercase_ascii name) (Bytes.of_string data)
 
 let step t =
-  if t.exited || Cpu86.halted t.cpu then 2
+  if t.exited then 2
   else begin
+    (* HLT 대기: 실기 CPU 는 인터럽트로 깨어난다. 타이머 틱이 차면
+       wake 하고 IRQ0 를 전달한다(DOS idle 루프의 HLT — ZZT 실측).
+       cpu86 의 halted 스텝은 사이클만 +2 로 흘러간다. *)
+    if Cpu86.halted t.cpu then begin
+      let cyc = Cpu86.cycles t.cpu in
+      if cyc - t.last_tick >= 262087 then begin
+        t.last_tick <- cyc;
+        Cpu86.wake t.cpu;
+        ignore (deliver_ivt t 8)
+      end
+    end;
     let used = Cpu86.step t.cpu in
     let cyc = Cpu86.cycles t.cpu in
     (* IRQ0 (18.2Hz): 하드웨어처럼 벡터 8 만 발화. ROM INT 8 루틴이
