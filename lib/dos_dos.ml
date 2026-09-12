@@ -147,7 +147,9 @@ let fill_find_block t name =
   let size = Bytes.length data in
   wr8 t (t.dta + 0x15) 0x20;                 (* 속성: 보관 *)
   wr16 t (t.dta + 0x16) 0;                   (* 시각 *)
-  wr16 t (t.dta + 0x18) 0x2821;              (* 날짜: 1000-01-01 자리표시 *)
+  (* DOS 날짜 워드: 상위 7비트 연도-1980, 다음 4비트 월, 하위 5비트 일.
+     0x2821 은 2000-01-01 이다. 마운트 표에는 시각이 없어 고정값을 준다. *)
+  wr16 t (t.dta + 0x18) 0x2821;
   wr16 t (t.dta + 0x1A) (size land 0xffff);
   wr16 t (t.dta + 0x1C) ((size lsr 16) land 0xffff);
   String.iteri (fun i c -> wr8 t (t.dta + 0x1E + i) (Char.code c)) name;
