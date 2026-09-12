@@ -17,3 +17,7 @@
 (test
  (name dos_fcb_test)
  (libraries dosmachine))
+
+(test
+ (name cpu86_vtest)
+ (libraries cpu86core unix yojson))
