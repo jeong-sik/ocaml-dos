@@ -47,7 +47,7 @@ let () =
   check "fcb dta A" (Dos_machine.mem_read m 0x80) (Char.code 'A');
   check "fcb dta B" (Dos_machine.mem_read m 0x81) (Char.code 'B');
   (* 파일 크기 가 FCB+0x10 dword 에 *)
-  check "fcb size lo" (Dos_machine.mem_read m (0x10000 + 0x14 + 0x10)) 226;
+  check "fcb size lo" (Dos_machine.mem_read m (0x10100 + 0x14 + 0x10)) 226;
 
   (* 없는 파일: open AL=FF → fail 경로 exit 1 *)
   let m = Dos_machine.create () in

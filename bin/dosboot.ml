@@ -24,7 +24,7 @@ let hello_com () =
 
 let () =
   let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
-  and out = ref "/tmp/dosboot" and mounts = ref [] in
+  and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0 in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -32,6 +32,7 @@ let () =
        "NAME=PATH  게스트에 파일 마운트 (INT 21h open 대상)");
       ("--demo", Arg.Set_string demo, "NAME  내장 데모 (hello)");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 명령 수");
+      ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어") ]
     (fun _ -> ()) "dosboot — DOS COM 실행 하네스";
   let m = Dos_machine.create () in
@@ -52,9 +53,10 @@ let () =
       let ic = open_in_bin !com in
       let s = really_input_string ic (in_channel_length ic) in
       close_in ic; s
-    end else begin
-      prerr_endline "need --demo hello or --com PATH"; exit 2
+    end else if !exe = "" then begin
+      prerr_endline "need --demo hello or --com PATH or --exe PATH"; exit 2
     end
+    else ""
   in
   if !exe <> "" then begin
     let ic = open_in_bin !exe in
@@ -63,11 +65,26 @@ let () =
     Dos_machine.load_exe m img
   end
   else Dos_machine.load_com m image;
-  (try Dos_machine.run m ~max_steps:!steps
+  (try
+     if !trace > 0 then begin
+       let n = ref 0 in
+       while (not (Dos_machine.exited m))
+             && not (Cpu86.halted (Dos_machine.cpu_of m))
+             && !n < !steps do
+         ignore (Dos_machine.step m);
+         incr n;
+         if !n mod !trace = 0 then
+           Printf.eprintf "T %07d cs=%04x ip=%04x\n%!"
+             !n (Cpu86.seg (Dos_machine.cpu_of m) 1)
+             (Cpu86.dump_ip (Dos_machine.cpu_of m))
+       done
+     end
+     else Dos_machine.run m ~max_steps:!steps
    with Cpu86.Unsupported msg ->
      Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
-  Printf.printf "exited=%b code=%d halted=%b\n%!"
-    (Dos_machine.exited m) (Dos_machine.exit_code m) (Dos_machine.halted m);
+  Printf.printf "exited=%b code=%d halted=%b cs=%04x ip=%04x\n%!"
+    (Dos_machine.exited m) (Dos_machine.exit_code m) (Dos_machine.halted m)
+    (Cpu86.seg (Dos_machine.cpu_of m) 1) (Cpu86.dump_ip (Dos_machine.cpu_of m));
   print_string (Dos_machine.screen_text m);
   let rgb = Dos_machine.frame_rgb m in
   let nonblack = ref 0 in
@@ -76,6 +93,22 @@ let () =
                          || Char.code rgb.[i+1] > 8 || Char.code rgb.[i+2] > 8)
       then incr nonblack) rgb;
   Printf.printf "nonblack=%d\n" !nonblack;
+  (try
+     let env = Sys.getenv "MEM_DUMP" in
+     let c = String.index env ',' in
+     let hx x =
+       if String.length x > 2 && String.sub x 0 2 = "0x" then int_of_string x
+       else int_of_string ("0x" ^ x) in
+     let a0 = hx (String.sub env 0 c) in
+     let n = hx (String.sub env (c + 1) (String.length env - c - 1)) in
+     for row = 0 to (n - 1) / 16 do
+       Printf.eprintf "mem %05x:" (a0 + row * 16);
+       for j = 0 to 15 do
+         Printf.eprintf " %02x" (Dos_machine.mem_read m ((a0 + row * 16 + j) land 0xfffff))
+       done;
+       Printf.eprintf "\n%!"
+     done
+   with Not_found -> ());
   let w, h = Dos_machine.frame_dims m in
   let oc = open_out_bin (!out ^ ".ppm") in
   Printf.fprintf oc "P6\n%d %d\n255\n%s" w h rgb;

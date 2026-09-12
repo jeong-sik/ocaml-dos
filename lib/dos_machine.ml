@@ -17,6 +17,7 @@ type t = {
   mutable next_handle : int;
   fcbs : (int, Bytes.t * int) Hashtbl.t;  (** FCB 물리주소 → (내용, 위치) *)
   mutable dta : int;  (** INT 21h AH=1Ah 가 고르는 전송 주소(물리) *)
+  mutable last_tick : int;  (** 마지막 BIOS tick 갱신 시점의 누적 사이클 *)
 }
 
 let vram_base = 0xB8000
@@ -45,6 +46,8 @@ let default_vga_pal i =
     (r * 63 / 5, g * 63 / 5, b * 63 / 5)
   end
   else (0, 0, 0)
+
+let cpu_of t = t.cpu
 
 let mem_read t a = Char.code (Bytes.get t.mem (a land 0xfffff))
 
@@ -105,13 +108,13 @@ let create () =
     { mem; cpu; cursor = 0; exited = false; exit_code = 0; keys = Queue.create ();
       vmode = 3; pal = Array.init 256 default_vga_pal;
       host_files = Hashtbl.create 8; handles = Hashtbl.create 4; next_handle = 6;
-      fcbs = Hashtbl.create 4; dta = 0x80 }
+      fcbs = Hashtbl.create 4; dta = 0x80; last_tick = 0 }
   in
   Cpu86.set_int_hook cpu (fun vec ->
       let ah = Cpu86.reg8 t.cpu 4 in
       (try if Sys.getenv "DOSDBG" <> "" then
-         Printf.eprintf "INT %02x ah=%02x dx=%04x ds=%04x\n%!"
-           vec ah (Cpu86.reg16 t.cpu 2) (Cpu86.seg t.cpu 3)
+         Printf.eprintf "INT %02x ah=%02x @%04x:%04x dx=%04x ds=%04x\n%!"
+           vec ah (Cpu86.seg t.cpu 1) (Cpu86.dump_ip t.cpu) (Cpu86.reg16 t.cpu 2) (Cpu86.seg t.cpu 3)
        with Not_found -> ());
       (match vec with
        | 0x10 ->
@@ -315,11 +318,11 @@ let load_com t image =
   t.exited <- false;
   t.exit_code <- 0
 
-(* MZ EXE 로더. 헤더(reloc 개수 @0x06, 헤더 paras @0x08, SS/SP/IP/CS) 를
-   읽어 이미지를 로드 세그먼트(0x1000 기준)에 놓고 재배치 워드에 로드
-   세그먼트를 더한다. PSP 는 심지 않는다: EXE 는 SS:SP 를 헤더에서 받아
-   bare-RET 관례가 없고, 이미지 시작을 덮어쓰면 첫 명령이 파괴된다
-   (실측: push cs/pop ds 가 CD 20 으로 뭉개져 실행이 어긋남). *)
+(* MZ EXE 로더 — 실기 배치. PSP 세그먼트(0x1000) 앞, 이미지는 그 16
+   paras 뒤(image_seg): PSP+0x00 INT 20h, +0x02 메모리 top, +0x0A 종료
+   주소, +0x80 커맨드라인. DOS 는 DS/ES 를 PSP 세그먼트로 시작한다 —
+   ZZT 엔트리가 mov cx,[PSP+0x0C] 로 바로 읽는다(실측). 이미지 시작을
+   덮어쓰던 초판 PSP 심기의 파괴는 이 배치로 사라진다. *)
 let load_exe t image =
   let u8 i = Char.code image.[i] in
   let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
@@ -330,8 +333,9 @@ let load_exe t image =
   let exe_cs = u16 0x16 in
   let exe_sp = u16 0x10 in
   let exe_ss = u16 0x0E in
-  let load_seg = 0x1000 in
-  let image_base = load_seg * 16 in
+  let psp_seg = 0x1000 in
+  let image_seg = psp_seg + 0x10 in
+  let image_base = image_seg * 16 in
   Bytes.blit (Bytes.of_string image) header_bytes t.mem image_base
     (String.length image - header_bytes);
   for i = 0 to reloc_count - 1 do
@@ -340,16 +344,25 @@ let load_exe t image =
     let addr = image_base + seg * 16 + off in
     let old = Char.code (Bytes.get t.mem addr)
               lor (Char.code (Bytes.get t.mem (addr + 1)) lsl 8) in
-    let v = old + load_seg in
+    let v = old + image_seg in
     Bytes.set t.mem addr (Char.chr (v land 0xff));
     Bytes.set t.mem (addr + 1) (Char.chr ((v lsr 8) land 0xff))
   done;
-  Cpu86.set_seg t.cpu 1 (load_seg + exe_cs);   (* CS *)
+  (* PSP — 실기 계약: INT 20h, memtop(비디오 0xA000 앞), 종료 주소 0:0,
+     커맨드라인 길이 0. *)
+  let psp = psp_seg * 16 in
+  Bytes.set t.mem psp '\xcd';
+  Bytes.set t.mem (psp + 0x01) '\x20';
+  Bytes.set t.mem (psp + 0x02) '\xff';
+  Bytes.set t.mem (psp + 0x03) '\x9f';
+  Bytes.set t.mem (psp + 0x80) '\x00';
+  Bytes.set t.mem (psp + 0x81) '\x0d';
+  Cpu86.set_seg t.cpu 1 (image_seg + exe_cs);  (* CS *)
   Cpu86.set_ip t.cpu exe_ip;
-  Cpu86.set_seg t.cpu 2 (load_seg + exe_ss);   (* SS *)
+  Cpu86.set_seg t.cpu 2 (image_seg + exe_ss);  (* SS *)
   Cpu86.set_reg16 t.cpu 4 exe_sp;
-  Cpu86.set_seg t.cpu 3 (load_seg + exe_cs);   (* DS=CS 근사: 게임이 직접 재설정 *)
-  Cpu86.set_seg t.cpu 0 (load_seg + exe_cs);   (* ES *)
+  Cpu86.set_seg t.cpu 3 psp_seg;               (* DS = PSP (DOS 표준) *)
+  Cpu86.set_seg t.cpu 0 psp_seg;               (* ES = PSP *)
   t.exited <- false;
   t.exit_code <- 0
 
@@ -359,7 +372,22 @@ let mount_file t name data =
   Hashtbl.replace t.host_files (String.uppercase_ascii name) (Bytes.of_string data)
 
 let step t =
-  if t.exited || Cpu86.halted t.cpu then 2 else Cpu86.step t.cpu
+  if t.exited || Cpu86.halted t.cpu then 2
+  else begin
+    let used = Cpu86.step t.cpu in
+    let cyc = Cpu86.cycles t.cpu in
+    if cyc - t.last_tick >= 262087 then begin
+      t.last_tick <- cyc;
+      let v = Char.code (Bytes.get t.mem 0x46C)
+              lor (Char.code (Bytes.get t.mem 0x46D) lsl 8)
+              lor (Char.code (Bytes.get t.mem 0x46E) lsl 16) in
+      let v = v + 1 in
+      Bytes.set t.mem 0x46C (Char.chr (v land 0xff));
+      Bytes.set t.mem 0x46D (Char.chr ((v lsr 8) land 0xff));
+      Bytes.set t.mem 0x46E (Char.chr ((v lsr 16) land 0xff))
+    end;
+    used
+  end
 
 let run t ~max_steps =
   let n = ref 0 in

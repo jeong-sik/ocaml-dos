@@ -45,17 +45,19 @@ let () =
 let () =
   (* 1) EXE 로더 + 재배치: 이미지 0x1E 의 워드에 reloc 걸고 로드 후
      0x1000(로드 세그) 이 심어지는지, 그리고 코드가 실행되는지. *)
+  (* DS 는 PSP 로 시작하므로 push cs/pop ds 가 선행한다 (ZZT 엔트리와
+     같은 관례). msg 는 0x17. *)
   let img =
-    "\xb4\x0e\xb3\x07\xbe\x15\x00\xac\x08\xc0\x74\x04\xcd\x10\xeb\xf7\xb8\x00\x4c\xcd\x21Hi\x00\x00\x00"
+    "\x0e\x1f\xb4\x0e\xb3\x07\xbe\x17\x00\xac\x08\xc0\x74\x04\xcd\x10\xeb\xf7\xb8\x00\x4c\xcd\x21Hi\x00\x00\x00"
   in
-  (* 0x1E 위치의 워드(0)에 재배치 *)
-  let exe = make_exe ~image:img ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [ (0x1E, 0x0000) ] in
+  (* 0x20 위치의 워드(0)에 재배치 *)
+  let exe = make_exe ~image:img ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [ (0x20, 0x0000) ] in
   let m = Dos_machine.create () in
   Dos_machine.load_exe m exe;
   (* 재배치 적용: image_base(0x10000) + 0x1E 워드 = 0x1000 *)
-  let reloc_word = Dos_machine.mem_read m (0x10000 + 0x1E)
-                   lor (Dos_machine.mem_read m (0x10000 + 0x1F) lsl 8) in
-  check "exe reloc applied" reloc_word 0x1000;
+  let reloc_word = Dos_machine.mem_read m (0x10100 + 0x20)
+                   lor (Dos_machine.mem_read m (0x10100 + 0x21) lsl 8) in
+  check "exe reloc applied" reloc_word 0x1010;
   Dos_machine.run m ~max_steps:2000;
   checkb "exe hello exited" (Dos_machine.exited m) true;
   let txt = Dos_machine.screen_text m in
@@ -92,8 +94,8 @@ let () =
   checkb "int21 open+read exited" (Dos_machine.exited m) true;
   check "int21 read 4 bytes" (Dos_machine.exit_code m) 4;
   (* 읽은 내용이 버퍼(이미지 0x26 = 0x10026)에 *)
-  check "int21 buffer A" (Dos_machine.mem_read m 0x10026) (Char.code 'A');
-  check "int21 buffer D" (Dos_machine.mem_read m 0x10029) (Char.code 'D');
+  check "int21 buffer A" (Dos_machine.mem_read m 0x10126) (Char.code 'A');
+  check "int21 buffer D" (Dos_machine.mem_read m 0x10129) (Char.code 'D');
   (* 없는 파일: open 실패 CF → 간단 프로그램은 그냥 검증 생략 *)
 
   (* 3) VGA 13h: 모드 전환 + A000 픽셀 + 팔레트/렌더. *)

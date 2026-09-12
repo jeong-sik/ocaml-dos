@@ -54,5 +54,8 @@ val frame_rgb : t -> string
 val push_key : t -> int -> unit
 (** BIOS 스캔 코드 큐에 넣는다(하네스 입력). INT 16h 가 소비한다. *)
 
+val cpu_of : t -> Cpu86.t
+(** 내부 CPU — 하네스 진단(위치 덤프)용 읽기 전용 접근. *)
+
 val mem_read : t -> int -> int
 (** 물리 주소 1바이트 — 디버깅용. *)
