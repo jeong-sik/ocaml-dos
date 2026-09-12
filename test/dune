@@ -1,3 +1,7 @@
 (test
  (name cpu86_test)
  (libraries cpu86core))
+
+(test
+ (name cpu86_m1_test)
+ (libraries cpu86core))

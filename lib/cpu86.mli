@@ -1,4 +1,4 @@
-(** 8086 CPU 코어 — 해석형, 사이클 카운트 포함. (M0: 명령 집합 일부)
+(** 8086 CPU 코어 — 해석형, 사이클 카운트 포함. (M1: 명령 집합 완성)
 
     메모리는 코어 밖에 있다: 생성 시 read/write 콜백을 받는다. 콜백은
     20비트 물리 주소(세그먼트*16 + 오프셋, 1MB wrap)로 불린다 — 장치
@@ -7,11 +7,14 @@
     결정론: 같은 상태 + 같은 메모리 + 같은 입력 = 같은 실행. 사이클은
     [cycles] 누적으로 하네스가 실기 타이밍과 대조한다.
 
-    M0 범위: 레지스터/플래그 상태, modrm 디코딩, ALU 8종(rm,reg ·
-    rm,imm · acc,imm), mov(reg/reg, reg/imm, rm), inc/dec, push/pop,
-    jcc/jmp, hlt. 나머지 명령(string, mul/div, shift 그룹, call/ret,
-    int, …)은 M1 이후 채운다 — 만나면 [ Unsupported ] 예외로 죽는
-    게 조용한 오동작보다 낫다 (Silent Failure 방지 원칙). *)
+    M1 범위: ALU 8종 전 형태, 그룹1(imm ALU)/그룹2(shift·rotate)/
+    그룹3(test/not/neg/mul/imul/div/idiv)/그룹 FE·FF(inc/dec/call/
+    jmp/push), mov 전형태(rm,imm · sreg · lea), xchg, string ops+
+    rep, call/ret/jmp(far 포함), loop 계열, in/out, flag ops,
+    pushf/popf/sahf/lahf, cbw/cwd/xlat/aam/aad, INT(호스트 훅).
+    빠진 것: daa/das/aaa/aas(BCD), esc(D8-DF), wait — 만나면
+    [Unsupported] 예외로 죽는 게 조용한 오동작보다 낫다 (Silent
+    Failure 방지). INT 10h/21h 표면 구현은 Dos 머신 모듈이 소유한다. *)
 
 exception Unsupported of string
 (** 아직 구현되지 않은 명령을 만났다. 메시지는 명령 위치와 opcode.
@@ -68,6 +71,13 @@ val halted : t -> bool
 
 val cycles : t -> int
 (** 생성 이후 누적 사이클. *)
+
+val set_int_hook : t -> (int -> unit) -> unit
+(** INT n / INT3 을 만났을 때 부르는 콜백. DOS 표면(INT 10h/21h 등)의
+    소유자가 심는다 — 코어는 벡터 번호만 넘기고 스택 조작을 하지
+    않는다(호스트 서브루틴 모델: 훅이 레지스터를 세팅하면 INT 다음
+    명령으로 그대로 계속). 훅이 없는 INT 는 [Unsupported] 이다. 실제
+    IVT 로 가는 소프트웨어 인터럽트가 필요해지면 그때 계약을 늘린다. *)
 
 (** {1 플래그 비트} *)
 
