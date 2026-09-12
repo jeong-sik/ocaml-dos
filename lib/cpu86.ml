@@ -508,6 +508,65 @@ let step t =
         let d = fetch16 t in
         t.ip <- (t.ip + d) land 0xffff;
         7
+      (* --- 186 확장. 8086 실칩은 undoc 미러로 응답하지만 ZZT(1991,
+          Borland 계열 산출)가 push imm 등을 바로 쓴다(실측 @1010:06C2).
+          8086 하드웨어 스위트로는 검증 불가 — 문서 계약 + 게임 실행으로
+          증명한다. --- *)
+      | 0x68 -> push16 t (fetch16 t); 10
+      | 0x6a ->
+        let d = fetch8 t in
+        push16 t (if d >= 0x80 then d lor 0xff00 else d);
+        9
+      | 0x60 (* pusha *) ->
+        let sp0 = t.regs.(4) in
+        push16 t (reg16 t 0); push16 t (reg16 t 1);
+        push16 t (reg16 t 2); push16 t (reg16 t 3);
+        push16 t sp0; push16 t (reg16 t 5);
+        push16 t (reg16 t 6); push16 t (reg16 t 7);
+        36
+      | 0x61 (* popa — SP 는 버리고 원래 값 유지 *) ->
+        ignore (pop16 t); ignore (pop16 t); ignore (pop16 t);
+        ignore (pop16 t (* sp0 — 버림 *));
+        let saved_sp = pop16 t in
+        set_reg16 t 5 (pop16 t); set_reg16 t 6 (pop16 t);
+        set_reg16 t 7 (pop16 t);
+        set_reg16 t 0 (pop16 t);
+        ignore saved_sp;
+        t.regs.(4) <- t.regs.(4);  (* pop 순서: DI SI BP SP버림 BX DX CX AX *)
+        25
+      | 0x69 | 0x6b (* imul r16, rm16, imm *) ->
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        let a = op_read t 16 rm in
+        let imm =
+          if opcode = 0x69 then fetch16 t
+          else begin
+            let d = fetch8 t in
+            if d >= 0x80 then d lor 0xff00 else d
+          end
+        in
+        let sx v = if v >= 0x8000 then v - 0x10000 else v in
+        let p = sx a * sx imm in
+        set_reg16 t regf (p land 0xffff);
+        t.cf <- p > 0x7fff || p < -0x8000;
+        t.of_ <- p > 0x7fff || p < -0x8000;
+        21
+      | 0xc0 | 0xc1 (* shift rm, imm8 (186) *) ->
+        let width = if opcode = 0xc0 then 8 else 16 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        shift_group regf width rm (fetch8 t);
+        6
+      | 0xc8 (* enter — M2c 시점에 프레임 포인터 체인이 필요하면 확장.
+               ZZT 관측에서는 얕은 프레임(imm8=0)이 대부분. *) ->
+        let _size = fetch16 t in
+        let nesting = fetch8 t in
+        push16 t (reg16 t 5);
+        set_reg16 t 5 (reg16 t 4);
+        if nesting > 0 then bad "enter nesting";
+        19
+      | 0xc9 (* leave *) ->
+        set_reg16 t 4 (reg16 t 5);
+        set_reg16 t 5 (pop16 t);
+        8
       (* --- hlt --- *)
       | 0xf4 -> t.halted <- true; 2
       (* --- push/pop 세그먼트 (0x0F pop cs 는 8086 에만 유효) --- *)
@@ -636,6 +695,18 @@ let step t =
         t.ip <- pop16 t;
         t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
         10
+      (* RETF — 서드파티 첫 요구(ZZT @1b21:002a). far call/인터럽트 스타일
+         프레임에서 CS:IP 를 스택에서 되돌린다. *)
+      | 0xcb ->
+        t.ip <- pop16 t;
+        set_seg t 1 (pop16 t);
+        17
+      | 0xca ->
+        let n = fetch16 t in
+        t.ip <- pop16 t;
+        set_seg t 1 (pop16 t);
+        t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+        18
       | 0xc3 -> t.ip <- pop16 t; 8
       | 0xc6 | 0xc7 ->
         let width = if opcode = 0xc6 then 8 else 16 in
