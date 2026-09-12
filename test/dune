@@ -5,3 +5,7 @@
 (test
  (name cpu86_m1_test)
  (libraries cpu86core))
+
+(test
+ (name dos_machine_test)
+ (libraries dosmachine))

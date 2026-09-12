@@ -3,3 +3,10 @@
  (public_name ocaml-dos.cpu86core)
  (wrapped false)
  (modules cpu86))
+
+(library
+ (name dosmachine)
+ (public_name ocaml-dos.dosmachine)
+ (wrapped false)
+ (modules dos_machine font8x8)
+ (libraries cpu86core))
