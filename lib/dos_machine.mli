@@ -78,6 +78,19 @@ val halted : t -> bool
 val push_key : t -> int -> unit
 (** BIOS 키 링에 워드 하나. INT 16h 와 INT 21h 입력이 같은 링을 본다. *)
 
+val named_keys : (string * int) list
+(** 이름으로 부를 수 있는 키와 그 BIOS 워드. *)
+
+val key_of_string : string -> (int, string) result
+(** 키 이름 하나 또는 글자 하나를 BIOS 워드로. 이름은 [named_keys] 에
+    있는 것들이고 대소문자를 가리지 않는다. US 자판에 자리가 없는 글자는
+    거절한다 — 자리 없는 글자를 0 번 스캔 코드로 넣으면 게스트가 엉뚱한
+    키로 읽는다. *)
+
+val key_to_string : int -> string
+(** 워드를 이름으로. [key_of_string] 의 역이고, 이름 없는 워드는 글자
+    하나이거나 16진수 네 자리다. 기록에 쓴다. *)
+
 val push_ascii : t -> char -> unit
 (** ASCII 한 글자 — US 자판 스캔 코드를 붙인다. 방향키처럼 글자가 아닌
     키는 [push_key] 로 워드를 직접 넣는다. *)

@@ -234,6 +234,44 @@ let test_dup_shares_position () =
     (match Dos_machine.read_mounted m "D.DAT" with Some s -> s | None -> "")
     "ABCD"
 
+(* 이름으로 키를 부르는 표. 하네스가 16진수 워드를 손으로 쓰지 않아도
+   되고, 자리 없는 글자는 조용히 통과하지 않고 거절당한다. *)
+let test_key_names () =
+  let ok name want =
+    match Dos_machine.key_of_string name with
+    | Ok w -> check ("key_of_string " ^ name) w want
+    | Error e -> incr failed; Printf.eprintf "FAIL %s: %s\n%!" name e
+  in
+  ok "up" 0x4800;
+  ok "RIGHT" 0x4D00;
+  ok "enter" 0x1C0D;
+  ok "return" 0x1C0D;
+  ok "esc" 0x011B;
+  ok "space" 0x3920;
+  ok "f10" 0x4400;
+  ok "a" 0x1E61;
+  ok "1" 0x0231;
+  check_true "모르는 이름은 거절"
+    (Result.is_error (Dos_machine.key_of_string "hyperspace"));
+  (* US 자판에 자리가 없는 글자를 0 번 스캔 코드로 넣으면 게스트가 엉뚱한
+     키로 읽는다 — 조용히 통과시키지 않는다. *)
+  check_true "자리 없는 글자는 거절"
+    (Result.is_error (Dos_machine.key_of_string "~"));
+  check_s "이름으로 되돌리기" (Dos_machine.key_to_string 0x4800) "up";
+  check_s "글자로 되돌리기" (Dos_machine.key_to_string 0x1E61) "a"
+
+(* 이름으로 부른 키가 게스트에게 실제로 닿는가 *)
+let test_named_key_reaches_guest () =
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m
+    (assemble
+       (fun _ -> mov_ah 0 ^ int_ 0x16 ^ store_ax scratch ^ quit) "");
+  (match Dos_machine.key_of_string "up" with
+   | Ok w -> Dos_machine.push_key m w
+   | Error e -> failwith e);
+  Dos_machine.run m ~max_steps:100_000;
+  check "게스트가 읽은 워드" (peek16 m scratch) 0x4800
+
 let test_console_scrolls () =
   (* 화면이 넘치면 위로 밀려야 한다. 마지막 칸에 붙들어 두면 출력이
      통째로 사라진다. 30 줄을 찍고 첫 줄이 사라졌는지 본다. *)
@@ -388,6 +426,8 @@ let () =
   test_file_round_trip ();
   test_find_first_next ();
   test_flush_then_input ();
+  test_key_names ();
+  test_named_key_reaches_guest ();
   test_dup_shares_position ();
   test_console_scrolls ();
   test_video_write_char ();

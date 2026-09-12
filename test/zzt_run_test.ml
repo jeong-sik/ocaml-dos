@@ -27,17 +27,22 @@ let read_file path =
   close_in ic;
   s
 
-(* 타이틀 화면에서 게임 안까지 들어가는 키 차례 — 실측으로 정한 것이다.
-   ESC, 'c'(색 고르기 통과), Enter, ↑, Enter, 스페이스, Enter, ↑, Enter,
-   Enter. 굶주릴 때 하나씩 들어간다. *)
-let intro_keys =
-  [ 0x256b; 0x2e63; 0x1c0d; 0x1970; 0x1c0d; 0x3920; 0x1c0d; 0x1970; 0x1c0d;
-    0x1c0d ]
+(* 이름으로 부른다 — 16진수 워드를 손으로 쓰던 자리다. *)
+let key name =
+  match Dos_machine.key_of_string name with
+  | Ok w -> w
+  | Error e -> failwith e
 
-let key_right = 0x4d00
-let key_b = 0x3062          (* 'b' — 사이드바의 소리 켜기/끄기 *)
-let key_s = 0x1f73          (* 's' — 저장 *)
-let key_enter = 0x1c0d
+(* 타이틀에서 게임 안까지 들어가는 키 차례 — 실측으로 정한 것이다.
+   굶주릴 때 하나씩 들어간다. *)
+let intro_keys =
+  List.map key [ "k"; "c"; "enter"; "p"; "enter"; "space"; "enter"; "p";
+                 "enter"; "enter" ]
+
+let key_right = key "right"
+let key_b = key "b"         (* 사이드바의 소리 켜기/끄기 *)
+let key_s = key "s"         (* 저장 *)
+let key_enter = key "enter"
 let vram_base = 0xB8000
 let player_glyph = 0x02
 let player_attr = 0x1F              (* 파란 바탕 흰 글자 — 플레이어만 *)
