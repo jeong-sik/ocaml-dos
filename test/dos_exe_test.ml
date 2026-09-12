@@ -54,10 +54,13 @@ let () =
   let exe = make_exe ~image:img ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [ (0x20, 0x0000) ] in
   let m = Dos_machine.create () in
   Dos_machine.load_exe m exe;
-  (* 재배치 적용: image_base(0x10000) + 0x1E 워드 = 0x1000 *)
-  let reloc_word = Dos_machine.mem_read m (0x10100 + 0x20)
-                   lor (Dos_machine.mem_read m (0x10100 + 0x21) lsl 8) in
-  check "exe reloc applied" reloc_word 0x1010;
+  (* 재배치 적용: 이미지 0x20 워드에 image_seg 가 심어진다 — 주소는
+     load_exe 의 PSP 배치(memtop 공식)에서 계산 *)
+  let base = Dos_machine.psp_seg_of m * 16 in
+  let image_seg = Dos_machine.psp_seg_of m + 0x10 in
+  let reloc_word = Dos_machine.mem_read m (base + 0x100 + 0x20)
+                   lor (Dos_machine.mem_read m (base + 0x100 + 0x21) lsl 8) in
+  check "exe reloc applied" reloc_word image_seg;
   Dos_machine.run m ~max_steps:2000;
   checkb "exe hello exited" (Dos_machine.exited m) true;
   let txt = Dos_machine.screen_text m in
@@ -93,9 +96,10 @@ let () =
   Dos_machine.run m ~max_steps:2000;
   checkb "int21 open+read exited" (Dos_machine.exited m) true;
   check "int21 read 4 bytes" (Dos_machine.exit_code m) 4;
-  (* 읽은 내용이 버퍼(이미지 0x26 = 0x10026)에 *)
-  check "int21 buffer A" (Dos_machine.mem_read m 0x10126) (Char.code 'A');
-  check "int21 buffer D" (Dos_machine.mem_read m 0x10129) (Char.code 'D');
+  (* 읽은 내용이 버퍼(이미지 0x26)에 — 이미지 시작 = PSP+0x100 *)
+  let base = Dos_machine.psp_seg_of m * 16 in
+  check "int21 buffer A" (Dos_machine.mem_read m (base + 0x100 + 0x26)) (Char.code 'A');
+  check "int21 buffer D" (Dos_machine.mem_read m (base + 0x100 + 0x29)) (Char.code 'D');
   (* 없는 파일: open 실패 CF → 간단 프로그램은 그냥 검증 생략 *)
 
   (* 3) VGA 13h: 모드 전환 + A000 픽셀 + 팔레트/렌더. *)

@@ -9,7 +9,6 @@ type t = {
   mutable cursor : int;         (** 텍스트 화면 오프셋(셀 단위) *)
   mutable exited : bool;
   mutable exit_code : int;
-  keys : int Queue.t;           (** BIOS 스캔 코드 — 하네스가 넣는다 *)
   mutable vmode : int;          (** 3=텍스트, 0x13=VGA 256색 선형 *)
   mutable pal : (int * int * int) array;  (** 256색 DAC — 6비트/채널 *)
   host_files : (string, Bytes.t) Hashtbl.t;  (** 하네스가 마운트한 파일 *)
@@ -17,6 +16,8 @@ type t = {
   mutable next_handle : int;
   fcbs : (int, Bytes.t * int) Hashtbl.t;  (** FCB 물리주소 → (내용, 위치) *)
   mutable dta : int;  (** INT 21h AH=1Ah 가 고르는 전송 주소(물리) *)
+  mutable psp_seg : int;  (** 적재 시 DOS 가 정한 PSP 세그먼트(load_com 은 0) *)
+  mutable kbd_wait : bool;  (** 직전 INT 16h AH=00 이 빈 링으로 즉시 복귀(굶주림) *)
   mutable last_tick : int;  (** 마지막 BIOS tick 갱신 시점의 누적 사이클 *)
 }
 
@@ -48,6 +49,10 @@ let default_vga_pal i =
   else (0, 0, 0)
 
 let cpu_of t = t.cpu
+
+let psp_seg_of t = t.psp_seg
+
+let kbd_waiting t = t.kbd_wait
 
 let mem_read t a = Char.code (Bytes.get t.mem (a land 0xfffff))
 
@@ -95,26 +100,186 @@ let put_char t ch attr =
     t.cursor <- min (cols * rows - 1) (t.cursor + 1)
   end
 
+(* 인터럽트 프레임(flags/cs/ip push)을 게스트 IVT 핸들러에 전달.
+   false = 그 벡터는 게스트가 안 걸었다(호스트 서빙 대상).
+   INT 명령의 게스트 라우팅과 하드웨어 타이머 발화(IRQ0 → INT 8,
+   BIOS INT 8 이 0x46C 를 올리고 INT 1Ch 를 호출) 가 같은 경로를 쓴다. *)
+let deliver_ivt t v =
+  let rd16 a = Char.code (Bytes.get t.mem a)
+               lor (Char.code (Bytes.get t.mem (a + 1)) lsl 8) in
+  let ivt_off = rd16 (v * 4) and ivt_seg = rd16 (v * 4 + 2) in
+  if ivt_off <> 0 || ivt_seg <> 0 then begin
+    (* 실기: INT 는 현재 플래그를 그대로 push 하고 '그 후' IF/TF 를
+       지운다. IRET 은 푸시된 값 그대로 복원 — 마스킹하면 틱마다 IF 가
+       영구히 꺼진 채 돌아온다. *)
+    let flags = Cpu86.flags t.cpu in
+    let pushw val16 =
+      Cpu86.set_reg16 t.cpu 4 ((Cpu86.reg16 t.cpu 4) - 2);
+      let sp = (Cpu86.seg t.cpu 2 lsl 4) + Cpu86.reg16 t.cpu 4 in
+      Bytes.set t.mem sp (Char.chr (val16 land 0xff));
+      Bytes.set t.mem (sp + 1) (Char.chr (val16 lsr 8)) in
+    pushw flags;
+    pushw (Cpu86.seg t.cpu 1);
+    pushw (Cpu86.dump_ip t.cpu);
+    Cpu86.set_seg t.cpu 1 ivt_seg;
+    Cpu86.set_ip t.cpu ivt_off;
+    true
+  end else false
+
 let create () =
   let mem = Bytes.make (1024 * 1024) '\000' in
+  (* (벡터, ROM 스텁 오프셋) — int_hook 이 "내 스텁 창구" 를 알아보고
+     호스트 구현으로 직행하는 데 쓴다. *)
+  let stub_table = ref [] in
+  (* VRAMLOG: 텍스트 VRAM 쓰기 관측 — 하네스 진단용. cpu 는 뒤에서
+     만들어지므로 ref 로 받는다. *)
+  let cpu_ref = ref None in
   let read a = Char.code (Bytes.get mem (a land 0xfffff)) in
-  let write a v = Bytes.set mem (a land 0xfffff) (Char.chr (v land 0xff)) in
+  (* WRLOG=a,l : [a,a+l) 물리 쓰기 관측 — 하네스 진단용. VRAMLOG 는
+     0xB8000,0x8000 의 약자. *)
+  let wrlog =
+    match
+      (try
+         let e = Sys.getenv "WRLOG" in
+         let c = String.index e ',' in
+         Some
+           (int_of_string (String.sub e 0 c),
+            int_of_string (String.sub e (c + 1) (String.length e - c - 1)))
+       with Not_found -> None)
+    with
+    | Some (a, l) -> (a, l)
+    | None ->
+      (try if Sys.getenv "VRAMLOG" <> "" then (0xB8000, 0x8000) else (0, 0)
+       with Not_found -> (0, 0))
+  in
+  let write a v =
+    (if a >= fst wrlog && a < fst wrlog + snd wrlog then
+       match !cpu_ref with
+       | Some c ->
+         Printf.eprintf "V %05x %02x cs=%04x ip=%04x\n%!"
+           (a land 0xfffff) (v land 0xff)
+           (Cpu86.seg c 1) (Cpu86.dump_ip c)
+       | None -> ());
+    Bytes.set mem (a land 0xfffff) (Char.chr (v land 0xff)) in
   let cpu =
+    (* 0x3DA 상태 포트: 읽을 때마다 bit0(디스플레이 인에이블/재주사) 를
+       토글. TP CRT 가 VRAM 직접 쓰기 전에 "clear 대기 → set 대기" 상승
+       에지를 보고 — 고정값이면 한쪽 대기가 영원히 안 풀린다(실측:
+       5fb6:05e9 루프). *)
+    let cga_stat = ref false in
     Cpu86.create ~read ~write
-      ~port_in:(fun _ -> 0xff)
+      ~port_in:(fun p ->
+          if p land 0xffff = 0x3DA then begin
+            cga_stat := not !cga_stat;
+            if !cga_stat then 0x01 else 0x00
+          end
+          (* 게임 포트 0x201: 조이스틱 미장착 — 축 비트 0(방전) 이면 TP 의
+             축 카운트 루프가 즉시 통과한다(실기 미접속 동작). 0xFF 를
+             돌려주면 카운트가 랩할 때까지 갇힌다(실측: ZZT 초기화). *)
+          else if p land 0xff = 0x201 then 0x00 else 0xff)
       ~port_out:(fun _ _ -> ())
   in
+  cpu_ref := Some cpu;
   let t =
-    { mem; cpu; cursor = 0; exited = false; exit_code = 0; keys = Queue.create ();
+    { mem; cpu; cursor = 0; exited = false; exit_code = 0;
       vmode = 3; pal = Array.init 256 default_vga_pal;
-      host_files = Hashtbl.create 8; handles = Hashtbl.create 4; next_handle = 6;
-      fcbs = Hashtbl.create 4; dta = 0x80; last_tick = 0 }
+      host_files = Hashtbl.create 8; handles = Hashtbl.create 4;
+      (* DOS 예약 핸들 0-4 (stdin/stdout/stderr/aux/prn) 은 피해서
+         배정한다. 0/1/2 는 콘솔로 특수 취급(0x40 참조). *)
+      next_handle = 5;
+      fcbs = Hashtbl.create 4; dta = 0x80; psp_seg = 0; last_tick = 0;
+      kbd_wait = false }
   in
+  (* BIOS ROM: F000:0000 에 INT 8 루틴(0x46C tick 범프 → INT 1Ch 호출 →
+     PIC EOI → IRET), F000:0020 에 IRET 스텁. IVT[8]/[1Bh]/[1Ch] 을
+     채운다 — 실기 BIOS 는 모든 벡터가 ROM/DOS 를 가리켜서 프로그램이
+     훅 설치 때 INT 21h AH=35h 로 되읽은 "옛 벡터" 가 0:0 이 아니다.
+     빈 IVT 로 두면 TP 등 체인 방식 런타임이 옛 벡터 0:0 으로 복귀해
+     0000:0000 에 떨어진다(ZZT 실측: retf 후 cs=0000). *)
+  let bios_int8 =
+    "\x1e\x50"                         (* push ds; push ax *)
+    ^ "\x31\xc0\x8e\xd8"            (* xor ax,ax; mov ds,ax *)
+    ^ "\xa1\x6c\x04\x40\xa3\x6c\x04"  (* mov ax,[046C]; inc ax; mov [046C],ax *)
+    ^ "\x75\x04"                      (* jnz +4 — 자리올림 없으면 고워드 skip *)
+    ^ "\xff\x06\x6e\x04"            (* inc word [046E] *)
+    ^ "\xcd\x1c"                      (* int 1Ch — 사용자 틱 훅 *)
+    ^ "\xb0\x20\xe6\x20"            (* mov al,20h; out 20h,al (EOI) *)
+    ^ "\x58\x1f\xcf"                 (* pop ax; pop ds; iret *)
+  in
+  Bytes.blit (Bytes.of_string bios_int8) 0 mem 0xF0000
+    (String.length bios_int8);
+  Bytes.set mem 0xF0020 '\xcf';         (* IRET 스텁 (vec 1Bh/1Ch 기본값) *)
+  let set_ivt v off seg =
+    Bytes.set mem (v * 4) (Char.chr (off land 0xff));
+    Bytes.set mem (v * 4 + 1) (Char.chr (off lsr 8));
+    Bytes.set mem (v * 4 + 2) (Char.chr (seg land 0xff));
+    Bytes.set mem (v * 4 + 3) (Char.chr (seg lsr 8)) in
+  set_ivt 0x08 0x0000 0xF000;            (* 타이머 IRQ0: ROM INT 8 루틴 *)
+  (* BDA(BIOS Data Area, 0x40:xx) — 실기 부팅 값. TP CRT 가 화면 폴링
+     포트를 [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을
+     읽어 영원히 갇힌다(실측: 5fb6:05e9). 컬러 80x25 텍스트 기준. *)
+  let bda8 a v = Bytes.set mem a (Char.chr (v land 0xff)) in
+  let bda16 a v = bda8 a v; bda8 (a + 1) (v lsr 8) in
+  bda16 0x413 640;                      (* 기억용량 KB *)
+  bda8 0x449 3;                         (* 비디오 모드 3 *)
+  bda16 0x44A 80;                       (* 열 수 *)
+  bda16 0x44C 0x2000;                   (* 페이지 크기(워드) 16KB *)
+  bda16 0x463 0x3D4;                    (* CRTC 어드레스 포트(컬러) *)
+  bda8 0x484 24;                        (* 행-1 *)
+  bda16 0x480 0x001E;                   (* 키 버퍼 시작 오프셋 *)
+  bda16 0x482 0x0000;                   (* 키 버퍼 시작 세그먼트 *)
+  (* 실기처럼 나머지 벡터 전부 IRET 스텁으로 채운다. 예외는 호스트가
+     서빙하는 {10h 비디오, 16h 키보드, 20h/21h DOS} — 비어있어야 INT 가
+     호스트 훅으로 온다. TP 런타임은 부팅 때 IVT 전체를 훑어 저장하므로
+     0:0 벡터가 하나라도 남으면 체인 복귀(retf) 때 0000:0000 으로
+     떨어진다(ZZT 실측). *)
+  (* 호스트 서빙 벡터(10h 비디오, 16h 키보드, 20h/21h DOS) 도 IVT 에
+     실주소가 필요하다 — TP 의 Intr 썽크는 CD 명령 없이 IVT 를 직접
+     읽어 그 주소로 retf 한다(실측: 빈 IVT[10h] 로 0000:0000 추락).
+     스텁 본체 = cd 사설벡터(v+80h); iret — 사설 벡터는 비어 있어
+     int_hook 이 호스트 구현으로 서빙한다. *)
+  let stub_base = ref 0x0100 in
+  List.iter (fun v ->
+      let addr = !stub_base in
+      Bytes.set mem (0xF0000 + addr) '\xcd';
+      Bytes.set mem (0xF0000 + addr + 1) (Char.chr (v + 0x80));
+      Bytes.set mem (0xF0000 + addr + 2) '\xcf';
+      set_ivt v addr 0xF000;
+      stub_table := (v, addr) :: !stub_table;
+      stub_base := !stub_base + 16)
+    [ 0x10; 0x16; 0x20; 0x21 ];
+  for v = 0 to 255 do
+    if not (List.mem v [ 0x08; 0x10; 0x16; 0x20; 0x21 ]) then set_ivt v 0x0020 0xF000
+  done;
   Cpu86.set_int_hook cpu (fun vec ->
+      (* 게스트 IVT 우선: 프로그램이 후킹한 벡터(0:vec*4 != 0:0)는 진짜
+         인터럽트 프레임(flags/cs/ip push)으로 게스트 핸들러에 보내고
+         IRET 이 돌아온다. 비어있으면 호스트 서빙(DOS/BIOS 표면).
+         ZZT/TP 가 벡터를 설치하고 INT 21h AH=35 로 되읽는다(실측). *)
+      (* ROM 스텁(v+80h) 경유 호출을 실제 서비스 벡터로 되돌린다 *)
+      let v =
+        match vec land 0xff with
+        | 0x90 -> 0x10 | 0x96 -> 0x16 | 0xA0 -> 0x20 | 0xA1 -> 0x21
+        | x -> x
+      in
+      (* IVT[v] 가 아직 내 스텁이면(게스트가 AH=25h 로 안 바꿨으면)
+         호스트 구현으로 직행 — deliver 로 다시 스텁에 들어가면 무한루프. *)
+      let ivt_is_own_stub =
+        List.exists (fun (sv, soff) ->
+            sv = v
+            && Char.code (Bytes.get mem (v * 4)) = soff land 0xff
+            && Char.code (Bytes.get mem (v * 4 + 1)) = soff lsr 8
+            && Char.code (Bytes.get mem (v * 4 + 2)) = 0x00
+            && Char.code (Bytes.get mem (v * 4 + 3)) = 0xF0)
+          !stub_table
+      in
+      if (not ivt_is_own_stub) && deliver_ivt t v then ()
+      else begin
       let ah = Cpu86.reg8 t.cpu 4 in
       (try if Sys.getenv "DOSDBG" <> "" then
-         Printf.eprintf "INT %02x ah=%02x @%04x:%04x dx=%04x ds=%04x\n%!"
-           vec ah (Cpu86.seg t.cpu 1) (Cpu86.dump_ip t.cpu) (Cpu86.reg16 t.cpu 2) (Cpu86.seg t.cpu 3)
+         Printf.eprintf "INT %02x ah=%02x al=%02x @%04x:%04x bx=%04x cx=%04x dx=%04x ds=%04x\n%!"
+           vec ah (Cpu86.reg8 t.cpu 0) (Cpu86.seg t.cpu 1) (Cpu86.dump_ip t.cpu)
+           (Cpu86.reg16 t.cpu 3) (Cpu86.reg16 t.cpu 1) (Cpu86.reg16 t.cpu 2) (Cpu86.seg t.cpu 3)
        with Not_found -> ());
       (match vec with
        | 0x10 ->
@@ -131,6 +296,54 @@ let create () =
               Bytes.fill t.mem 0xA0000 32000 '\000'
             end
             else t.vmode <- 3
+          | 0x02 (* 커서 위치 설정: DH=행 DL=열 — BDA 0x450 에 기록하고
+                    teletype 커서도 따라간다 *) ->
+            let row = Cpu86.reg8 t.cpu 6 and col = Cpu86.reg8 t.cpu 2 in
+            t.cursor <- row * cols + col;
+            Bytes.set t.mem 0x450 (Char.chr col);
+            Bytes.set t.mem 0x451 (Char.chr row)
+          | 0x03 (* 커서 위치 읽기: DX=행/열 *) ->
+            Cpu86.set_reg8 t.cpu 2 (Char.code (Bytes.get t.mem 0x450));
+            Cpu86.set_reg8 t.cpu 6 (Char.code (Bytes.get t.mem 0x451))
+          | 0x06 | 0x07 (* 창 스크롤/클리어: AL=줄(0=클리어) BH=속성,
+                    CX/DX=좌상/우하 (열,행) — 텍스트 VRAM 에서 직접 *) ->
+            let lines = Cpu86.reg8 t.cpu 0 in
+            let attr = Cpu86.reg8 t.cpu 7 in
+            let cl = Cpu86.reg8 t.cpu 1 and ch = Cpu86.reg8 t.cpu 5 in
+            let dl = Cpu86.reg8 t.cpu 2 and dh = Cpu86.reg8 t.cpu 6 in
+            let blank = (attr lsl 8) lor 0x20 in
+            let cell r c =
+              (vram_base + ((r * cols + c) * 2)) land 0xfffff in
+            let get r c =
+              Char.code (Bytes.get t.mem (cell r c))
+              lor (Char.code (Bytes.get t.mem (cell r c + 1)) lsl 8) in
+            let set r c v =
+              Bytes.set t.mem (cell r c) (Char.chr (v land 0xff));
+              Bytes.set t.mem (cell r c + 1) (Char.chr (v lsr 8)) in
+            for r = dh downto ch do
+              for c = cl to dl do
+                let src_r = if ah = 0x06 then r + lines else r - lines in
+                let v =
+                  if src_r > dh || src_r < ch then blank else get src_r c in
+                set r c v
+              done
+            done
+          | 0x08 (* 커서 위치 문자 읽기: AX=속성<<8|문자 *) ->
+            let row = Char.code (Bytes.get t.mem 0x451) in
+            let col = Char.code (Bytes.get t.mem 0x450) in
+            let c = (vram_base + ((row * cols + col) * 2)) land 0xfffff in
+            Cpu86.set_reg16 t.cpu 0
+              ((Char.code (Bytes.get t.mem (c + 1)) lsl 8)
+               lor (Char.code (Bytes.get t.mem c)))
+          | 0x11 (* 문자셋: AL=30h 폰트 정보 — ES:BP=ROM 8x8 폰트,
+                    CX=높이, DL=행-1. TP/ZZT 비디오 초기화가 폰트 포인터로
+                    분기한다(실측: 빈 값이면 retf 가 0000:0000 으로 떨어짐) *) ->
+            if Cpu86.reg8 t.cpu 0 = 0x30 then begin
+              Cpu86.set_seg t.cpu 0 0xF000;
+              Cpu86.set_reg16 t.cpu 3 0xFA6E;
+              Cpu86.set_reg16 t.cpu 1 8;
+              Cpu86.set_reg8 t.cpu 2 24
+            end
           | 0x10 (* DAC 색 설정: AL=10h 개별 — BX=색, DH=R CH=G CL=B *) ->
             if Cpu86.reg8 t.cpu 0 = 0x10 then begin
               let idx = Cpu86.reg16 t.cpu 3 land 0xff in
@@ -145,8 +358,51 @@ let create () =
           | 0x4C (* 종료 *) ->
             t.exited <- true;
             t.exit_code <- Cpu86.reg8 t.cpu 0
-          | 0x02 (* 문자 출력 *) ->
-            put_char t (Cpu86.reg8 t.cpu 0) 0x07
+          | 0x35 (* get vector: AL=vec → ES:BX *) ->
+            let v = Cpu86.reg8 t.cpu 0 land 0xff in
+            let rd16 a = Char.code (Bytes.get t.mem a)
+                         lor (Char.code (Bytes.get t.mem (a + 1)) lsl 8) in
+            Cpu86.set_reg16 t.cpu 3 (rd16 (v * 4));
+            Cpu86.set_seg t.cpu 0 (rd16 (v * 4 + 2))
+          | 0x25 (* set vector: AL=vec, DS:DX *) ->
+            let v = Cpu86.reg8 t.cpu 0 land 0xff in
+            let wr16 a x =
+              Bytes.set t.mem a (Char.chr (x land 0xff));
+              Bytes.set t.mem (a + 1) (Char.chr ((x lsr 8) land 0xff)) in
+            wr16 (v * 4) (Cpu86.reg16 t.cpu 2);
+            wr16 (v * 4 + 2) (Cpu86.seg t.cpu 3)
+          | 0x44 (* IOCTL — TP CRT 가 부팅 때 콘솔/파일 상태를 묻는다.
+                    전부 실패시키면 핸들을 무효로 간주해 runtime error 006
+                    로 죽는다(ZZT 실측). AL=00 device info: 콘솔(0/1/2) 은
+                    bit7 문자디바이스+콘솔 비트, 파일은 0x02(읽기+쓰기).
+                    AL=06/07 입출력 상태: 준비됨. 나머지는 invalid. *)
+            -> (match Cpu86.reg8 t.cpu 0 with
+             | 0x00 ->
+               (match Cpu86.reg16 t.cpu 3 with
+                | 0 | 1 | 2 ->
+                  Cpu86.set_reg16 t.cpu 2 0x80D3;
+                  Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+                | h ->
+                  if Hashtbl.mem t.handles h then begin
+                    Cpu86.set_reg16 t.cpu 2 0x0002;
+                    Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+                  end else begin
+                    Cpu86.set_reg16 t.cpu 0 6;
+                    Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)
+                  end)
+             | 0x06 | 0x07 ->
+               Cpu86.set_reg8 t.cpu 0 0xFF;
+               Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+             | _ ->
+               Cpu86.set_reg16 t.cpu 0 1;
+               Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry))
+          | 0x02 (* 문자 출력: DL *) ->
+            put_char t (Cpu86.reg8 t.cpu 2) 0x07
+          | 0x06 (* 직접 콘솔 출력: DL(≠FF). TP 런타임의 에러 메시지가
+                    이 경로로 나온다 — 없으면 화면에 아무 흔적 없이 죽는다
+                    (ZZT 실측: "Runtime error 006 at ..."). *) ->
+            let dl = Cpu86.reg8 t.cpu 2 in
+            if dl <> 0xFF then put_char t dl 0x07
           | 0x0F (* FCB open: DS:DX = FCB *) ->
             let fcb = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
             let name = String.uppercase_ascii (fcb_name_of mem fcb) in
@@ -219,6 +475,17 @@ let create () =
             t.dta <- (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2
           | 0x24 (* FCB 레코드 크기 설정: FCB+0x0E 를 이미 쓴 값으로 확정 *) ->
             Cpu86.set_reg8 t.cpu 0 0
+          | 0x3C (* create/truncate: DS:DX ASCIIZ, CX=속성 → AX=핸들.
+                    TP 부트가 LPT1 을 만든다(프린터). 없으면 무음 no-op 로
+                    핸들 0 이 섞여 stdin 으로 새는다(실측). 내용은 휘발성
+                    메모리 — 세이브/인쇄는 호스트 파일로 안 나간다. *) ->
+            let name = String.uppercase_ascii (read_asciiz_bytes mem cpu) in
+            let h = t.next_handle in
+            t.next_handle <- t.next_handle + 1;
+            Hashtbl.replace t.host_files name Bytes.empty;
+            Hashtbl.replace t.handles h (Bytes.empty, 0);
+            Cpu86.set_reg16 t.cpu 0 h;
+            Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
           | 0x3D (* open: DS:DX ASCIIZ *) ->
             let name = String.uppercase_ascii (read_asciiz_bytes mem cpu) in
             begin match Hashtbl.find_opt t.host_files name with
@@ -236,7 +503,12 @@ let create () =
             let h = Cpu86.reg16 t.cpu 3 in
             let want = Cpu86.reg16 t.cpu 1 in
             let buf = Cpu86.reg16 t.cpu 2 in
-            begin match Hashtbl.find_opt t.handles h with
+            if h = 0 then begin
+              (* stdin: 키는 INT 16h 경로 — 핸들 읽기는 즉시 EOF(0) *)
+              Cpu86.set_reg16 t.cpu 0 0;
+              Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+            end
+            else begin match Hashtbl.find_opt t.handles h with
               | None ->
                 Cpu86.set_reg16 t.cpu 0 6;
                 Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)
@@ -251,6 +523,38 @@ let create () =
           | 0x3E (* close: BX=핸들 *) ->
             Hashtbl.remove t.handles (Cpu86.reg16 t.cpu 3);
             Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+          | 0x40 (* write: BX=핸들 CX=바이트 DS:DX=버퍼 → AX=쓴 수.
+                    실기 DOS 는 부팅 때 stdin(0)/stdout(1)/stderr(2) 를
+                    열어준다 — TP 런타임이 stderr 로 진단을 쓰는데 없으면
+                    invalid handle(6) 로 즉사한다(ZZT 실측). 콘솔 쓰기는
+                    화면에 찍는다. *)
+            -> (match Cpu86.reg16 t.cpu 3 with
+             | 1 | 2 ->
+               let src = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
+               for i = 0 to Cpu86.reg16 t.cpu 1 - 1 do
+                 put_char t (Char.code (Bytes.get t.mem ((src + i) land 0xfffff))) 0x07
+               done;
+               Cpu86.set_reg16 t.cpu 0 (Cpu86.reg16 t.cpu 1);
+               Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+             | h ->
+               (match Hashtbl.find_opt t.handles h with
+                | Some (data, pos) ->
+                  (* 파일 쓰기는 메모리 사본에 append — LPT1/세이브용.
+                     호스트 원본은 안 바뀐다(휘발성). *)
+                  let n = Cpu86.reg16 t.cpu 1 in
+                  let src = (Cpu86.seg t.cpu 3 lsl 4) + Cpu86.reg16 t.cpu 2 in
+                  let chunk = Bytes.create n in
+                  for i = 0 to n - 1 do
+                    Bytes.set chunk i (Bytes.get t.mem ((src + i) land 0xfffff))
+                  done;
+                  let grown =
+                    Bytes.cat (Bytes.sub data 0 (min pos (Bytes.length data))) chunk in
+                  Hashtbl.replace t.handles h (grown, Bytes.length grown);
+                  Cpu86.set_reg16 t.cpu 0 n;
+                  Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+                | None ->
+                  Cpu86.set_reg16 t.cpu 0 6;
+                  Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)))
           | 0x42 (* lseek: AL=모드 BX=핸들 CX:DX=오프셋 → DX:AX *) ->
             let h = Cpu86.reg16 t.cpu 3 in
             let al = Cpu86.reg8 t.cpu 0 in
@@ -283,37 +587,86 @@ let create () =
             end
           | _ -> ())
        | 0x16 ->
+         (* BIOS 키 링(0x40:0x1E-0x3D) 을 단일 진실 원천으로 읽는다 —
+            호스트 큐를 따로 두면 게스트가 링을 직접 다룰 때 두 사본이
+            갈라진다(실측: AH=00 이 호스트 큐만 비워 ZZT 가 AH=01 폴링을
+            영원히 돌았다). 헤드/테일 포인터(0x41A/0x41C) 규약 그대로. *)
+         let ring_rd16 a =
+           Char.code (Bytes.get t.mem a)
+           lor (Char.code (Bytes.get t.mem (a + 1)) lsl 8) in
+         let ring_wr16 a v =
+           Bytes.set t.mem a (Char.chr (v land 0xff));
+           Bytes.set t.mem (a + 1) (Char.chr ((v lsr 8) land 0xff)) in
+         let head = ref (ring_rd16 0x41A) and tail = ref (ring_rd16 0x41C) in
+         (* 게스트는 포인터를 직접 쓸 수 있다(키 버퍼 플러시) — 그 값이
+            범위 밖(실측: ZZT 가 0x41C=0 으로 플러시)이면 유령 키가 무한
+            반환되고 push 는 막힌다. 범위 밖은 '빈 버퍼' 로 해석한다. *)
+         let clamp v = if v < 0x1E || v > 0x3C then 0x1E else v in
+         head := clamp !head; tail := clamp !tail;
+         let key_pending () = !head <> !tail in
+         let pop_key () =
+           let w = ring_rd16 (0x400 + !head) in
+           head := if !head >= 0x3C then 0x1E else !head + 2;
+           ring_wr16 0x41A !head;
+           w in
          (match ah with
           | 0x00 | 0x10 ->
-            if Queue.is_empty t.keys then Cpu86.set_reg8 t.cpu 0 0
-            else Cpu86.set_reg8 t.cpu 0 (Queue.pop t.keys)
-          | 0x01 | 0x11 ->
-            if Queue.is_empty t.keys then
-              Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_zero)
+            (* AX = (스캔<<8)|ASCII — BIOS 규약대로 전체 워드 반환.
+               실기는 키가 올 때까지 블록한다 — 빈 링은 하네스가 볼 수
+               있는 '굶주림' 상태로 알린다(TP ReadKey 는 AX=0 을 Break
+               신호로 해석해 무한 재시도 루프에 빠진다, ZZT 실측). *)
+            if key_pending () then begin
+              t.kbd_wait <- false;
+              Cpu86.set_reg16 t.cpu 0 (pop_key ())
+            end
             else begin
+              t.kbd_wait <- true;
+              Cpu86.set_reg16 t.cpu 0 0
+            end
+          | 0x01 | 0x11 ->
+            if key_pending () then begin
+              t.kbd_wait <- false;
               Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_zero);
-              Cpu86.set_reg8 t.cpu 0 (Queue.peek t.keys)
+              Cpu86.set_reg16 t.cpu 0 (ring_rd16 (0x400 + !head))
+            end
+            else begin
+              (* 빈 링 폴링도 굶주림으로 본다 — TP 의 KeyPressed(AH=01)
+                 루프는 AH=00 을 부르지도 않는다(실측: ZZT 메뉴 대기). *)
+              t.kbd_wait <- true;
+              Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_zero)
             end
           | _ -> ())
        | 0x20 (* PSP INT 20h — RET 로 돌아온 프로그램의 종료 *) ->
          t.exited <- true;
          t.exit_code <- 0
-       | _ -> ()));
+       | _ -> ())
+      end);
   t
 
 let load_com t image =
-  Bytes.blit (Bytes.of_string image) 0 t.mem 0x100 (String.length image);
-  (* PSP: INT 20h, 커맨드라인 길이 0. RET 복귀지 스택 top = 0x0000. *)
-  Bytes.set t.mem 0x00 '\xcd';
-  Bytes.set t.mem 0x01 '\x20';
-  Bytes.set t.mem 0x80 '\x00';
-  Cpu86.set_seg t.cpu 1 0;  (* CS *)
-  Cpu86.set_seg t.cpu 3 0;  (* DS *)
-  Cpu86.set_seg t.cpu 0 0;  (* ES *)
-  Cpu86.set_seg t.cpu 2 0;  (* SS *)
+  (* 실기 DOS 는 COM 의 PSP 를 독립 세그먼트에 배정한다 — 세그 0 에
+     두면 PSP 가 IVT/BDA 와 겹쳐 부팅 스텁을 지운다(실측: PSP:0x80 커맨
+     드라인 쓰기가 IVT[20h] 오프셋을 0 으로 만들어 ROM 스텁이 10h 스텁
+     으로 뒤섞임). 세그 0x1000 — 도스 초전통 배치. *)
+  let psp = 0x1000 * 16 in
+  let psp_seg = 0x1000 in
+  Bytes.blit (Bytes.of_string image) 0 t.mem (psp + 0x100) (String.length image);
+  Bytes.set t.mem psp '\xcd';
+  Bytes.set t.mem (psp + 1) '\x20';
+  Bytes.set t.mem (psp + 2) '\x00';
+  Bytes.set t.mem (psp + 3) '\xa0';      (* memtop 0xA000 *)
+  Bytes.set t.mem (psp + 0x80) '\x00';   (* 커맨드라인 길이 0 *)
+  Bytes.set t.mem (psp + 0x81) '\x0d';
+  t.psp_seg <- psp_seg;
+  t.dta <- psp + 0x80;
+  Cpu86.set_seg t.cpu 1 psp_seg;  (* CS *)
+  Cpu86.set_seg t.cpu 3 psp_seg;  (* DS *)
+  Cpu86.set_seg t.cpu 0 psp_seg;  (* ES *)
+  Cpu86.set_seg t.cpu 2 psp_seg;  (* SS *)
   Cpu86.set_ip t.cpu 0x100;
   Cpu86.set_reg16 t.cpu 4 0xFFFE;  (* SP *)
-  Bytes.set t.mem 0xFFFE '\x00';
+  Bytes.set t.mem (psp + 0xFFFE) '\x00';
+  Bytes.set t.mem (psp + 0xFFF) '\x00';  (* RET 복귀지 0000(PSP 세그 기준) *)
   Bytes.set t.mem 0xFFFF '\x00';
   t.exited <- false;
   t.exit_code <- 0
@@ -333,7 +686,19 @@ let load_exe t image =
   let exe_cs = u16 0x16 in
   let exe_sp = u16 0x10 in
   let exe_ss = u16 0x0E in
-  let psp_seg = 0x1000 in
+  (* 실기 DOS 배치: 프로그램을 conventional RAM memtop 아래 배정.
+     LZEXE 스텁의 자기 재배치가 이 위치를 기준으로 원본 엔트리를 계산
+     한다 (ZZT 실측: 낮은 고정 0x1000 에서 원본 엔트리 0xC000:0x192B 가
+     빈 주소가 됨).
+     상한: 이미지 시작 psp+0x10 부터 img_paras+minalloc 이 0xA000
+     (VRAM 시작 세그) 을 넘지 않게 — 넘으면 INT 10h 모드 셋이 VRAM
+     clear 하며 코드를 지운다 (mode 13h fill 0xA0000+32000 실측). *)
+  let psp_seg =
+    (* 이미지 크기 = 파일 전체 - 헤더(헤더는 게스트 메모리에 안 남는다) *)
+    let img_paras = (String.length image - header_bytes + 15) / 16 in
+    let minalloc = u16 0x0A in
+    max 0x1000 (0x9FF0 - img_paras - minalloc)
+  in
   let image_seg = psp_seg + 0x10 in
   let image_base = image_seg * 16 in
   Bytes.blit (Bytes.of_string image) header_bytes t.mem image_base
@@ -351,6 +716,9 @@ let load_exe t image =
   (* PSP — 실기 계약: INT 20h, memtop(비디오 0xA000 앞), 종료 주소 0:0,
      커맨드라인 길이 0. *)
   let psp = psp_seg * 16 in
+  t.psp_seg <- psp_seg;
+  (* 기본 DTA = PSP:0x80 (실기 DOS 규약 — AH=1Ah 로 안 바꾸면 이 자리) *)
+  t.dta <- psp + 0x80;
   Bytes.set t.mem psp '\xcd';
   Bytes.set t.mem (psp + 0x01) '\x20';
   Bytes.set t.mem (psp + 0x02) '\xff';
@@ -372,19 +740,27 @@ let mount_file t name data =
   Hashtbl.replace t.host_files (String.uppercase_ascii name) (Bytes.of_string data)
 
 let step t =
-  if t.exited || Cpu86.halted t.cpu then 2
+  if t.exited then 2
   else begin
+    (* HLT 대기: 실기 CPU 는 인터럽트로 깨어난다. 타이머 틱이 차면
+       wake 하고 IRQ0 를 전달한다(DOS idle 루프의 HLT — ZZT 실측).
+       cpu86 의 halted 스텝은 사이클만 +2 로 흘러간다. *)
+    if Cpu86.halted t.cpu then begin
+      let cyc = Cpu86.cycles t.cpu in
+      if cyc - t.last_tick >= 262087 then begin
+        t.last_tick <- cyc;
+        Cpu86.wake t.cpu;
+        ignore (deliver_ivt t 8)
+      end
+    end;
     let used = Cpu86.step t.cpu in
     let cyc = Cpu86.cycles t.cpu in
+    (* IRQ0 (18.2Hz): 하드웨어처럼 벡터 8 만 발화. ROM INT 8 루틴이
+       0x46C 를 올리고 INT 1Ch 사용자 훅을 부른 뒤 EOI+IRET 한다 —
+       게스트가 INT 8 을 훅했으면 게스트 핸들러가 그 사슬을 이어받는다. *)
     if cyc - t.last_tick >= 262087 then begin
       t.last_tick <- cyc;
-      let v = Char.code (Bytes.get t.mem 0x46C)
-              lor (Char.code (Bytes.get t.mem 0x46D) lsl 8)
-              lor (Char.code (Bytes.get t.mem 0x46E) lsl 16) in
-      let v = v + 1 in
-      Bytes.set t.mem 0x46C (Char.chr (v land 0xff));
-      Bytes.set t.mem 0x46D (Char.chr ((v lsr 8) land 0xff));
-      Bytes.set t.mem 0x46E (Char.chr ((v lsr 16) land 0xff))
+      ignore (deliver_ivt t 8)
     end;
     used
   end
@@ -455,4 +831,23 @@ let frame_rgb t =
     Bytes.to_string img
   end
 
-let push_key t sc = Queue.push sc t.keys
+(* BIOS 키 버퍼(0x40:0x1E-0x3D, 16워드 링): 헤드 0x1A, 테일 0x1C. 게스트가
+   INT 9/16 을 후킹해 이 큐를 직접 폴링한다(ZZT/TP 실측) — 호스트 큐만
+   채우면 게스트 핸들러가 못 읽는다. push 는 (스캔<<8|ascii) 워드. *)
+let push_key t sc =
+  let wr16 a x =
+    Bytes.set t.mem a (Char.chr (x land 0xff));
+    Bytes.set t.mem (a + 1) (Char.chr ((x lsr 8) land 0xff)) in
+  let rd16 a =
+    Char.code (Bytes.get t.mem a)
+    lor (Char.code (Bytes.get t.mem (a + 1)) lsl 8) in
+  (* BIOS 규약: 0x41A/0x41C 는 버퍼 내 '오프셋'(0x1E-0x3D) — 물리는 0x400+. *)
+  let head_off = rd16 0x41A and tail_off = rd16 0x41C in
+  if head_off = 0 then begin wr16 0x41A 0x1E; wr16 0x41C 0x1E end;
+  let tail_off = if tail_off < 0x1E || tail_off > 0x3C then 0x1E else tail_off in
+  let head_off = if head_off < 0x1E || head_off > 0x3C then 0x1E else head_off in
+  let nxt = if tail_off >= 0x3C then 0x1E else tail_off + 2 in
+  if nxt <> head_off then begin
+    wr16 (0x400 + tail_off) sc;
+    wr16 0x41C nxt
+  end

@@ -24,7 +24,8 @@ let hello_com () =
 
 let () =
   let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
-  and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0 in
+  and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
+  and keys = ref "" in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -33,9 +34,34 @@ let () =
       ("--demo", Arg.Set_string demo, "NAME  내장 데모 (hello)");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 명령 수");
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
-      ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어") ]
+      ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
+      ("--keys", Arg.Set_string keys,
+       "HEX[@STEP],..  키 — (스캔<<8)|ASCII 워드. @STEP 는 이 키를 \
+        STEP 스텝 전엔 주입하지 않는 예약(예: 4d00@40000). 굶주림 주입은 \
+        사전 메뉴의 repeat-until-KeyPressed 가 뭐든 즉시 먹어버리므로, \
+        게임 상태 이후에 넣어야 하는 키는 @로 묶는다") ]
     (fun _ -> ()) "dosboot — DOS COM 실행 하네스";
   let m = Dos_machine.create () in
+  (* 키 자동 투입기(keybot): --keys 를 미리 밀어넣지 않고, 게임이
+     INT 16h AH=00(블로킹 읽기) 로 굶주리는 순간에 하나씩 넣는다.
+     AH=00 가 AX=0 으로 즉시 복귀하면 TP ReadKey 는 Break 신호로
+     해석해 무한 재시도하기 때문(ZZT 실측) — 굶주림이 진짜 입력 대기. *)
+  let keyq = Queue.create () in
+  String.split_on_char ',' !keys
+  |> List.iter (fun h ->
+         if h <> "" then begin
+           let k, at =
+             match String.index_opt h '@' with
+             | Some i ->
+               (String.sub h 0 i,
+                int_of_string (String.sub h (i + 1) (String.length h - i - 1)))
+             | None -> (h, 0)
+           in
+           match int_of_string_opt ("0x" ^ k) with
+           | Some w -> Queue.push (w, at) keyq
+           | None ->
+             prerr_endline ("bad key " ^ h ^ " (want hex[@step] like 1c0d or 4d00@40000)")
+         end);
   List.iter (fun spec ->
       match String.index_opt spec '=' with
       | Some i ->
@@ -66,20 +92,32 @@ let () =
   end
   else Dos_machine.load_com m image;
   (try
-     if !trace > 0 then begin
-       let n = ref 0 in
-       while (not (Dos_machine.exited m))
-             && not (Cpu86.halted (Dos_machine.cpu_of m))
-             && !n < !steps do
-         ignore (Dos_machine.step m);
-         incr n;
-         if !n mod !trace = 0 then
-           Printf.eprintf "T %07d cs=%04x ip=%04x\n%!"
-             !n (Cpu86.seg (Dos_machine.cpu_of m) 1)
-             (Cpu86.dump_ip (Dos_machine.cpu_of m))
-       done
-     end
-     else Dos_machine.run m ~max_steps:!steps
+     let n = ref 0 and starve = ref 0 in
+     while (not (Dos_machine.exited m))
+           && not (Cpu86.halted (Dos_machine.cpu_of m))
+           && !n < !steps do
+       if !trace > 0 && !n mod !trace = 0 then begin
+         let c = Dos_machine.cpu_of m in
+         let pc = ((Cpu86.seg c 1 lsl 4) + Cpu86.dump_ip c) land 0xfffff in
+         Printf.eprintf "T %07d cs=%04x ip=%04x pc=%05x op=%02x sp=%04x ss=%04x ds=%04x es=%04x bx=%04x dx=%04x\n%!"
+           !n (Cpu86.seg c 1) (Cpu86.dump_ip c) pc
+           (Dos_machine.mem_read m pc) (Cpu86.reg16 c 4)
+           (Cpu86.seg c 2) (Cpu86.seg c 3) (Cpu86.seg c 0) (Cpu86.reg16 c 3) (Cpu86.reg16 c 2)
+       end;
+       ignore (Dos_machine.step m);
+       incr n;
+       if Dos_machine.kbd_waiting m then begin
+         incr starve;
+         match Queue.peek_opt keyq with
+         | Some (w, at) when !starve >= 2000 && !n >= at ->
+           ignore (Queue.pop keyq);
+           Dos_machine.push_key m w;
+           Printf.eprintf "KEYBOT %04x @step %d\n%!" w !n;
+           starve := 0
+         | _ -> ()
+       end
+       else starve := 0
+     done
    with Cpu86.Unsupported msg ->
      Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
   Printf.printf "exited=%b code=%d halted=%b cs=%04x ip=%04x\n%!"

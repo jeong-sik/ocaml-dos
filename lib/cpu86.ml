@@ -56,6 +56,9 @@ let create ~read ~write ~port_in ~port_out =
   }
 
 let halted t = t.halted
+
+(* HLT 해제 — 인터럽트 도착로 깨운다(8086 계약: HLT 는 (N)INTR 로 해제). *)
+let wake t = t.halted <- false
 let cycles t = t.cycles
 let set_int_hook t f = t.int_hook <- Some f
 
@@ -385,10 +388,17 @@ let step t =
           physical ~seg:t.segs.(s) ~off:t.regs.(6)
         in
         let seg_di () = physical ~seg:t.segs.(0) ~off:t.regs.(7) in
+        (* 8086 계약: 포인터는 그 명령이 쓰는 것만 전진한다 —
+           movs/cmps=SI·DI 둘 다, stos/scas=DI 만, lods=SI 만.
+           (둘 다 전진시키면 lodsb+stosw 조합이 반복당 DI+3 — ZZT 화면
+           stride-3 오염의 뿌리, 실측.) *)
         let step_regs () =
           let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
-          t.regs.(6) <- (t.regs.(6) + d) land 0xffff;
-          t.regs.(7) <- (t.regs.(7) + d) land 0xffff
+          let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
+          match unit_kind with
+          | 0 | 1 -> adv 6; adv 7      (* movs, cmps *)
+          | 3 -> adv 6                 (* lods *)
+          | _ -> adv 7                 (* stos, scas *)
         in
         let run_once () =
           let width = if word then 16 else 8 in
@@ -428,6 +438,65 @@ let step t =
           end
       in
       match opcode with
+      (* --- BCD 조정 4종 (ZZT/TP 런타임 실측 요구: AAA). 8086 규칙. --- *)
+      | 0x27 (* DAA *) ->
+        let al = reg8 t 0 in
+        let old_al = al in let old_cf = t.cf in
+        t.cf <- old_cf;
+        if (al land 0x0F) > 9 || t.af then begin
+          let full = al + 6 in
+          t.cf <- old_cf || full > 0xff;
+          set_reg8 t 0 (full land 0xff);
+          t.af <- true
+        end else t.af <- false;
+        let al2 = reg8 t 0 in
+        if old_al > 0x99 || old_cf then begin
+          set_reg8 t 0 ((al2 + 0x60) land 0xff);
+          t.cf <- true
+        end else t.cf <- false;
+        let al3 = reg8 t 0 in
+        t.zf <- al3 = 0; t.sf <- al3 land 0x80 <> 0;
+        t.pf <- parity_even al3;
+        4
+      | 0x2f (* DAS *) ->
+        let al = reg8 t 0 in
+        let old_al = al in let old_cf = t.cf in
+        t.cf <- old_cf;
+        if (al land 0x0F) > 9 || t.af then begin
+          t.cf <- old_cf || al < 6;
+          set_reg8 t 0 ((al - 6) land 0xff);
+          t.af <- true
+        end else t.af <- false;
+        let al2 = reg8 t 0 in
+        if old_al > 0x99 || old_cf then begin
+          set_reg8 t 0 ((al2 - 0x60) land 0xff);
+          t.cf <- true
+        end;
+        let al3 = reg8 t 0 in
+        t.zf <- al3 = 0; t.sf <- al3 land 0x80 <> 0;
+        t.pf <- parity_even al3;
+        4
+      | 0x37 (* AAA *) ->
+        let al = reg8 t 0 in
+        if (al land 0x0F) > 9 || t.af then begin
+          set_reg16 t 0 ((reg16 t 0 + 0x106) land 0xffff);
+          t.af <- true; t.cf <- true
+        end else begin
+          t.af <- false; t.cf <- false
+        end;
+        set_reg8 t 0 (reg8 t 0 land 0x0F);
+        8
+      | 0x3f (* AAS *) ->
+        let al = reg8 t 0 in
+        if (al land 0x0F) > 9 || t.af then begin
+          set_reg16 t 0 ((reg16 t 0 - 6) land 0xffff);
+          set_reg8 t 4 ((reg8 t 4 - 1) land 0xff);
+          t.af <- true; t.cf <- true
+        end else begin
+          t.af <- false; t.cf <- false
+        end;
+        set_reg8 t 0 (reg8 t 0 land 0x0F);
+        8
       (* --- ALU 8종: opcode lsr 3 = 연산, 하위 3비트 = 형태. --- *)
       | 0x00 | 0x01 | 0x02 | 0x03 | 0x04 | 0x05 -> alu_group 0
       | 0x08 | 0x09 | 0x0a | 0x0b | 0x0c | 0x0d -> alu_group 1
@@ -555,13 +624,21 @@ let step t =
         let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         shift_group regf width rm (fetch8 t);
         6
-      | 0xc8 (* enter — M2c 시점에 프레임 포인터 체인이 필요하면 확장.
-               ZZT 관측에서는 얕은 프레임(imm8=0)이 대부분. *) ->
+      | 0xc8 (* enter: Intel 186 계약. nesting>0 은 디스플레이(프레임
+               포인터 체인) 복사 — TP 런타임이 중첩 프레임으로 사용(실측). *) ->
         let _size = fetch16 t in
         let nesting = fetch8 t in
         push16 t (reg16 t 5);
+        let frame = t.regs.(4) in
+        if nesting > 0 then begin
+          for _ = 1 to nesting - 1 do
+            t.regs.(5) <- (t.regs.(5) - 2) land 0xffff;
+            let a = physical ~seg:t.segs.(2) ~off:t.regs.(5) in
+            push16 t (t.read a lor (t.read (a + 1) lsl 8))
+          done;
+          push16 t frame
+        end;
         set_reg16 t 5 (reg16 t 4);
-        if nesting > 0 then bad "enter nesting";
         19
       | 0xc9 (* leave *) ->
         set_reg16 t 4 (reg16 t 5);
@@ -678,6 +755,38 @@ let step t =
           (0x02 lor b t.cf lor (b t.pf lsl 2) lor (b t.af lsl 4)
              lor (b t.zf lsl 6) lor (b t.sf lsl 7));
         4
+      (* --- LES/LDS r16, m32 (C4/C5) — 메모리의 far 포인터 로드. --- *)
+      | 0xc4 | 0xc5 ->
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        (match rm with
+         | Mem a ->
+           set_reg16 t regf (t.read a lor (t.read (a + 1) lsl 8));
+           let segv = t.read (a + 2) lor (t.read (a + 3) lsl 8) in
+           if opcode = 0xc4 then set_seg t 0 segv else set_seg t 3 segv
+         | _ -> bad "les/lds reg");
+        2
+      (* --- accumulator 직접주소 mov (A0-A3) — TP 런타임 실측 요구. --- *)
+      | 0xa0 ->
+        let a = physical ~seg:(match !ovr with Some g -> t.segs.(g) | None -> t.segs.(3))
+            ~off:(fetch16 t) in
+        set_reg8 t 0 (t.read a);
+        8
+      | 0xa1 ->
+        let a = physical ~seg:(match !ovr with Some g -> t.segs.(g) | None -> t.segs.(3))
+            ~off:(fetch16 t) in
+        set_reg16 t 0 (t.read a lor (t.read (a + 1) lsl 8));
+        8
+      | 0xa2 ->
+        let a = physical ~seg:(match !ovr with Some g -> t.segs.(g) | None -> t.segs.(3))
+            ~off:(fetch16 t) in
+        t.write a (reg8 t 0);
+        8
+      | 0xa3 ->
+        let a = physical ~seg:(match !ovr with Some g -> t.segs.(g) | None -> t.segs.(3))
+            ~off:(fetch16 t) in
+        t.write a (reg16 t 0 land 0xff);
+        t.write (a + 1) (reg16 t 0 lsr 8);
+        8
       (* --- string ops (rep prefix 소비) --- *)
       | 0xa4 -> string_op false 0; 9
       | 0xa5 -> string_op true 0; 9
