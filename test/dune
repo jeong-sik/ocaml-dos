@@ -13,3 +13,7 @@
 (test
  (name dos_exe_test)
  (libraries dosmachine))
+
+(test
+ (name dos_fcb_test)
+ (libraries dosmachine))
