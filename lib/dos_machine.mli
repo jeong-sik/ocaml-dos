@@ -17,6 +17,19 @@ val load_com : t -> string -> unit
     스택 top 에 0x0000 — 프로그램이 RET 으로 돌아오면 PSP 의 INT 20h
     로 종료되는 실기 관례를 그대로 둔다. *)
 
+val load_exe : t -> string -> unit
+(** MZ EXE 이미지를 로드한다: 헤더 paras 를 건너뛴 이미지를 로드
+    세그먼트(0x1000 기준)에 놓고 재배치 워드에 로드 세그먼트를 더한다.
+    CS:IP/SS:SP 는 헤더값 + 로드 세그먼트. PSP 의 INT 20h 도 심는다. *)
+
+val mount_file : t -> string -> string -> unit
+(** 하네스가 게임 데이터 파일을 마운트한다 — INT 21h AH=3Dh open 이
+    이 이름(대소문자 무시)으로 찾는다. 파일 시스템은 마운트된 것만
+    보이는 하네스 계약 (호스트 경로 접근 없음). *)
+
+val frame_dims : t -> int * int
+(** 현재 비디오 모드의 프레임 크기 — 텍스트 640x400, VGA 13h 320x200. *)
+
 val step : t -> int
 (** 한 명령. 종료 후(int 21h AH=4Ch)에도 무해하게 2 를 돌려준다. *)
 

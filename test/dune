@@ -9,3 +9,7 @@
 (test
  (name dos_machine_test)
  (libraries dosmachine))
+
+(test
+ (name dos_exe_test)
+ (libraries dosmachine))
