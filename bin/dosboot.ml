@@ -87,10 +87,10 @@ let () =
        if !trace > 0 && !n mod !trace = 0 then begin
          let c = Dos_machine.cpu_of m in
          let pc = ((Cpu86.seg c 1 lsl 4) + Cpu86.dump_ip c) land 0xfffff in
-         Printf.eprintf "T %07d cs=%04x ip=%04x op=%02x sp=%04x ds=%04x es=%04x bx=%04x dx=%04x\n%!"
-           !n (Cpu86.seg c 1) (Cpu86.dump_ip c)
+         Printf.eprintf "T %07d cs=%04x ip=%04x pc=%05x op=%02x sp=%04x ss=%04x ds=%04x es=%04x bx=%04x dx=%04x\n%!"
+           !n (Cpu86.seg c 1) (Cpu86.dump_ip c) pc
            (Dos_machine.mem_read m pc) (Cpu86.reg16 c 4)
-           (Cpu86.seg c 3) (Cpu86.seg c 0) (Cpu86.reg16 c 3) (Cpu86.reg16 c 2)
+           (Cpu86.seg c 2) (Cpu86.seg c 3) (Cpu86.seg c 0) (Cpu86.reg16 c 3) (Cpu86.reg16 c 2)
        end;
        ignore (Dos_machine.step m);
        incr n;

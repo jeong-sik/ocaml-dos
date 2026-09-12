@@ -388,10 +388,17 @@ let step t =
           physical ~seg:t.segs.(s) ~off:t.regs.(6)
         in
         let seg_di () = physical ~seg:t.segs.(0) ~off:t.regs.(7) in
+        (* 8086 계약: 포인터는 그 명령이 쓰는 것만 전진한다 —
+           movs/cmps=SI·DI 둘 다, stos/scas=DI 만, lods=SI 만.
+           (둘 다 전진시키면 lodsb+stosw 조합이 반복당 DI+3 — ZZT 화면
+           stride-3 오염의 뿌리, 실측.) *)
         let step_regs () =
           let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
-          t.regs.(6) <- (t.regs.(6) + d) land 0xffff;
-          t.regs.(7) <- (t.regs.(7) + d) land 0xffff
+          let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
+          match unit_kind with
+          | 0 | 1 -> adv 6; adv 7      (* movs, cmps *)
+          | 3 -> adv 6                 (* lods *)
+          | _ -> adv 7                 (* stos, scas *)
         in
         let run_once () =
           let width = if word then 16 else 8 in
