@@ -1,6 +1,7 @@
-(* DOS 머신 M2a. Cpu86 + 1MB RAM + 텍스트 비디오(0xB8000) + INT 표면.
-   INT 는 Cpu86 의 호스트 훅으로 받아 OCaml 에서 서빙한다 — 코어의
-   스택 무변경 계약 그대로, 훅 안에서 레지스터와 VRAM 만 바꾼다. *)
+(* DOS 머신 M2b. Cpu86 + 1MB RAM + 텍스트/VGA 비디오 + INT 표면 +
+   COM/MZ-EXE 로더. INT 는 Cpu86 의 호스트 훅으로 받아 OCaml 에서
+   서빙한다 — 코어의 스택 무변경 계약 그대로, 훅 안에서 레지스터와
+   VRAM 만 바꾼다. *)
 
 type t = {
   mem : Bytes.t;                (** 1MB *)
@@ -9,6 +10,11 @@ type t = {
   mutable exited : bool;
   mutable exit_code : int;
   keys : int Queue.t;           (** BIOS 스캔 코드 — 하네스가 넣는다 *)
+  mutable vmode : int;          (** 3=텍스트, 0x13=VGA 256색 선형 *)
+  mutable pal : (int * int * int) array;  (** 256색 DAC — 6비트/채널 *)
+  host_files : (string, Bytes.t) Hashtbl.t;  (** 하네스가 마운트한 파일 *)
+  handles : (int, Bytes.t * int) Hashtbl.t;  (** 열린 핸들 → (내용, 위치) *)
+  mutable next_handle : int;
 }
 
 let vram_base = 0xB8000
@@ -22,11 +28,51 @@ let cga_palette = [|
   (0x55, 0x55, 0x55); (0x55, 0x55, 0xFF); (0x55, 0xFF, 0x55); (0x55, 0xFF, 0xFF);
   (0xFF, 0x55, 0x55); (0xFF, 0x55, 0xFF); (0xFF, 0xFF, 0x55); (0xFF, 0xFF, 0xFF) |]
 
+(* 기본 VGA 256색: 0-15 CGA, 16-31 회색 램프, 32-247 6x6x6 RGB 큐브,
+   248-255 검정. 게임이 INT 10h AH=10h 으로 DAC 을 다시 쓰지 않는
+   프로그램용 근사 — 표준 DAC 초기값과 미세 차이가 있을 수 있다. *)
+let default_vga_pal i =
+  if i < 16 then
+    let (r, g, b) = cga_palette.(i) in
+    ((r * 63) / 0xAA, (g * 63) / 0xAA, (b * 63) / 0xAA)
+  else if i < 32 then
+    let v = ((i - 16) * 63) / 15 in (v, v, v)
+  else if i < 248 then begin
+    let j = i - 32 in
+    let r = j / 36 and g = (j / 6) mod 6 and b = j mod 6 in
+    (r * 63 / 5, g * 63 / 5, b * 63 / 5)
+  end
+  else (0, 0, 0)
+
 let mem_read t a = Char.code (Bytes.get t.mem (a land 0xfffff))
+
+(* DS:DX 의 ASCIIZ 문자열 — INT 21h 파일명. create 의 INT 훅 클로저에서
+   쓰므로 원시 Bytes 를 직접 받는다. *)
+let read_asciiz_bytes mem cpu =
+  let base = ((Cpu86.seg cpu 3 lsl 4) + Cpu86.reg16 cpu 2) land 0xfffff in
+  let b = Buffer.create 16 in
+  let i = ref 0 in
+  let c = ref (Char.code (Bytes.get mem base)) in
+  while !c <> 0 && !i < 128 do
+    Buffer.add_char b (Char.chr !c);
+    incr i;
+    c := Char.code (Bytes.get mem ((base + !i) land 0xfffff))
+  done;
+  Buffer.contents b
+
+(* 텍스트 한 글자 찍기 — INT 10h teletype 과 INT 21h AH=02 가 공유. *)
+let put_char t ch attr =
+  if ch = 0x0D then t.cursor <- (t.cursor / cols) * cols
+  else if ch = 0x0A then t.cursor <- min (cols * rows) (t.cursor + cols)
+  else begin
+    let cell = vram_base + (t.cursor * 2) in
+    Bytes.set t.mem cell (Char.chr ch);
+    Bytes.set t.mem (cell + 1) (Char.chr attr);
+    t.cursor <- min (cols * rows - 1) (t.cursor + 1)
+  end
 
 let create () =
   let mem = Bytes.make (1024 * 1024) '\000' in
-  let t_ref : t option ref = ref None in
   let read a = Char.code (Bytes.get mem (a land 0xfffff)) in
   let write a v = Bytes.set mem (a land 0xfffff) (Char.chr (v land 0xff)) in
   let cpu =
@@ -35,69 +81,123 @@ let create () =
       ~port_out:(fun _ _ -> ())
   in
   let t =
-    { mem; cpu; cursor = 0; exited = false; exit_code = 0; keys = Queue.create () }
+    { mem; cpu; cursor = 0; exited = false; exit_code = 0; keys = Queue.create ();
+      vmode = 3; pal = Array.init 256 default_vga_pal;
+      host_files = Hashtbl.create 8; handles = Hashtbl.create 4; next_handle = 6 }
   in
-  t_ref := Some t;
-  (* INT 표면: 벡터별 서빙. 훅은 코어가 호출 시점 레지스터를 이미 갖고
-     있다 — AH 로 기능을 가린다. *)
   Cpu86.set_int_hook cpu (fun vec ->
       let ah = Cpu86.reg8 t.cpu 4 in
-      match vec with
-      | 0x10 ->
-        (match ah with
-         | 0x0E (* teletype 출력 — BL 하위니블이 전경색 *) ->
-           let ch = Cpu86.reg8 t.cpu 0 in
-           if ch = 0x0D then t.cursor <- (t.cursor / cols) * cols
-           else if ch = 0x0A then t.cursor <- min (cols * rows) (t.cursor + cols)
-           else begin
-             let attr = Cpu86.reg8 t.cpu 3 land 0x0f in
-             let cell = vram_base + (t.cursor * 2) in
-             Bytes.set t.mem cell (Char.chr ch);
-             Bytes.set t.mem (cell + 1) (Char.chr attr);
-             t.cursor <- min (cols * rows - 1) (t.cursor + 1)
-           end
-         | 0x0F (* 모드 읽기: AL=모드 3, AH=80 *) ->
-           Cpu86.set_reg8 t.cpu 0 3;
-           Cpu86.set_reg8 t.cpu 4 cols
-         | 0x00 (* 모드 세팅 — M2a 는 텍스트 3 번만 산다 *) -> ()
-         | _ -> ())
-      | 0x21 ->
-        (match ah with
-         | 0x4C (* 종료 *) ->
-           t.exited <- true;
-           t.exit_code <- Cpu86.reg8 t.cpu 0
-         | 0x02 (* 문자 출력 — teletype 로 우회 *) ->
-           Cpu86.set_reg8 t.cpu 4 0x0E;
-           let ch = Cpu86.reg8 t.cpu 0 in
-           Cpu86.set_reg8 t.cpu 0 ch;
-           (* 재귀 대신 직접 서빙: 간단히 커서 진행만 *)
-           if ch = 0x0D then t.cursor <- (t.cursor / cols) * cols
-           else if ch = 0x0A then t.cursor <- min (cols * rows) (t.cursor + cols)
-           else begin
-             let cell = vram_base + (t.cursor * 2) in
-             Bytes.set t.mem cell (Char.chr ch);
-             Bytes.set t.mem (cell + 1) '\x07';
-             t.cursor <- min (cols * rows - 1) (t.cursor + 1)
-           end
-         | _ -> ())
-      | 0x16 ->
-        (match ah with
-         | 0x00 | 0x10 ->
-           if Queue.is_empty t.keys then Cpu86.set_reg8 t.cpu 0 0
-           else Cpu86.set_reg8 t.cpu 0 (Queue.pop t.keys)
-         | 0x01 | 0x11 ->
-           (* 키 있으면 ZF=0 + AL, 없으면 ZF=1 *)
-           if Queue.is_empty t.keys then
-             Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_zero)
-           else begin
-             Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_zero);
-             Cpu86.set_reg8 t.cpu 0 (Queue.peek t.keys)
-           end
-         | _ -> ())
-      | 0x20 (* PSP INT 20h — RET 로 돌아온 프로그램의 종료 *) ->
-        t.exited <- true;
-        t.exit_code <- 0
-      | _ -> ());
+      (match vec with
+       | 0x10 ->
+         (match ah with
+          | 0x0E (* teletype — BL 하위니블이 전경색 *) ->
+            put_char t (Cpu86.reg8 t.cpu 0) (Cpu86.reg8 t.cpu 3 land 0x0f)
+          | 0x0F (* 모드 읽기: AL=모드 3, AH=80 *) ->
+            Cpu86.set_reg8 t.cpu 0 3;
+            Cpu86.set_reg8 t.cpu 4 cols
+          | 0x00 (* 모드 세팅: 3=텍스트, 13h=VGA 256색 *) ->
+            let al = Cpu86.reg8 t.cpu 0 in
+            if al = 0x13 then begin
+              t.vmode <- 0x13;
+              Bytes.fill t.mem 0xA0000 32000 '\000'
+            end
+            else t.vmode <- 3
+          | 0x10 (* DAC 색 설정: AL=10h 개별 — BX=색, DH=R CH=G CL=B *) ->
+            if Cpu86.reg8 t.cpu 0 = 0x10 then begin
+              let idx = Cpu86.reg16 t.cpu 3 land 0xff in
+              t.pal.(idx) <-
+                (Cpu86.reg8 t.cpu 7 land 0x3f,
+                 Cpu86.reg8 t.cpu 5 land 0x3f,
+                 Cpu86.reg8 t.cpu 1 land 0x3f)
+            end
+          | _ -> ())
+       | 0x21 ->
+         (match ah with
+          | 0x4C (* 종료 *) ->
+            t.exited <- true;
+            t.exit_code <- Cpu86.reg8 t.cpu 0
+          | 0x02 (* 문자 출력 *) ->
+            put_char t (Cpu86.reg8 t.cpu 0) 0x07
+          | 0x3D (* open: DS:DX ASCIIZ *) ->
+            let name = String.uppercase_ascii (read_asciiz_bytes mem cpu) in
+            begin match Hashtbl.find_opt t.host_files name with
+              | Some data ->
+                let h = t.next_handle in
+                t.next_handle <- t.next_handle + 1;
+                Hashtbl.replace t.handles h (data, 0);
+                Cpu86.set_reg16 t.cpu 0 h;
+                Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+              | None ->
+                Cpu86.set_reg16 t.cpu 0 2;
+                Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)
+            end
+          | 0x3F (* read: BX=핸들 CX=바이트 DS:DX=버퍼 *) ->
+            let h = Cpu86.reg16 t.cpu 3 in
+            let want = Cpu86.reg16 t.cpu 1 in
+            let buf = Cpu86.reg16 t.cpu 2 in
+            begin match Hashtbl.find_opt t.handles h with
+              | None ->
+                Cpu86.set_reg16 t.cpu 0 6;
+                Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)
+              | Some (data, pos) ->
+                let take = min want (max 0 (Bytes.length data - pos)) in
+                Bytes.blit data pos t.mem
+                  ((Cpu86.seg t.cpu 3 lsl 4) + buf) take;
+                Hashtbl.replace t.handles h (data, pos + take);
+                Cpu86.set_reg16 t.cpu 0 take;
+                Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+            end
+          | 0x3E (* close: BX=핸들 *) ->
+            Hashtbl.remove t.handles (Cpu86.reg16 t.cpu 3);
+            Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+          | 0x42 (* lseek: AL=모드 BX=핸들 CX:DX=오프셋 → DX:AX *) ->
+            let h = Cpu86.reg16 t.cpu 3 in
+            let al = Cpu86.reg8 t.cpu 0 in
+            let off32 =
+              (Cpu86.reg16 t.cpu 1 lsl 16) lor Cpu86.reg16 t.cpu 2 in
+            begin match Hashtbl.find_opt t.handles h with
+              | None ->
+                Cpu86.set_reg16 t.cpu 0 6;
+                Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)
+              | Some (data, pos) ->
+                let signed =
+                  if off32 >= 0x80000000 then off32 - 0x100000000 else off32 in
+                let size = Bytes.length data in
+                let newpos =
+                  match al with
+                  | 0 -> signed
+                  | 1 -> pos + signed
+                  | _ -> size + signed
+                in
+                if newpos < 0 || newpos > size then begin
+                  Cpu86.set_reg16 t.cpu 0 6;
+                  Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_carry)
+                end
+                else begin
+                  Hashtbl.replace t.handles h (data, newpos);
+                  Cpu86.set_reg16 t.cpu 0 (newpos land 0xffff);
+                  Cpu86.set_reg16 t.cpu 2 ((newpos lsr 16) land 0xffff);
+                  Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_carry)
+                end
+            end
+          | _ -> ())
+       | 0x16 ->
+         (match ah with
+          | 0x00 | 0x10 ->
+            if Queue.is_empty t.keys then Cpu86.set_reg8 t.cpu 0 0
+            else Cpu86.set_reg8 t.cpu 0 (Queue.pop t.keys)
+          | 0x01 | 0x11 ->
+            if Queue.is_empty t.keys then
+              Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) lor Cpu86.f_zero)
+            else begin
+              Cpu86.set_flags t.cpu ((Cpu86.flags t.cpu) land lnot Cpu86.f_zero);
+              Cpu86.set_reg8 t.cpu 0 (Queue.peek t.keys)
+            end
+          | _ -> ())
+       | 0x20 (* PSP INT 20h — RET 로 돌아온 프로그램의 종료 *) ->
+         t.exited <- true;
+         t.exit_code <- 0
+       | _ -> ()));
   t
 
 let load_com t image =
@@ -116,6 +216,49 @@ let load_com t image =
   Bytes.set t.mem 0xFFFF '\x00';
   t.exited <- false;
   t.exit_code <- 0
+
+(* MZ EXE 로더. 헤더(reloc 개수 @0x06, 헤더 paras @0x08, SS/SP/IP/CS) 를
+   읽어 이미지를 로드 세그먼트(0x1000 기준)에 놓고 재배치 워드에 로드
+   세그먼트를 더한다. PSP 는 심지 않는다: EXE 는 SS:SP 를 헤더에서 받아
+   bare-RET 관례가 없고, 이미지 시작을 덮어쓰면 첫 명령이 파괴된다
+   (실측: push cs/pop ds 가 CD 20 으로 뭉개져 실행이 어긋남). *)
+let load_exe t image =
+  let u8 i = Char.code image.[i] in
+  let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
+  if not (u8 0 = 0x4D && u8 1 = 0x5A) then invalid_arg "not an MZ image";
+  let reloc_count = u16 0x06 in
+  let header_bytes = u16 0x08 * 16 in
+  let exe_ip = u16 0x14 in
+  let exe_cs = u16 0x16 in
+  let exe_sp = u16 0x10 in
+  let exe_ss = u16 0x0E in
+  let load_seg = 0x1000 in
+  let image_base = load_seg * 16 in
+  Bytes.blit (Bytes.of_string image) header_bytes t.mem image_base
+    (String.length image - header_bytes);
+  for i = 0 to reloc_count - 1 do
+    let e = u16 0x18 + (i * 4) in
+    let off = u16 e and seg = u16 (e + 2) in
+    let addr = image_base + seg * 16 + off in
+    let old = Char.code (Bytes.get t.mem addr)
+              lor (Char.code (Bytes.get t.mem (addr + 1)) lsl 8) in
+    let v = old + load_seg in
+    Bytes.set t.mem addr (Char.chr (v land 0xff));
+    Bytes.set t.mem (addr + 1) (Char.chr ((v lsr 8) land 0xff))
+  done;
+  Cpu86.set_seg t.cpu 1 (load_seg + exe_cs);   (* CS *)
+  Cpu86.set_ip t.cpu exe_ip;
+  Cpu86.set_seg t.cpu 2 (load_seg + exe_ss);   (* SS *)
+  Cpu86.set_reg16 t.cpu 4 exe_sp;
+  Cpu86.set_seg t.cpu 3 (load_seg + exe_cs);   (* DS=CS 근사: 게임이 직접 재설정 *)
+  Cpu86.set_seg t.cpu 0 (load_seg + exe_cs);   (* ES *)
+  t.exited <- false;
+  t.exit_code <- 0
+
+(* 하네스가 게임 데이터 파일을 마운트한다 — INT 21h open 이 이 이름으로
+   찾는다. 이름은 대소문자 무시로 매칭. *)
+let mount_file t name data =
+  Hashtbl.replace t.host_files (String.uppercase_ascii name) (Bytes.of_string data)
 
 let step t =
   if t.exited || Cpu86.halted t.cpu then 2 else Cpu86.step t.cpu
@@ -142,32 +285,48 @@ let screen_text t =
   done;
   Buffer.contents b
 
+(* 현재 비디오 모드의 프레임 크기 — 렌더러/하네스 계약. *)
+let frame_dims t = if t.vmode = 0x13 then (320, 200) else (640, 400)
+
 let frame_rgb t =
-  (* 640x400: 각 셀 8x8 글리프 스케일업. 속성 바이트의 하위니블=전경,
-     상위니블=배경. 폰트는 1비트/행 — MSB 가 왼쪽. *)
-  let img = Bytes.make (640 * 400 * 3) '\000' in
-  for r = 0 to rows - 1 do
-    for c = 0 to cols - 1 do
-      let cell = vram_base + ((r * cols + c) * 2) in
-      let ch = Char.code (Bytes.get t.mem cell) in
-      let attr = Char.code (Bytes.get t.mem (cell + 1)) in
-      let fr, fg, fb = cga_palette.(attr land 0x0f) in
-      let br, bg, bb = cga_palette.((attr lsr 4) land 0x07) in
-      let glyph = Font8x8.glyph ch in
-      for gy = 0 to 7 do
-        let bits = glyph.(gy) in
-        let ybase = ((r * 8 + gy) * 640 + c * 8) * 3 in
-        for gx = 0 to 7 do
-          let on = bits land (0x80 lsr gx) <> 0 in
-          let i = ybase + (gx * 3) in
-          let rr, gg, bb2 = if on then (fr, fg, fb) else (br, bg, bb) in
-          Bytes.set img i (Char.chr rr);
-          Bytes.set img (i + 1) (Char.chr gg);
-          Bytes.set img (i + 2) (Char.chr bb2)
+  if t.vmode = 0x13 then begin
+    (* VGA 13h: 0xA0000 선형 320x200, DAC 은 6비트/채널. *)
+    let img = Bytes.make (320 * 200 * 3) '\000' in
+    for i = 0 to 320 * 200 - 1 do
+      let r, g, b = t.pal.(Char.code (Bytes.get t.mem (0xA0000 + i))) in
+      Bytes.set img (i * 3) (Char.chr ((r * 255) / 63));
+      Bytes.set img (i * 3 + 1) (Char.chr ((g * 255) / 63));
+      Bytes.set img (i * 3 + 2) (Char.chr ((b * 255) / 63))
+    done;
+    Bytes.to_string img
+  end
+  else begin
+    (* 텍스트 640x400: 각 셀 8x8 글리프 스케일업. 속성 바이트의 하위니블=
+       전경, 상위니블=배경. 폰트는 1비트/행 — MSB 가 왼쪽. *)
+    let img = Bytes.make (640 * 400 * 3) '\000' in
+    for r = 0 to rows - 1 do
+      for c = 0 to cols - 1 do
+        let cell = vram_base + ((r * cols + c) * 2) in
+        let ch = Char.code (Bytes.get t.mem cell) in
+        let attr = Char.code (Bytes.get t.mem (cell + 1)) in
+        let fr, fg, fb = cga_palette.(attr land 0x0f) in
+        let br, bg, bb = cga_palette.((attr lsr 4) land 0x07) in
+        let glyph = Font8x8.glyph ch in
+        for gy = 0 to 7 do
+          let bits = glyph.(gy) in
+          let ybase = ((r * 8 + gy) * 640 + c * 8) * 3 in
+          for gx = 0 to 7 do
+            let on = bits land (0x80 lsr gx) <> 0 in
+            let i = ybase + (gx * 3) in
+            let rr, gg, bb2 = if on then (fr, fg, fb) else (br, bg, bb) in
+            Bytes.set img i (Char.chr rr);
+            Bytes.set img (i + 1) (Char.chr gg);
+            Bytes.set img (i + 2) (Char.chr bb2)
+          done
         done
       done
-    done
-  done;
-  Bytes.to_string img
+    done;
+    Bytes.to_string img
+  end
 
 let push_key t sc = Queue.push sc t.keys
