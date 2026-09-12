@@ -57,5 +57,13 @@ val push_key : t -> int -> unit
 val cpu_of : t -> Cpu86.t
 (** 내부 CPU — 하네스 진단(위치 덤프)용 읽기 전용 접근. *)
 
+(** load_exe/load_com 이 정한 PSP 세그먼트 — 기본 DTA 는 PSP:0x80 *)
+val psp_seg_of : t -> int
+
+(** 직전 INT 16h AH=00 이 빈 링으로 즉시 복귀했는가 — 실기라면 블록 중.
+    하네스(자동 투입기)가 이걸 보고 키를 넣는다. AH=01 폴링엔 반응하지
+    않는다(게임 플레이 중 정상 상태라 키를 함부로 넣으면 안 된다). *)
+val kbd_waiting : t -> bool
+
 val mem_read : t -> int -> int
 (** 물리 주소 1바이트 — 디버깅용. *)

@@ -66,7 +66,8 @@ let () =
   let m = Dos_machine.create () in
   Dos_machine.load_com m
     ("\xb4\x00\xcd\x16\xb4\x0e\xcd\x10\xb8\x00\x4c\xcd\x21" ^ "Q");
-  Dos_machine.push_key m (Char.code 'Q');
+  (* push_key 계약: (스캔<<8)|ASCII 워드 — Q 스캔코드 0x10 *)
+  Dos_machine.push_key m ((0x10 lsl 8) lor Char.code 'Q');
   Dos_machine.run m ~max_steps:200;
   checkb "int16 key read" (contains_sub (Dos_machine.screen_text m) "Q") true;
   checkb "int16 program exited" (Dos_machine.exited m) true;

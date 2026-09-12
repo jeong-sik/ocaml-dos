@@ -43,11 +43,13 @@ let () =
   Dos_machine.run m ~max_steps:500;
   checkb "fcb exited" (Dos_machine.exited m) true;
   check "fcb exit 0 (open+read ok)" (Dos_machine.exit_code m) 0;
-  (* DTA(기본 0x80) 에 첫 레코드 128 바이트 *)
-  check "fcb dta A" (Dos_machine.mem_read m 0x80) (Char.code 'A');
-  check "fcb dta B" (Dos_machine.mem_read m 0x81) (Char.code 'B');
-  (* 파일 크기 가 FCB+0x10 dword 에 *)
-  check "fcb size lo" (Dos_machine.mem_read m (0x10100 + 0x14 + 0x10)) 226;
+  (* 주소는 load_exe 의 PSP 배치를 따른다 — 하드코딩 금지(memtop 공식) *)
+  let base = Dos_machine.psp_seg_of m * 16 in
+  (* DTA(기본 PSP:0x80) 에 첫 레코드 128 바이트 *)
+  check "fcb dta A" (Dos_machine.mem_read m (base + 0x80)) (Char.code 'A');
+  check "fcb dta B" (Dos_machine.mem_read m (base + 0x81)) (Char.code 'B');
+  (* 파일 크기 가 FCB+0x10 dword 에 — 이미지 시작 = PSP+0x100, FCB 는 +0x14 *)
+  check "fcb size lo" (Dos_machine.mem_read m (base + 0x100 + 0x14 + 0x10)) 226;
 
   (* 없는 파일: open AL=FF → fail 경로 exit 1 *)
   let m = Dos_machine.create () in
