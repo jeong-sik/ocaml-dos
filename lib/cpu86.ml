@@ -33,6 +33,7 @@ type t = {
   mutable of_ : bool;
   mutable halted : bool;
   mutable cycles : int;
+  mutable int_hook : (int -> unit) option;
   read : int -> int;
   write : int -> int -> unit;
   port_in : int -> int;
@@ -50,11 +51,13 @@ let create ~read ~write ~port_in ~port_out =
     tf = false; intf = true; df = false; of_ = false;
     halted = false;
     cycles = 0;
+    int_hook = None;
     read; write; port_in; port_out;
   }
 
 let halted t = t.halted
 let cycles t = t.cycles
+let set_int_hook t f = t.int_hook <- Some f
 
 let reg16 t n = t.regs.(n)
 let set_reg16 t n v = t.regs.(n) <- v land 0xffff
@@ -156,15 +159,17 @@ type operand =
   | Reg of int       (** 레지스터 번호 (폭은 문맥) *)
   | Mem of int       (** 물리 주소 (세그먼트 적용 완료) *)
 
-(* modrm 디코드. 반환: (mod, reg필드, 피연산자). 세그먼트 override 가
-   있으면 [~ovr] 로, 없으면 기본 규칙(BP 기반 = SS, 나머지 = DS). *)
+(* modrm 디코드. 반환: (mod, reg필드, 피연산자, 유효주소 오프셋).
+   오프셋은 메모리 피연산자일 때만 Some — LEA 가 세그먼트를 더하기 전
+   오프셋을 필요로 한다. 세그먼트 override 가 있으면 [~ovr], 없으면
+   기본 규칙(BP 기반 = SS, 나머지 = DS). *)
 let decode_modrm t ~ovr =
   let byte = fetch8 t in
   let m = byte lsr 6 in
   let regf = (byte lsr 3) land 7 in
   let rm = byte land 7 in
-  let operand =
-    if m = 3 then Reg rm
+  let operand, ea =
+    if m = 3 then (Reg rm, None)
     else begin
       let base =
         match rm with
@@ -190,10 +195,11 @@ let decode_modrm t ~ovr =
         | Some s -> s
         | None -> if rm = 2 || rm = 3 || (rm = 6 && m <> 0) then 2 else 3
       in
-      Mem (physical ~seg:t.segs.(segsel) ~off:((base + disp) land 0xffff))
+      let off = (base + disp) land 0xffff in
+      (Mem (physical ~seg:t.segs.(segsel) ~off:off), Some off)
     end
   in
-  (m, regf, operand)
+  (m, regf, operand, ea)
 
 let op_read t width = function
   | Reg n -> if width = 8 then reg8 t n else reg16 t n
@@ -256,14 +262,15 @@ let step t =
   else begin
     let base_ip = t.ip in
     let used_cycles =
-      (* prefix: 세그먼트 override 만 M0. rep/lock 은 string 명령과 함께 M1. *)
+      (* prefix: 세그먼트 override 와 rep. [rep] 은 Some true(rep)/false(repnz)
+         — string 명령만 소비하고 다른 명령에 붙으면 무시한다(8086 문서 동작). *)
       let ovr = ref None in
+      let rep = ref None in
       let rec prefixes () =
         match fetch8 t with
-        | 0xf0 | 0xf2 | 0xf3 ->
-          (* lock/repnz/rep — string 명령 없이는 prefix 로 무의미하다.
-             M0 은 소비만 하고 넘어간다 (페치 부작용 없음 — opcode 가 뒤에 온다). *)
-          prefixes ()
+        | 0xf0 -> prefixes ()                       (* lock *)
+        | 0xf2 -> rep := Some false; prefixes ()    (* repnz *)
+        | 0xf3 -> rep := Some true; prefixes ()     (* rep/repz *)
         | b ->
           (match seg_override_of b with
            | Some s -> ovr := Some s; prefixes ()
@@ -280,7 +287,7 @@ let step t =
         match opcode land 7 with
         | 0 | 1 ->
           let width = if opcode land 1 = 0 then 8 else 16 in
-          let _, regf, rm = decode_modrm t ~ovr:!ovr in
+          let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
           let a = op_read t width rm in
           let b = if width = 8 then reg8 t regf else reg16 t regf in
           let r = alu_result t op a b width in
@@ -288,7 +295,7 @@ let step t =
           3
         | 2 | 3 ->
           let width = if opcode land 1 = 0 then 8 else 16 in
-          let _, regf, rm = decode_modrm t ~ovr:!ovr in
+          let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
           let a = if width = 8 then reg8 t regf else reg16 t regf in
           let b = op_read t width rm in
           let r = alu_result t op a b width in
@@ -303,6 +310,116 @@ let step t =
           4
         | _ -> bad "alu form"
       in
+      (* 그룹2 shift/rotate: regf 0=rol 1=ror 2=rcl 3=rcr 4=shl 5=shr
+         6=shl(undoc sal) 7=sar. count 0 은 플래그도 건드리지 않는다.
+         ZF/SF/PF 는 논리 shift 만 갱신(rotate 는 갱신 안 함 — 8086 규칙),
+         OF 는 count=1 일 때만 정의된다. *)
+      let shift_group regf width rm_op count =
+        if count > 0 then begin
+          let mask = if width = 8 then 0xff else 0xffff in
+          let msb = if width = 8 then 0x80 else 0x8000 in
+          let bits = width in
+          let v = ref (op_read t width rm_op) in
+          for _ = 1 to count do
+            match regf with
+            | 0 ->
+              t.cf <- !v land msb <> 0;
+              v := ((!v lsl 1) lor (!v lsr (bits - 1))) land mask
+            | 1 ->
+              t.cf <- !v land 1 <> 0;
+              v := ((!v lsr 1) lor (!v lsl (bits - 1))) land mask
+            | 2 ->
+              let c = t.cf in
+              t.cf <- !v land msb <> 0;
+              v := ((!v lsl 1) lor (if c then 1 else 0)) land mask
+            | 3 ->
+              let c = t.cf in
+              t.cf <- !v land 1 <> 0;
+              v := ((!v lsr 1) lor (if c then msb else 0)) land mask
+            | 5 ->
+              t.cf <- !v land 1 <> 0;
+              v := !v lsr 1
+            | 7 ->
+              t.cf <- !v land 1 <> 0;
+              let sv = if !v land msb <> 0 then !v - (mask + 1) else !v in
+              v := (sv asr 1) land mask
+            | _ (* 4 shl / 6 sal *) ->
+              t.cf <- !v land msb <> 0;
+              v := (!v lsl 1) land mask
+          done;
+          op_write t width rm_op !v;
+          if regf >= 4 then begin
+            t.zf <- !v = 0;
+            t.sf <- !v land msb <> 0;
+            t.pf <- parity_even !v
+          end;
+          if count = 1 then begin
+            match regf with
+            | 0 | 2 | 4 | 6 -> t.of_ <- t.cf <> (!v land msb <> 0)
+            | 7 -> t.of_ <- false
+            | _ ->
+              (* ror/rcr/shr: 결과 최상위 두 비트가 다르면 OF. *)
+              let b1 = !v land msb <> 0 in
+              let b2 = !v land (msb lsr 1) <> 0 in
+              t.of_ <- b1 <> b2
+          end
+        end
+      in
+      let do_int n =
+        match t.int_hook with
+        | Some f -> f n
+        | None -> bad (Printf.sprintf "int %02x (no hook)" n)
+      in
+      (* string ops: DS:[SI] → ES:[DI], DF 가 방향. rep 은 CX 카운터 —
+         cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. *)
+      let string_op word unit_kind =
+        let seg_si () =
+          let s = match !ovr with Some s -> s | None -> 3 in
+          physical ~seg:t.segs.(s) ~off:t.regs.(6)
+        in
+        let seg_di () = physical ~seg:t.segs.(0) ~off:t.regs.(7) in
+        let step_regs () =
+          let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
+          t.regs.(6) <- (t.regs.(6) + d) land 0xffff;
+          t.regs.(7) <- (t.regs.(7) + d) land 0xffff
+        in
+        let run_once () =
+          let width = if word then 16 else 8 in
+          match unit_kind with
+          | 0 (* movs *) ->
+            let a = seg_si () in
+            let v = op_read t width (Mem a) in
+            op_write t width (Mem (seg_di ())) v
+          | 1 (* cmps *) ->
+            let a = alu_result t 7 (op_read t width (Mem (seg_si ())))
+                        (op_read t width (Mem (seg_di ()))) width in
+            ignore a
+          | 2 (* stos *) ->
+            op_write t width (Mem (seg_di ())) (if word then reg16 t 0 else reg8 t 0)
+          | 3 (* lodsb/lodsw: lod *) ->
+            let v = op_read t width (Mem (seg_si ())) in
+            (if word then set_reg16 t 0 v else set_reg8 t 0 v)
+          | _ (* scas *) ->
+            let al = if word then reg16 t 0 else reg8 t 0 in
+            let d = op_read t width (Mem (seg_di ())) in
+            ignore (alu_result t 7 al d width)
+        in
+        match !rep with
+        | None -> run_once (); step_regs ()
+        | Some want_zf ->
+          if t.regs.(1) = 0 then ()  (* CX=0: 실행 없음 *)
+          else begin
+            let continue_ = ref true in
+            while !continue_ && t.regs.(1) <> 0 do
+              run_once ();
+              step_regs ();
+              t.regs.(1) <- t.regs.(1) - 1;
+              (* cmps/scas 만 조기 종료 판정 *)
+              if unit_kind = 1 || unit_kind = 4 then
+                continue_ := (t.zf = want_zf)
+            done
+          end
+      in
       match opcode with
       (* --- ALU 8종: opcode lsr 3 = 연산, 하위 3비트 = 형태. --- *)
       | 0x00 | 0x01 | 0x02 | 0x03 | 0x04 | 0x05 -> alu_group 0
@@ -316,13 +433,13 @@ let step t =
       (* --- mov --- *)
       | 0x88 | 0x89 ->
         let width = if opcode = 0x88 then 8 else 16 in
-        let _, regf, rm = decode_modrm t ~ovr:!ovr in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         let v = if width = 8 then reg8 t regf else reg16 t regf in
         op_write t width rm v;
         2
       | 0x8a | 0x8b ->
         let width = if opcode = 0x8a then 8 else 16 in
-        let _, regf, rm = decode_modrm t ~ovr:!ovr in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         let v = op_read t width rm in
         op_write t width (Reg regf) v;
         2
@@ -368,13 +485,358 @@ let step t =
         let d = if d >= 0x80 then d - 0x100 else d in
         t.ip <- (t.ip + d) land 0xffff;
         7
+      | 0xe8 ->
+        let d = fetch16 t in
+        push16 t t.ip;
+        t.ip <- (t.ip + d) land 0xffff;
+        13
       | 0xe9 ->
         let d = fetch16 t in
         t.ip <- (t.ip + d) land 0xffff;
         7
       (* --- hlt --- *)
       | 0xf4 -> t.halted <- true; 2
-      (* --- 나머지: M1 이후. 예외로 하네스에 알린다. --- *)
+      (* --- push/pop 세그먼트 (0x0F pop cs 는 8086 에만 유효) --- *)
+      | 0x06 -> push16 t (seg t 0); 10
+      | 0x0e -> push16 t (seg t 1); 10
+      | 0x16 -> push16 t (seg t 2); 10
+      | 0x1e -> push16 t (seg t 3); 10
+      | 0x07 -> set_seg t 0 (pop16 t); 8
+      | 0x0f -> set_seg t 1 (pop16 t); 8
+      | 0x17 -> set_seg t 2 (pop16 t); 8
+      | 0x1f -> set_seg t 3 (pop16 t); 8
+      (* --- 그룹1: ALU rm,imm (0x83 은 imm8 부호확장) --- *)
+      | 0x80 | 0x81 | 0x82 | 0x83 ->
+        let width = if opcode land 1 = 1 then 16 else 8 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        let imm =
+          if width = 8 then fetch8 t
+          else if opcode = 0x83 then begin
+            let d = fetch8 t in
+            if d >= 0x80 then d lor 0xff00 else d
+          end
+          else fetch16 t
+        in
+        let a = op_read t width rm in
+        let r = alu_result t regf a imm width in
+        if regf <> 7 then op_write t width rm r;
+        4
+      (* --- test / xchg --- *)
+      | 0x84 | 0x85 ->
+        let width = if opcode = 0x84 then 8 else 16 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        let a = op_read t width rm in
+        let b = if width = 8 then reg8 t regf else reg16 t regf in
+        ignore (alu_result t 4 a b width);
+        3
+      | 0xa8 ->
+        let a = reg8 t 0 in
+        ignore (alu_result t 4 a (fetch8 t) 8);
+        4
+      | 0xa9 ->
+        let a = reg16 t 0 in
+        ignore (alu_result t 4 a (fetch16 t) 16);
+        4
+      | 0x86 | 0x87 ->
+        let width = if opcode = 0x86 then 8 else 16 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        let a = op_read t width rm in
+        let b = if width = 8 then reg8 t regf else reg16 t regf in
+        op_write t width (Reg regf) a;
+        op_write t width rm b;
+        4
+      | b when b >= 0x90 && b <= 0x97 ->
+        (* xchg ax,r — 0x90 은 xchg ax,ax = NOP *)
+        let n = opcode land 7 in
+        if n <> 0 then begin
+          let a = reg16 t 0 in
+          set_reg16 t 0 (reg16 t n);
+          set_reg16 t n a
+        end;
+        3
+      (* --- lea / mov sreg / pop rm --- *)
+      | 0x8d ->
+        let _, regf, _, ea = decode_modrm t ~ovr:!ovr in
+        (match ea with
+         | Some off -> set_reg16 t regf off
+         | None -> bad "lea on register");
+        2
+      | 0x8c ->
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        op_write t 16 rm (seg t regf);
+        2
+      | 0x8e ->
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        set_seg t regf (op_read t 16 rm);
+        2
+      | 0x8f ->
+        let _, _, rm, _ = decode_modrm t ~ovr:!ovr in
+        op_write t 16 rm (pop16 t);
+        8
+      (* --- cbw / cwd --- *)
+      | 0x98 ->
+        let al = reg8 t 0 in
+        set_reg16 t 0 (if al >= 0x80 then al lor 0xff00 else al);
+        2
+      | 0x99 ->
+        let ax = reg16 t 0 in
+        set_reg16 t 2 (if ax >= 0x8000 then 0xffff else 0);
+        2
+      (* --- call far imm / pushf / popf / sahf / lahf --- *)
+      | 0x9a ->
+        let off = fetch16 t in
+        let s = fetch16 t in
+        push16 t (seg t 1);
+        push16 t t.ip;
+        set_seg t 1 s;
+        t.ip <- off;
+        13
+      | 0x9c -> push16 t ((flags t) lor 0xf002); 10
+      | 0x9d -> set_flags t (pop16 t); 8
+      | 0x9e ->
+        let ah = reg8 t 4 in
+        t.cf <- ah land 1 <> 0; t.pf <- ah land 4 <> 0;
+        t.af <- ah land 0x10 <> 0; t.zf <- ah land 0x40 <> 0;
+        t.sf <- ah land 0x80 <> 0;
+        4
+      | 0x9f ->
+        let b bit = if bit then 1 else 0 in
+        set_reg8 t 4
+          (0x02 lor b t.cf lor (b t.pf lsl 2) lor (b t.af lsl 4)
+             lor (b t.zf lsl 6) lor (b t.sf lsl 7));
+        4
+      (* --- string ops (rep prefix 소비) --- *)
+      | 0xa4 -> string_op false 0; 9
+      | 0xa5 -> string_op true 0; 9
+      | 0xa6 -> string_op false 1; 9
+      | 0xa7 -> string_op true 1; 9
+      | 0xaa -> string_op false 2; 7
+      | 0xab -> string_op true 2; 7
+      | 0xac -> string_op false 3; 7
+      | 0xad -> string_op true 3; 7
+      | 0xae -> string_op false 4; 7
+      | 0xaf -> string_op true 4; 7
+      (* --- ret / jmp far / mov rm,imm --- *)
+      | 0xc2 ->
+        let n = fetch16 t in
+        t.ip <- pop16 t;
+        t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+        10
+      | 0xc3 -> t.ip <- pop16 t; 8
+      | 0xc6 | 0xc7 ->
+        let width = if opcode = 0xc6 then 8 else 16 in
+        let _, _, rm, _ = decode_modrm t ~ovr:!ovr in
+        let v = if width = 8 then fetch8 t else fetch16 t in
+        op_write t width rm v;
+        4
+      (* --- int / iret --- *)
+      | 0xcc -> do_int 3; 25
+      | 0xcd ->
+        let n = fetch8 t in
+        do_int n;
+        25
+      | 0xce -> if t.of_ then do_int 4 else (); 4
+      | 0xcf ->
+        t.ip <- pop16 t;
+        set_seg t 1 (pop16 t);
+        set_flags t (pop16 t);
+        8
+      (* --- 그룹2: shift/rotate (count 1 또는 CL) --- *)
+      | 0xd0 | 0xd1 | 0xd2 | 0xd3 ->
+        let width = if opcode land 1 = 0 then 8 else 16 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        let count = if opcode < 0xd2 then 1 else reg8 t 1 (* CL *) in
+        shift_group regf width rm count;
+        if opcode < 0xd2 then 4 else 8
+      (* --- aam / aad (BCD 조정 — aam 은 십진 변환에 자주 쓰인다) --- *)
+      | 0xd4 ->
+        let base = fetch8 t in
+        let al = reg8 t 0 in
+        if base = 0 then do_int 0
+        else begin
+          set_reg8 t 4 (al / base);
+          set_reg8 t 0 (al mod base);
+          t.zf <- al mod base = 0 && al / base = 0;
+          t.sf <- (al / base) land 0x80 <> 0;
+          t.pf <- parity_even ((al / base) lor (al mod base))
+        end;
+        15
+      | 0xd5 ->
+        let ah = reg8 t 4 in
+        let al = reg8 t 0 in
+        let v = ah * 10 + al in
+        set_reg16 t 0 v;
+        t.sf <- v land 0x80 <> 0;
+        t.zf <- v land 0xff = 0;
+        t.pf <- parity_even v;
+        10
+      (* --- xlat --- *)
+      | 0xd7 ->
+        let a = physical ~seg:t.segs.(3) ~off:((reg16 t 3) + reg8 t 0) in
+        set_reg8 t 0 (t.read a);
+        7
+      (* --- loopnz/loopz/loop/jcxz --- *)
+      | 0xe0 | 0xe1 | 0xe2 ->
+        let d = fetch8 t in
+        let d = if d >= 0x80 then d - 0x100 else d in
+        t.regs.(1) <- (t.regs.(1) - 1) land 0xffff;
+        let take =
+          match opcode with
+          | 0xe0 -> t.regs.(1) <> 0 && not t.zf
+          | 0xe1 -> t.regs.(1) <> 0 && t.zf
+          | _ -> t.regs.(1) <> 0
+        in
+        if take then t.ip <- (t.ip + d) land 0xffff;
+        5
+      | 0xe3 ->
+        let d = fetch8 t in
+        let d = if d >= 0x80 then d - 0x100 else d in
+        if t.regs.(1) = 0 then t.ip <- (t.ip + d) land 0xffff;
+        5
+      (* --- in/out --- *)
+      | 0xe4 -> set_reg8 t 0 (t.port_in (fetch8 t)); 10
+      | 0xe5 -> set_reg16 t 0 (t.port_in (fetch8 t)); 10
+      | 0xe6 -> t.port_out (fetch8 t) (reg8 t 0); 10
+      | 0xe7 -> t.port_out (fetch8 t) (reg16 t 0); 10
+      | 0xec -> set_reg8 t 0 (t.port_in (reg16 t 2)); 8
+      | 0xed -> set_reg16 t 0 (t.port_in (reg16 t 2)); 8
+      | 0xee -> t.port_out (reg16 t 2) (reg8 t 0); 8
+      | 0xef -> t.port_out (reg16 t 2) (reg16 t 0); 8
+      (* --- jmp far imm --- *)
+      | 0xea ->
+        let off = fetch16 t in
+        let s = fetch16 t in
+        set_seg t 1 s;
+        t.ip <- off;
+        7
+      (* --- flag ops --- *)
+      | 0xf5 -> t.cf <- not t.cf; 2
+      | 0xf8 -> t.cf <- false; 2
+      | 0xf9 -> t.cf <- true; 2
+      | 0xfa -> t.intf <- false; 2
+      | 0xfb -> t.intf <- true; 2
+      | 0xfc -> t.df <- false; 2
+      | 0xfd -> t.df <- true; 2
+      (* --- 그룹3: test/not/neg/mul/imul/div/idiv --- *)
+      | 0xf6 | 0xf7 ->
+        let width = if opcode = 0xf6 then 8 else 16 in
+        let mask = if width = 8 then 0xff else 0xffff in
+        let msb = if width = 8 then 0x80 else 0x8000 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        (match regf with
+         | 0 | 1 ->
+           let imm = if width = 8 then fetch8 t else fetch16 t in
+           ignore (alu_result t 4 (op_read t width rm) imm width)
+         | 2 (* not — 플래그 무변화 *) ->
+           op_write t width rm (lnot (op_read t width rm) land mask)
+         | 3 (* neg *) ->
+           let v = op_read t width rm in
+           let r = alu_result t 5 0 v width in
+           op_write t width rm r
+         | 4 (* mul, 부호 없음 *) ->
+           if width = 8 then begin
+             let p = (reg8 t 0) * (op_read t 8 rm) in
+             set_reg16 t 0 p;
+             t.cf <- p > 0xff; t.of_ <- p > 0xff
+           end else begin
+             let p = (reg16 t 0) * (op_read t 16 rm) in
+             set_reg16 t 0 (p land 0xffff);
+             set_reg16 t 2 (p lsr 16);
+             t.cf <- p > 0xffff; t.of_ <- p > 0xffff
+           end
+         | 5 (* imul, 부호 *) ->
+           let sx v = if v land msb <> 0 then v - (mask + 1) else v in
+           if width = 8 then begin
+             let p = sx (reg8 t 0) * sx (op_read t 8 rm) in
+             set_reg16 t 0 (p land 0xffff);
+             t.cf <- p > 0x7f || p < -0x80;
+             t.of_ <- p > 0x7f || p < -0x80
+           end else begin
+             let p = sx (reg16 t 0) * sx (op_read t 16 rm) in
+             set_reg16 t 0 (p land 0xffff);
+             set_reg16 t 2 ((p lsr 16) land 0xffff);
+             t.cf <- p > 0x7fff || p < -0x8000;
+             t.of_ <- p > 0x7fff || p < -0x8000
+           end
+         | 6 | 7 (* div/idiv — 0 나누기·몫 오버플로는 인터럽트 0 *) ->
+           let sx v = if v land msb <> 0 then v - (mask + 1) else v in
+           let divisor = op_read t width rm in
+           if divisor = 0 then do_int 0
+           else begin
+             let dividend =
+               if width = 8 then reg16 t 0
+               else ((reg16 t 2) lsl 16) lor (reg16 t 0)
+             in
+             if regf = 6 then begin
+               let q = dividend / divisor and r = dividend mod divisor in
+               if q > mask then do_int 0
+               else begin
+                 if width = 8 then begin
+                   set_reg8 t 0 q; set_reg8 t 4 r
+                 end else begin
+                   set_reg16 t 0 q; set_reg16 t 2 r
+                 end
+               end
+             end else begin
+               let sd = sx divisor in
+               (* 16비트 피젯수(8비트 폭) / 32비트(16비트 폭) 의 부호 해석 *)
+               let sdiv =
+                 if width = 8 then (if dividend land 0x8000 <> 0 then dividend - 0x10000 else dividend)
+                 else begin
+                   (* DX:AX 를 32비트 부호로 *)
+                   if dividend land 0x80000000 <> 0 then dividend - 0x100000000 else dividend
+                 end
+               in
+               let q = sdiv / sd and r = sdiv mod sd in
+               let lo = if width = 8 then -0x80 else -0x8000 in
+               let hi = if width = 8 then 0x7f else 0x7fff in
+               if q > hi || q < lo then do_int 0
+               else begin
+                 if width = 8 then begin
+                   set_reg8 t 0 (q land 0xff); set_reg8 t 4 (r land 0xff)
+                 end else begin
+                   set_reg16 t 0 (q land 0xffff); set_reg16 t 2 (r land 0xffff)
+                 end
+               end
+             end
+           end
+         | _ -> bad "group3");
+        30
+      (* --- 그룹 FE/FF: inc/dec rm, call/jmp rm, push rm --- *)
+      | 0xfe | 0xff ->
+        let width = if opcode = 0xfe then 8 else 16 in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        (match regf, opcode with
+         | 0, _ (* inc rm — CF 유지 *) ->
+           let saved_cf = t.cf in
+           let r = alu_result t 0 (op_read t width rm) 1 width in
+           t.cf <- saved_cf;
+           op_write t width rm r
+         | 1, _ (* dec rm *) ->
+           let saved_cf = t.cf in
+           let r = alu_result t 5 (op_read t width rm) 1 width in
+           t.cf <- saved_cf;
+           op_write t width rm r
+         | 2, 0xff -> push16 t t.ip; set_ip t (op_read t 16 rm)
+         | 3, 0xff ->
+           (match rm with
+            | Mem a ->
+              push16 t (seg t 1);
+              push16 t t.ip;
+              set_seg t 1 (t.read (a + 2) lor (t.read (a + 3) lsl 8));
+              t.ip <- t.read a lor (t.read (a + 1) lsl 8)
+            | _ -> bad "call far reg")
+         | 4, 0xff -> set_ip t (op_read t 16 rm)
+         | 5, 0xff ->
+           (match rm with
+            | Mem a ->
+              set_seg t 1 (t.read (a + 2) lor (t.read (a + 3) lsl 8));
+              t.ip <- t.read a lor (t.read (a + 1) lsl 8)
+            | _ -> bad "jmp far reg")
+         | 6, 0xff -> push16 t (op_read t 16 rm)
+         | _ -> bad "group FE/FF");
+        15
+      (* --- 나머지: BCD 조정(daa/das/aaa/aas), esc, wait 등. 예외로 알린다. --- *)
       | _ ->
         bad (Printf.sprintf "opcode %02x" opcode)
     in

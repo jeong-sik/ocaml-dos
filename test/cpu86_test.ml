@@ -113,12 +113,12 @@ let () =
   let t = run_from "\xf4" in
   ignore (Cpu86.step t);
   checkb "hlt sets halted" (Cpu86.halted t) true;
-  (* 미구현 opcode 는 예외 (call rel16 E9 아님 — 0xE8 call) *)
+  (* 미구현 opcode 는 예외 (0x9B wait — M1 이후의 명령) *)
   (try
-     let t = run_from "\xe8\x00\x00" in
+     let t = run_from "\x9b" in
      ignore (Cpu86.step t);
      incr failed;
-     Printf.eprintf "FAIL unsupported call: no exception\n%!"
+     Printf.eprintf "FAIL unsupported wait: no exception\n%!"
    with Cpu86.Unsupported _ -> ());
   if !failed = 0 then print_endline "cpu86 M0: all passed"
   else begin
