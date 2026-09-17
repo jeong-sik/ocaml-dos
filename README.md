@@ -16,7 +16,7 @@
 | M1 | 명령 집합 완성 — call/ret, 그룹 80-83/FE/FF, string+rep, mul/div, shift | 완료 |
 | M2 | MZ EXE 로더, INT 21h 파일 표면, VGA Mode 13h | 완료 |
 | M3 | 실게임 — ZZT 보드 렌더, 방향키 이동, 메뉴 키, 세이브 파일 | 완료 |
-| M4 | 삼국지 III — KOEI.COM 로더 사슬 부팅(FMDRV TSR → OPEN → MAIN 게임 루프) | 진행 |
+| M4 | 삼국지 III — KOEI.COM 로더 사슬 완주(FMDRV TSR → OPEN → MAIN → END 정상 종료), MAIN 텍스트·도형 렌더. 남은 관문: MAIN 진행 중 팔레트 페이드인 | 진행 |
 
 ## CPU 정확성
 
@@ -64,7 +64,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 ## 기계가 주는 것
 
 - **BIOS**: INT 10h(모드·커서·스크롤·문자·DAC·폰트·문자열), 11h 장비,
-  12h 메모리, 16h 키보드, 1Ah 시각, 33h 마우스
+  12h 메모리, 16h 키보드, 1Ah 시각, 33h 마우스. ROM F000:FA6E 에 IBM
+  BIOS 표준 자리의 8x8 글꼴(0x20-0x7E)이 실려 있다 — 그래픽 모드에서
+  글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측)
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
