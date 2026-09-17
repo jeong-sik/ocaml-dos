@@ -118,6 +118,13 @@ let asciiz_at t base =
 
 (* ---------- 플래그 도우미 ---------- *)
 
+(* 플래그로 결과를 돌려주는 서비스(INT 21h 의 CF, INT 16h AH=01h 의
+   ZF)는 현재 플래그를 고치는 것으로 충분하다 — IVT 가 아직 우리
+   스텁이면 훅이 서비스를 곧장 부르고(프레임 push 없음) iret 도 없
+   다. 스택의 프레임을 손대면 게스트의 push 값이 오염된다(삼국지3
+   MAIN 의 push cs 값 11ad 가 11ac 로 깎힌 실측 — CF 비트 클리어로).
+   게스트가 벡터를 훅해 체인하는 경로가 생기면 그때 프레임 워드
+   수정이 필요해진다. *)
 let set_cf t on =
   let f = Cpu86.flags t.cpu in
   Cpu86.set_flags t.cpu

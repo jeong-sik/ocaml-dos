@@ -325,7 +325,7 @@ let keyboard t =
       (* 빈 링 폴링도 굶주림이다 — KeyPressed 루프는 AH=00 을 부르지도
          않는다(실측: ZZT 메뉴 대기). *)
       starve t;
-      Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero)
+      Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero);
     end
   | 0x02 | 0x12 ->
     Cpu86.set_reg8 cpu 0 (rd8 t 0x417);
