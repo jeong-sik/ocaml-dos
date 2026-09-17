@@ -82,6 +82,12 @@ type t = {
   mutable epoch_hour : int;
   mutable epoch_min : int;
   mutable epoch_sec : int;
+  (* EMS 4.0 스텁(Dos_ems)의 상태 *)
+  mutable ems_next_handle : int;
+  ems_pages : (int, Bytes.t array) Hashtbl.t;
+        (** 핸들 → 논리 페이지 배열(각 16KB) *)
+  mutable ems_mapped : (int * int) array;
+        (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지) *)
   mouse : mouse;
 }
 

@@ -54,6 +54,9 @@ let create () =
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
+      ems_next_handle = 1;
+      ems_pages = Hashtbl.create 2;
+      ems_mapped = Array.make 4 (0, 0);
       mouse = {
         mouse_present = false; mouse_x = 0; mouse_y = 0;
         mouse_buttons = 0; mouse_visible = false;
@@ -78,6 +81,7 @@ let create () =
         | 0x20 -> Dos_dos.terminate t
         | 0x21 -> Dos_dos.service t
         | 0x27 -> Dos_dos.int27 t
+        | 0x67 -> Dos_ems.service t
         | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
         | _ -> ());
   t

@@ -12,12 +12,15 @@ open Dos_state
 (* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
    전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
    삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x10; 0x16; 0x20; 0x21; 0x27 ]
+let host_served = [ 0x10; 0x16; 0x20; 0x21; 0x27; 0x67 ]
 
-(* ROM 안의 자리 배치. INT 8 루틴은 0, IRET 스텁은 0x20, 호스트 서빙
-   벡터의 되돌림 스텁은 0x100 부터 16바이트씩. *)
+(* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
+   라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
+   0x20, 호스트 서빙 벡터의 되돌림 스텁은 0x100 부터 16바이트씩. *)
 let rom_seg = 0xF000
+let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
+let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
@@ -49,10 +52,22 @@ let equipment_word =
   0x0001 lor 0x0020 lor 0x4000
 
 let install t =
-  Bytes.blit (Bytes.of_string bios_int8) 0 t.mem (rom_seg * 16)
+  (* EMM 디바이스 헤더(Dos_ems). 진입 스텁 "int 사설벡터; iret" 뒤에,
+     DOS 디바이스 관례대로 +0x0A 에 드라이버 이름이 온다. EMS 런타임은
+     INT 21h AH=35h AL=67h 로 이 칸을 읽어 드라이버를 알아본다(삼국지3
+     실측). *)
+  wr8 t (rom_seg * 16) 0xCD;
+  wr8 t ((rom_seg * 16) + 1) ((0x67 + 0x80) land 0xff);
+  wr8 t ((rom_seg * 16) + 2) 0xCF;
+  String.iteri
+    (fun i c -> wr8 t ((rom_seg * 16) + 0x0A + i) (Char.code c))
+    Dos_ems.emm_name;
+  Bytes.blit (Bytes.of_string bios_int8) 0 t.mem
+    ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
-  set_ivt t 0x08 0x0000 rom_seg;                 (* 타이머 IRQ0 *)
+  set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
+  set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
@@ -90,6 +105,10 @@ let install t =
       t.stubs <- (v, !off) :: t.stubs;
       off := !off + stub_stride)
     host_served;
+  (* 0x67 은 위의 일괄 배정을 덮어써 헤더 0 번지로 — EMS 런타임이
+     세그먼트+0x0A 를 읽기 때문이다. 되돌림 스텁 자리는 비워 둔다. *)
+  set_ivt t 0x67 emm_entry_off rom_seg;
+  t.stubs <- (0x67, emm_entry_off) :: t.stubs;
   (* 나머지 벡터는 전부 IRET 스텁으로 채운다. 실기 BIOS 는 모든 벡터가
      ROM/DOS 를 가리켜서, 프로그램이 훅을 걸며 되읽은 "옛 벡터" 가 0:0
      이 아니다. 하나라도 비워 두면 체인 복귀가 0000:0000 으로 떨어진다. *)
