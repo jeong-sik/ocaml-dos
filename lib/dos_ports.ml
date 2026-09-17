@@ -14,6 +14,11 @@ let cpu_cycles_per_pit_tick = 4
    사이클로 약 158. 지연 루프가 이 비트를 세며 시간을 잰다. *)
 let refresh_toggle_cycles = 158
 
+(* YM3812(OPL2) 타이머 한 스텝 — T1 은 80µs, T2 는 320µs 를 CPU
+   사이클(4.77MHz)로 환산한 값. *)
+let opl_t1_step = 382
+let opl_t2_step = 1527
+
 let crtc_regs = 25
 let dac_entries = 256
 
@@ -45,6 +50,14 @@ type t = {
   mutable mode_control : int;           (** 0x3D8 *)
   mutable color_select : int;           (** 0x3D9 *)
   mutable cmos_index : int;
+  (* OPL2 — 감지 계약만 지닌다(FMDRV.COM 실측). 소리는 없다. *)
+  mutable opl_reg : int;                (** 0x388 로 고른 레지스터 *)
+  mutable opl_t1_count : int;           (** 레지스터 02h *)
+  mutable opl_t2_count : int;           (** 레지스터 03h *)
+  mutable opl_t1_at : int;              (** 만료 사이클 — 0 은 미무장 *)
+  mutable opl_t2_at : int;
+  mutable opl_t1_exp : bool;
+  mutable opl_t2_exp : bool;
 }
 
 (* 기본 VGA 256색: 0-15 CGA, 16-31 회색 램프, 32-247 6x6x6 RGB 큐브,
@@ -96,6 +109,13 @@ let create ~mem ~video =
     mode_control = 0x29;
     color_select = 0;
     cmos_index = 0;
+    opl_reg = 0;
+    opl_t1_count = 0;
+    opl_t2_count = 0;
+    opl_t1_at = 0;
+    opl_t2_at = 0;
+    opl_t1_exp = false;
+    opl_t2_exp = false;
   }
 
 let set_now t n = t.now <- n
@@ -183,6 +203,22 @@ let port_in t p =
     t.cga_status <- not t.cga_status;
     let vsync = if (t.now / 70000) land 7 = 0 then 0x08 else 0x00 in
     (if t.cga_status then 0x01 else 0x00) lor vsync
+  | 0x388 ->
+    (* 만료는 읽는 순간에 갱신한다 — 감지 루틴은 쓰기와 읽기 사이에
+       지연 루프를 두고 그 시간에 타이머가 끝나기를 기대한다. 만료한
+       적 있으면 상위 두 비트(0xC0)와 타이머 플래그를 함께 띄운다. *)
+    if t.opl_t1_at > 0 && t.now >= t.opl_t1_at then begin
+      t.opl_t1_exp <- true;
+      t.opl_t1_at <- 0                   (* 만료는 한 번 — 스탬프를 소비한다 *)
+    end;
+    if t.opl_t2_at > 0 && t.now >= t.opl_t2_at then begin
+      t.opl_t2_exp <- true;
+      t.opl_t2_at <- 0
+    end;
+    let flags =
+      (if t.opl_t1_exp then 1 else 0) lor (if t.opl_t2_exp then 2 else 0)
+    in
+    if flags <> 0 then 0xC0 lor flags else 0x00
   | _ -> 0xff
 
 let port_out t p v =
@@ -247,4 +283,27 @@ let port_out t p v =
     end
   | 0x3D8 -> t.mode_control <- v
   | 0x3D9 -> t.color_select <- v; Dos_video.set_cga_color_select t.video v
+  | 0x388 -> t.opl_reg <- v              (* 레지스터 선택 *)
+  | 0x389 ->
+    (match t.opl_reg with
+     | 0x02 -> t.opl_t1_count <- v
+     | 0x03 -> t.opl_t2_count <- v
+     | 0x04 ->
+       (* bit0/1 = 타이머 시작(플래그를 지우고 다시 만다), bit7 = 플래그
+         리셋(감지 루틴이 reg4=0x80 을 쓰는 쪽). bit5/6(마스크)는 플래그가
+         아니라 IRQ 만 가린다 — 감지 루틴은 마스크를 건 채 플래그를
+         기대한다. *)
+       if v land 0x80 <> 0 then begin
+         t.opl_t1_exp <- false;
+         t.opl_t2_exp <- false
+       end;
+       if v land 1 <> 0 then begin
+         t.opl_t1_exp <- false;
+         t.opl_t1_at <- t.now + (opl_t1_step * (t.opl_t1_count + 1))
+       end;
+       if v land 2 <> 0 then begin
+         t.opl_t2_exp <- false;
+         t.opl_t2_at <- t.now + (opl_t2_step * (t.opl_t2_count + 1))
+       end
+     | _ -> ())                        (* 음색 레지스터 — 소리가 없어 무시 *)
   | _ -> ()

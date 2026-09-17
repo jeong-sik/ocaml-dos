@@ -50,6 +50,31 @@ let read_file path =
   close_in ic;
   s
 
+(* 정시 주입 — 게스트가 키를 "묻는" 방식이 무엇이든 상관없이 그 스텝에
+   키를 링에 넣는다. INT 16h 를 안 부르고 BIOS 링(0x40:0x1A/0x1C)을
+   직접 폴링하는 게임은 굶주림 신호를 주지 않아 --keys 로는 못 넣는다
+   (삼국지3 "아무 키나" 대기 실측). *)
+let parse_feed spec =
+  List.filter_map
+    (fun h ->
+      if h = "" then None
+      else
+        match String.index_opt h '@' with
+        | None ->
+          prerr_endline ("bad feed " ^ h ^ " (want hex@step like 1c0d@4000000)");
+          None
+        | Some i ->
+          let body = String.sub h 0 i in
+          let at =
+            int_of_string_opt (String.sub h (i + 1) (String.length h - i - 1))
+          in
+          match (int_of_string_opt ("0x" ^ body), at) with
+          | Some w, Some n -> Some (w, n)
+          | _ ->
+            prerr_endline ("bad feed " ^ h ^ " (want hex@step like 1c0d@4000000)");
+            None)
+    (String.split_on_char ',' spec)
+
 let parse_keys spec =
   List.filter_map
     (fun h ->
@@ -90,7 +115,7 @@ let () =
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
-  and mouse = ref "" and clock = ref "" in
+  and mouse = ref "" and clock = ref "" and feed = ref "" in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -102,6 +127,8 @@ let () =
       ("--save", Arg.String (fun m -> saves := m :: !saves),
        "NAME=PATH  끝난 뒤 게스트가 쓴 파일을 호스트로 꺼낸다");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 명령 수");
+      ("--feed", Arg.Set_string feed,
+       "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
       ("--keys", Arg.Set_string keys,
        "HEX[@STEP],..  키 워드 — (스캔 lsl 8) lor ASCII. @STEP 는 그 스텝 \
         전에는 넣지 않는다는 예약 (예: 4d00@5000000)");
@@ -148,7 +175,18 @@ let () =
     exit 2
   end;
   String.iter (fun c -> Dos_machine.push_ascii m c) !typed;
+  let feeds = Queue.create () in
+  List.iter (fun (w, at) -> Queue.push (w, at) feeds) (parse_feed !feed);
+  let feed_at mm n =
+    (match Queue.peek_opt feeds with
+     | Some (w, at) when n >= at ->
+       ignore (Queue.pop feeds);
+       Dos_machine.push_key mm w;
+       Printf.eprintf "FEED %04x @step %d\n%!" w n
+     | _ -> ())
+  in
   let on_step mm n =
+    feed_at mm n;
     let c = Dos_machine.cpu_of mm in
     let pc = ((Cpu86.seg c 1 lsl 4) + Cpu86.dump_ip c) land 0xfffff in
     let op = Dos_machine.mem_read mm pc in
