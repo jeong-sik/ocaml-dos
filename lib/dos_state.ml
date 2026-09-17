@@ -27,6 +27,30 @@ type mouse = {
   mutable mouse_dy : int;
 }
 
+(* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
+
+   자식을 띄울 때 부모의 CPU·프로세스 상태를 통째로 찍어둔다. 레지스터
+   세그먼트 IP 플래그를 값으로 저장한다 — Cpu86.t 를 통째로 복제하지
+   않는 이유는 사이클 누적 같은 기계 전체의 상태가 부모의 것이어야
+   하기 때문이다. 스냅숏의 IP 는 이미 INT 21h 명령 다음을 가리킨다
+   (fetch 가 IP 를 전진시킨 뒤 훅이 돈다). 그 지점이 부모의 재개점이다. *)
+type cpu_snapshot = {
+  snap_regs : int array;                  (** 8 × 16비트 범용 *)
+  snap_segs : int array;                  (** 4 × 세그먼트 *)
+  snap_ip : int;
+  snap_flags : int;                       (* Cpu86.flags 합성 값 *)
+}
+
+type exec_frame = {
+  parent : cpu_snapshot;
+  parent_psp : int;
+  parent_dta : int;
+  parent_free_base : int;
+  parent_free_top : int;
+  parent_blocks : (int * int) list;
+  parent_handles : (int * handle) list;   (** 자식 종료 시 이 목록 밖의 핸들을 닫는다 *)
+}
+
 type t = {
   mem : Bytes.t;                              (** 1MB *)
   cpu : Cpu86.t;
@@ -49,6 +73,8 @@ type t = {
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
   mutable find_queue : string list;           (** findnext 가 남긴 이름 *)
   mutable stubs : (int * int) list;           (** (벡터, ROM 스텁 오프셋) *)
+  mutable exec_frames : exec_frame list;      (** EXEC 로 띄운 자식의 부모 프레임 *)
+  mutable last_child_code : int;              (** AH=4Dh 가 돌려줄 마지막 자식 코드 *)
   (* 기준 시각 — 여기에 경과를 더해 날짜·시각을 만든다 *)
   mutable epoch_year : int;
   mutable epoch_month : int;
