@@ -38,3 +38,7 @@
 (test
  (name dos_exec_test)
  (libraries dosmachine cpu86core))
+
+(test
+ (name dos_opl_test)
+ (libraries dosmachine))
