@@ -132,6 +132,7 @@ let () =
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
+  and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
   let feed_sync = ref "" in
   Arg.parse
@@ -161,6 +162,14 @@ let () =
       ("--utf8", Arg.Set utf8, "  화면을 코드 페이지 437 그대로 출력");
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--int-trace", Arg.Set int_trace, "  INT 명령을 만날 때마다 기록");
+      ("--glyph-trace", Arg.String (fun s ->
+         match String.split_on_char ',' s with
+         | [ mx; rec_ ] ->
+           (match int_of_string_opt mx, int_of_string_opt rec_ with
+            | Some a, Some b -> glyph_max := a; glyph_rec := b
+            | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)")
+         | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)"),
+       "  INT 21h AH=42 seek 중 폰트 글리프 요청(offset = idx*RECSIZE+base 패턴) 기록");
       ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
@@ -241,7 +250,18 @@ let () =
         "INT %02x ah=%02x al=%02x @%04x:%04x bx=%04x cx=%04x dx=%04x ds=%04x\n%!"
         (Dos_machine.mem_read mm (pc + 1))
         (Cpu86.reg8 c 4) (Cpu86.reg8 c 0) (Cpu86.seg c 1) (Cpu86.dump_ip c)
-        (Cpu86.reg16 c 3) (Cpu86.reg16 c 1) (Cpu86.reg16 c 2) (Cpu86.seg c 3)
+        (Cpu86.reg16 c 3) (Cpu86.reg16 c 1) (Cpu86.reg16 c 2) (Cpu86.seg c 3);
+    (* --glyph-trace MAX,RECSIZE: INT 21h AH=42(seek) 호출 중 오프셋이
+       idx*RECSIZE+2 패턴(삼국지3 all_font.16p: 레코드 30B, 코드 2B)이면
+       화면이 그리는 글리프 요청으로 보고 기록한다. 삼국지3 진단 실측:
+       폰트는 파일에서 직접 seek+read 하므로 이 지점이 곧 화면 텍스트. *)
+    (if !glyph_max > 0 && op = 0xCD
+       && Dos_machine.mem_read mm (pc + 1) = 0x21
+       && Cpu86.reg8 c 4 = 0x42 then begin
+       let off = (Cpu86.reg16 c 1 lsl 16) + Cpu86.reg16 c 2 in
+       if off >= 2 && off <= !glyph_max && (off - 2) mod !glyph_rec = 0 then
+         Printf.eprintf "GLYPHSEEK off=%d idx=%d\n%!" off ((off - 2) / !glyph_rec)
+     end);
   in
   let on_key w n = Printf.eprintf "KEY %04x @step %d\n%!" w n in
   (try
