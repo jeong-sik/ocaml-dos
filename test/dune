@@ -42,3 +42,7 @@
 (test
  (name dos_opl_test)
  (libraries dosmachine))
+
+(test
+ (name dos_ems_test)
+ (libraries dosmachine))

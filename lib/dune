@@ -8,5 +8,5 @@
  (name dosmachine)
  (public_name ocaml-dos.dosmachine)
  (wrapped false)
- (modules dos_machine dos_state dos_bios dos_dos dos_ports dos_video dos_render font8x8)
+ (modules dos_machine dos_state dos_bios dos_dos dos_ems dos_ports dos_video dos_render font8x8)
  (libraries cpu86core))

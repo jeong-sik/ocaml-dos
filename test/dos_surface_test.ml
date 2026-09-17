@@ -467,7 +467,7 @@ let test_get_vector_preserves_ds () =
          "")
   in
   check "AH=35 ES=INT8 세그먼트(ROM)" (peek16 m scratch) 0xF000;
-  check "AH=35 BX=INT8 오프셋" (peek16 m (scratch + 2)) 0x0000;
+  check "AH=35 BX=INT8 오프셋" (peek16 m (scratch + 2)) 0x0040;
   check "AH=35 DS 보존" (peek16 m (scratch + 4)) 0x1000
 
 let test_get_dta_preserves_ds () =
