@@ -132,6 +132,7 @@ let () =
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
+  and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
   let feed_sync = ref "" in
@@ -159,6 +160,8 @@ let () =
       ("--clock", Arg.Set_string clock,
        "Y-M-D,H:M:S  게스트가 보는 기준시각 (기본 1990-1-1,8:0:0)");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
+      ("--snap-every", Arg.Set_int snap_every,
+       "  N 스텝마다 현재 프레임을 PREFIX_NNNNN.ppm 으로 덤프");
       ("--utf8", Arg.Set utf8, "  화면을 코드 페이지 437 그대로 출력");
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--int-trace", Arg.Set int_trace, "  INT 명령을 만날 때마다 기록");
@@ -261,6 +264,16 @@ let () =
        let off = (Cpu86.reg16 c 1 lsl 16) + Cpu86.reg16 c 2 in
        if off >= 2 && off <= !glyph_max && (off - 2) mod !glyph_rec = 0 then
          Printf.eprintf "GLYPHSEEK off=%d idx=%d\n%!" off ((off - 2) / !glyph_rec)
+     end);
+    (* --snap-every N: 현재 프레임을 주기적으로 남긴다 — 화면 전이 추적.
+       최종 프레임은 --out 이 쓴다. *)
+    (if !snap_every > 0 && n > 0 && n mod !snap_every = 0 then begin
+       let path =
+         Printf.sprintf "%s_%06d.ppm" (Filename.remove_extension !out) (n / !snap_every)
+       in
+       let oc = open_out_bin path in
+       output_string oc (Dos_machine.frame_ppm m);
+       close_out oc
      end);
   in
   let on_key w n = Printf.eprintf "KEY %04x @step %d\n%!" w n in
