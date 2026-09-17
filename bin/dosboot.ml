@@ -75,6 +75,23 @@ let parse_feed spec =
             None)
     (String.split_on_char ',' spec)
 
+(* --feed-sync: 스텝을 안 적는다 — 게임이 키를 기다리는 순간에 맞춰
+   하나씩 넣는다. INT 16h 폴링의 굶주림(kbd_waiting) 상승에 다음 키를
+   주고, INT 16h 없이 BDA 링을 직접 폴링하는 게임(삼국지3 프로텍션의
+   0x25a3)을 위해 링이 비어 있으면 주기적으로도 넣는다. 스텝 하드코딩
+   --feed 는 렌더 속도·플래그 수정에 따라 전부 어긋난다(실측). *)
+let parse_feed_sync spec =
+  List.filter_map
+    (fun h ->
+      if h = "" then None
+      else
+        match int_of_string_opt ("0x" ^ h) with
+        | Some w -> Some w
+        | None ->
+          prerr_endline ("bad feed-sync " ^ h ^ " (want hex like 1c0d)");
+          None)
+    (String.split_on_char ',' spec)
+
 let parse_keys spec =
   List.filter_map
     (fun h ->
@@ -116,6 +133,7 @@ let () =
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
   and mouse = ref "" and clock = ref "" and feed = ref "" in
+  let feed_sync = ref "" in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -129,6 +147,8 @@ let () =
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 명령 수");
       ("--feed", Arg.Set_string feed,
        "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
+      ("--feed-sync", Arg.Set_string feed_sync,
+       "HEX,HEX,..  게스트가 키를 기다리는 순간에 하나씩 넣는다");
       ("--keys", Arg.Set_string keys,
        "HEX[@STEP],..  키 워드 — (스캔 lsl 8) lor ASCII. @STEP 는 그 스텝 \
         전에는 넣지 않는다는 예약 (예: 4d00@5000000)");
@@ -177,13 +197,32 @@ let () =
   String.iter (fun c -> Dos_machine.push_ascii m c) !typed;
   let feeds = Queue.create () in
   List.iter (fun (w, at) -> Queue.push (w, at) feeds) (parse_feed !feed);
+  let sync_feeds = Queue.create () in
+  List.iter (fun w -> Queue.push w sync_feeds) (parse_feed_sync !feed_sync);
+  let feed_armed = ref true in
   let feed_at mm n =
     (match Queue.peek_opt feeds with
      | Some (w, at) when n >= at ->
        ignore (Queue.pop feeds);
        Dos_machine.push_key mm w;
        Printf.eprintf "FEED %04x @step %d\n%!" w n
-     | _ -> ())
+     | _ -> ());
+    (* 대기 동기화: 굶주림 상승에 한 개, 폴밋은 링이 빈 때만 *)
+    (match Queue.peek_opt sync_feeds with
+     | Some w when !feed_armed && Dos_machine.kbd_waiting mm ->
+       ignore (Queue.pop sync_feeds);
+       Dos_machine.push_key mm w;
+       feed_armed := false;
+       Printf.eprintf "FEED-SYNC %04x @step %d\n%!" w n
+     | _ -> ());
+    (match Queue.peek_opt sync_feeds with
+     | Some w when n > 0 && n mod 2_000_000 = 0
+                    && not (Dos_state.key_pending mm) ->
+       ignore (Queue.pop sync_feeds);
+       Dos_machine.push_key mm w;
+       Printf.eprintf "FEED-POLL %04x @step %d\n%!" w n
+     | _ -> ());
+    if not (Dos_machine.kbd_waiting mm) then feed_armed := true
   in
   let on_step mm n =
     feed_at mm n;
