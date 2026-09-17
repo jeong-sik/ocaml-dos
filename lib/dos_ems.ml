@@ -20,10 +20,10 @@ let page_size = 0x400                            (* 16KB = 0x400 단락 *)
 let frame_pages = 4
 let emm_name = "EMMXXXX0"
 let emm_version = 0x40                           (* 4.0 *)
-let total_pages = 0x0800                         (* 32MB — 통보용. 첫 요청이
-                                                    0x400 페이지(16MB)라 두
-                                                    번째 할당까지 여유가
-                                                    있어야 한다(삼국지3 실측) *)
+let total_pages = 0x0800                         (* 32MB — 통보용. 카운트를
+                                                    BX 로 읽는 관례(아래 0x43)
+                                                    에서는 여유 계산이 필요
+                                                    없지만 넉넉히 둔다 *)
 
 let frame_addr p = (page_frame * 16) + (p * page_size * 16)
 
@@ -59,15 +59,13 @@ let service t =
     Cpu86.set_reg16 cpu 3 total_pages;
     Cpu86.set_reg16 cpu 2 (free_pages t)
   | 0x43 ->
-    (* KOEI 런타임은 요청 페이지 수를 BX 에 싣고 DX 는 AH=42h 의 잔여
-       값 그대로 둔다(실측: 첫 호출은 "잔여 전부"를 가져가고, 둘째 호출은
-       DX=0 에 BX=1). LIM 과 달리 쓰는 이 관례에 맞춰 카운트는 DX 가
-       0 이면 BX 에서 읽는다. 페이지 실체는 처음 겹칠 때 만든다 —
-       "전부"를 받아가도 실제로 쓰는 몇 장만 산다. *)
-    let want =
-      let dx = Cpu86.reg16 cpu 2 in
-      if dx <> 0 then dx else Cpu86.reg16 cpu 3
-    in
+    (* KOEI 런타임은 요청 페이지 수를 BX 에 싣는다(실측: 두 호출 모두
+       bx=1). DX 는 AH=42h 의 잔여값이 그대로 남아 LIM 표준(DX=카운트)
+       대로 읽으면 첫 호출이 잔여 전부를 삼켜 둘째 할당 검사(잔여<요청)
+       가 죽는다 — 이 게임이 돌아간 기계의 EMB 은 BX 를 읽었다는 뜻이다.
+       우리가 재현하는 기계도 그 관례를 따른다. 페이지 실체는 처음 겹칠
+       때 만든다. *)
+    let want = Cpu86.reg16 cpu 3 in
     if want = 0 then err 0x89                    (* 0 페이지는 못 받는다 *)
     else if want > free_pages t then err 0x87    (* 페이지 부족 *)
     else begin
