@@ -38,6 +38,9 @@ let int_ n = "\xcd" ^ b n
 let store_ax a = "\xa3" ^ w a
 let store_cx a = "\x89\x0e" ^ w a
 let store_dx a = "\x89\x16" ^ w a
+let mov_ax_es = "\x8c\xc0"
+let mov_ax_ds = "\x8c\xd8"
+let store_bx a = "\x89\x1e" ^ w a
 let sbb_ax_ax = "\x19\xc0"
 let sbb_cx_cx = "\x19\xc9"
 let quit = mov_ax 0x4c00 ^ int_ 0x21
@@ -450,9 +453,44 @@ let test_cp437_text () =
   check_true "CP437 그림 문자가 산다"
     (String.length line > 0 && String.sub line 0 3 = "\xe2\x98\xbb")
 
+(* 벡터 조회·DTA 조회는 결과를 ES:BX 로 돌려주고 DS 를 보존해야 한다.
+   삼국지3 MAIN 의 그리기 루프가 DS 를 자기 데이터로 쓴 채 AH=35h 를
+   부르는데, DS 가 갈리면 이후 그리기가 엉뚱한 세그먼트로 향한다(실측). *)
+let test_get_vector_preserves_ds () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+            mov_al 0x08 ^ mov_ah 0x35 ^ int_ 0x21 ^ mov_ax_es
+            ^ store_ax scratch ^ store_bx (scratch + 2)
+            ^ mov_ax_ds ^ store_ax (scratch + 4) ^ quit)
+         "")
+  in
+  check "AH=35 ES=INT8 세그먼트(ROM)" (peek16 m scratch) 0xF000;
+  check "AH=35 BX=INT8 오프셋" (peek16 m (scratch + 2)) 0x0000;
+  check "AH=35 DS 보존" (peek16 m (scratch + 4)) 0x1000
+
+let test_get_dta_preserves_ds () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+            mov_ah 0x2F ^ int_ 0x21 ^ mov_ax_es ^ store_ax scratch
+            ^ store_bx (scratch + 2) ^ mov_ax_ds ^ store_ax (scratch + 4)
+            ^ quit)
+         "")
+  in
+  (* ES:BX 의 평탄 주소가 PSP:0x80(기본 DTA) 이면 된다 — 세그먼트·
+     오프셋을 어떻게 나눠 돌려주는지는 계약 밖이다. *)
+  let flat = (peek16 m scratch lsl 4) + peek16 m (scratch + 2) in
+  check "AH=2F ES:BX=기본 DTA" flat (psp_base + 0x80);
+  check "AH=2F DS 보존" (peek16 m (scratch + 4)) 0x1000
+
 let () =
   test_print_string ();
   test_version ();
+  test_get_vector_preserves_ds ();
+  test_get_dta_preserves_ds ();
   test_clock_is_deterministic ();
   test_date ();
   test_memory_allocation ();

@@ -71,6 +71,34 @@ let () =
   Dos_machine.run m ~max_steps:200;
   checkb "int16 key read" (contains_sub (Dos_machine.screen_text m) "Q") true;
   checkb "int16 program exited" (Dos_machine.exited m) true;
+  (* ROM 8x8 글꼴: IBM BIOS 표준 자리 F000:FA6E. 그래픽 모드에서 글자를
+     직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 — 삼국지3
+     MAIN.EXE 의 글자 루틴이 es=0F000h, si=0FA6Eh+ch*8 (실측). 게스트가
+     표를 읽어 종료 코드로 돌려주는 COM 으로 증명한다. *)
+  let rom_font_com ch =
+    let off = 0xFA6E + (ch * 8) in
+    Bytes.to_string
+      (Bytes.concat Bytes.empty
+         (List.map Bytes.of_string
+            [ "\xb8\x00\xf0";            (* mov ax,0F000h *)
+              "\x8e\xc0";                (* mov es,ax *)
+              Printf.sprintf "\xbb%c%c"  (* mov bx,글리프 오프셋 *)
+                (Char.chr (off land 0xff)) (Char.chr (off lsr 8));
+              "\x26\x8a\x07";            (* mov al,es:[bx] *)
+              "\xb4\x4c";                (* mov ah,4Ch *)
+              "\xcd\x21" ]))             (* int 21h *)
+  in
+  let check_rom_glyph ch name =
+    let m = Dos_machine.create () in
+    Dos_machine.load_com m (rom_font_com ch);
+    Dos_machine.run m ~max_steps:100;
+    checkb (name ^ " exits") (Dos_machine.exited m) true;
+    checkb (name ^ " byte at F000:FA6E")
+      (Dos_machine.exit_code m = (Font8x8.glyph ch).(0))
+      true
+  in
+  check_rom_glyph 65 "rom font 'A'";
+  check_rom_glyph 0x5F "rom font '_'";
   if !failed = 0 then print_endline "dos machine M2a: all passed"
   else begin
     Printf.eprintf "dos machine M2a: %d failures\n%!" !failed;

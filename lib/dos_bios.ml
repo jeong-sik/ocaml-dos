@@ -20,6 +20,9 @@ let rom_seg = 0xF000
 let iret_stub_off = 0x0020
 let stub_area = 0x0100
 let stub_stride = 16
+let rom_font_off = 0xFA6E
+let rom_font_first = 0x20
+let rom_font_last = 0x7E
 
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
@@ -93,6 +96,19 @@ let install t =
   for v = 0 to 255 do
     if not (List.mem v (0x08 :: host_served)) then
       set_ivt t v iret_stub_off rom_seg
+  done;
+  (* IBM PC BIOS(5150)는 8x8 글꼴 표를 F000:FA6E 에 둔다. 그래픽 모드에서
+     글자를 직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 —
+     삼국지3 MAIN.EXE 의 글자 루틴이 es=0F000h, si=0FA6Eh+ch*8 로
+     글리프를 가져온다(실측). 표가 비면 글리프가 전부 0 이라 아무 것도
+     안 그린다. 0x20-0x7E 만 심는다 — Font8x8 이 가진 범위고,
+     0x7E*8 을 더해도 1MB 경계 안(0xFFE66)이다. 한글·그림문자는 게임이
+     자체 데이터 파일에서 가져오므로 여기 없어도 된다. *)
+  for ch = rom_font_first to rom_font_last do
+    Array.iteri
+      (fun row b ->
+        wr8 t ((rom_seg * 16) + rom_font_off + (ch * 8) + row) b)
+      (Font8x8.glyph ch)
   done
 
 (* IVT[v] 가 아직 우리 스텁이면(게스트가 AH=25h 로 안 바꿨으면) 호스트
