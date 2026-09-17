@@ -308,6 +308,52 @@ let test_input_requests_count_empty_reads () =
   Dos_machine.run m2 ~max_steps:100_000;
   check "키가 있으면 안 센다" (Dos_machine.input_requests m2) 0
 
+(* AH=01h 의 답은 ZF 로 돌아간다 — 스텁의 iret 이 프레임의 플래그를
+   되돌리므로 프레임 워드를 고쳐야 호출자의 je/jne 가 본다. 삼국지3
+   메뉴 대기 루프가 je 를 항상 탄 채 키를 못 받은 실측을 고정한다. *)
+let test_int16_ah01_reports_key_via_zf () =
+  let probe =
+    assemble
+      (fun _ ->
+         mov_ah 0x01 ^ int_ 0x16
+         ^ "\x75\x05"  (* jne have — 키가 있으면 ZF=0 *)
+         ^ "\xb8\x00\x00"  (* mov ax,0 — 없음 경로 *)
+         ^ "\xeb\x03"  (* jmp done *)
+         ^ "\xb8\x01\x00"  (* have: mov ax,1 *)
+         ^ store_ax scratch ^ quit)
+      ""
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m probe;
+  Dos_machine.run m ~max_steps:100_000;
+  check "빈 링이면 je 를 탄다(0)" (peek16 m scratch) 0;
+  let m2 = Dos_machine.create () in
+  Dos_machine.load_com m2 probe;
+  Dos_machine.type_string m2 "a";
+  Dos_machine.run m2 ~max_steps:100_000;
+  check "키가 있으면 jne 를 탄다(1)" (peek16 m2 scratch) 1
+
+(* 같은 이치로 INT 21h 의 성공/실패는 CF 로 돌아간다. 파일 열기
+   (AH=3Dh) 하나로 양쪽을 다 본다 — 실제 게스트 호출 경로(스텁
+   iret)를 그대로 탄다. *)
+let test_int21_cf_reaches_the_caller () =
+  let probe name =
+    assemble
+      (fun off ->
+         mov_ah 0x3D ^ mov_al 0 ^ mov_dx off
+         ^ int_ 0x21
+         ^ "\x73\x05"  (* jnc have — 성공이면 CF=0 *)
+         ^ "\xb8\x00\x00"  (* mov ax,0 — 실패 경로 *)
+         ^ "\xeb\x03"  (* jmp done *)
+         ^ "\xb8\x01\x00"  (* have: mov ax,1 *)
+         ^ store_ax scratch ^ quit)
+      name
+  in
+  let m = run_com ~mounts:[ ("Z.TXT", "z") ] (probe "QQ$\x00") in
+  check "없는 파일이면 CF=1(jnc 안 탐)" (peek16 m scratch) 0;
+  let m2 = run_com ~mounts:[ ("Z.TXT", "z") ] (probe "Z.TXT\x00") in
+  check "있는 파일이면 CF=0(jnc 탐)" (peek16 m2 scratch) 1
+
 let test_console_scrolls () =
   (* 화면이 넘치면 위로 밀려야 한다. 마지막 칸에 붙들어 두면 출력이
      통째로 사라진다. 30 줄을 찍고 첫 줄이 사라졌는지 본다. *)
@@ -500,6 +546,8 @@ let () =
   test_key_names ();
   test_screen_digest_follows_the_screen ();
   test_input_requests_count_empty_reads ();
+  test_int16_ah01_reports_key_via_zf ();
+  test_int21_cf_reaches_the_caller ();
   test_named_key_reaches_guest ();
   test_dup_shares_position ();
   test_console_scrolls ();

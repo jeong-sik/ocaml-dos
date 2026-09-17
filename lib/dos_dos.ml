@@ -248,7 +248,17 @@ let load_exe ?psp_seg ?(child = false) t image =
   Cpu86.set_seg t.cpu 1 (image_seg + exe_cs);
   Cpu86.set_ip t.cpu exe_ip;
   Cpu86.set_seg t.cpu 2 (image_seg + exe_ss);
-  Cpu86.set_reg16 t.cpu 4 exe_sp;
+  (* MS-DOS 진입 스택 계약: 스택 꼭대기에 [0, PSP] 쌍을 심는다 —
+     프로그램 최상위의 far ret 가 PSP:0000 의 INT 20h(write_psp 가
+     심음)로 떨어져 깨끗이 종료하는 CP/M 관례의 계승이다. 심지 않으면
+     retf 가 게임 실행 중 남은 찌꺼기(0 과 near-call 반환 주소)를 팝해
+     빈 메모리로 점프한다 — 삼국지3 MAIN 의 retf 가 7119:0000(제로
+     메모리)로 떨어진 실측. *)
+  let sp0 = (exe_sp - 4) land 0xffff in
+  let sbase = (image_seg + exe_ss) lsl 4 in
+  wr16 t (sbase + ((sp0 + 2) land 0xffff)) psp_seg;
+  wr16 t (sbase + sp0) 0;
+  Cpu86.set_reg16 t.cpu 4 sp0;
   (* DOS 는 DS/ES 를 PSP 세그먼트로 넘긴다 — 진입점이 곧바로
      mov cx,[PSP+0x0C] 로 읽는다(실측). *)
   Cpu86.set_seg t.cpu 3 psp_seg;
