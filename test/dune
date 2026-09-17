@@ -34,3 +34,7 @@
 (test
  (name dos_video_test)
  (libraries dosmachine))
+
+(test
+ (name dos_exec_test)
+ (libraries dosmachine cpu86core))

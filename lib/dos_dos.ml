@@ -92,7 +92,10 @@ let largest_free t =
   if t.free_top - !cursor > !best then best := t.free_top - !cursor;
   max 0 !best
 
-let allocate t paras =
+(* 자리를 찾기만 한다 — 블록 표를 고치지 않는다. EXEC 는 배치를 정한
+   뒤에야 부모 프레임(블록 표 포함)을 찍는다. [allocate] 를 그대로 쓰면
+   자식 몫이 프레임에 새어 들어가, 자식이 죽어도 블록이 남는다. *)
+let find_free t paras =
   let sorted = List.sort compare t.blocks in
   let cursor = ref t.free_base and placed = ref None in
   List.iter
@@ -102,7 +105,10 @@ let allocate t paras =
       if block_end b > !cursor then cursor := block_end b)
     sorted;
   if !placed = None && t.free_top - !cursor >= paras then placed := Some !cursor;
-  match !placed with
+  !placed
+
+let allocate t paras =
+  match find_free t paras with
   | Some seg -> t.blocks <- (seg, paras) :: t.blocks; Some seg
   | None -> None
 
@@ -135,6 +141,261 @@ let resize_block t seg paras =
       end
       else Error (limit - seg)             (* 최대 가능 크기를 알린다 *)
     end
+
+(* 실기 DOS 는 .EXE 에 남은 메모리를 통째로 준다. 힙이 필요한 프로그램은
+   AH=4Ah 로 제 블록을 줄여 뒤를 내놓고, 그 다음에야 AH=48h 이 성공한다
+   — Turbo Pascal 런타임이 정확히 그렇게 한다. 처음부터 남는 자리를
+   비워 두면 4Ah 없이도 할당이 되어 실기와 다르게 움직인다.
+   [~psp_seg] 를 주는 EXEC 자식 경로는 이 함수를 부르지 않는다 — 블록
+   표에 이미 부모·상주 프로그램이 있어 통째로 초기화하면 지워진다. *)
+let init_memory t ~psp_seg =
+  t.free_base <- psp_seg;
+  t.free_top <- conv_mem_top;
+  t.blocks <- [ (psp_seg, conv_mem_top - psp_seg) ]
+
+(* ---------- 로더 ----------
+
+   Dos_machine 이 루트 프로그램을 싣는 데 쓰던 코드가 EXEC 자식도
+   싣게 되면서 이리로 옮겨왔다. 배치만 매개변수로 갈린다 — 루트는
+   정해진 자리, 자식은 블록 표 위에 얹는다. *)
+
+(* 환경 블록 — 실기 DOS 는 프로그램마다 환경을 복사해 PSP+0x2C 로
+   건넨다. 여기선 빈 환경 하나를 모든 프로세스가 공유한다(0x500:0 —
+   IVT·BDA 위의 스크래치). 세그먼트가 0 이면 KOEI 로더처럼 AH=49h 로
+   환경을 지우고 AH=4Ah 로 줄이는 프로그램이 연쇄로 실패해 EXEC 자리가
+   안 생긴다(실측). 내용은 이중 NUL 로 끝나는 빈 문자열 목록이다. *)
+let env_seg = 0x500
+
+let write_psp ?(init = true) t psp_seg =
+  let psp = psp_seg * 16 in
+  wr8 t psp 0xCD;                      (* int 20h *)
+  wr8 t (psp + 1) 0x20;
+  wr16 t (psp + 2) conv_mem_top;       (* 가진 메모리의 끝 *)
+  wr16 t (psp + 0x0A) 0;               (* 종료 주소 *)
+  wr16 t (psp + 0x0C) 0;
+  wr16 t (psp + 0x2C) env_seg;         (* 환경 세그먼트 *)
+  wr8 t (psp + 0x80) 0;                (* 커맨드라인 길이 0 *)
+  wr8 t (psp + 0x81) 0x0D;
+  let eb = env_seg * 16 in
+  wr8 t eb 0x00; wr8 t (eb + 1) 0x00;  (* 빈 환경: 이중 NUL 로 끝 *)
+  t.psp_seg <- psp_seg;
+  t.dta <- psp + 0x80;                 (* 기본 DTA = PSP:0x80 *)
+  if init then init_memory t ~psp_seg
+
+(* COM: 실기 DOS 는 PSP 를 독립 세그먼트에 준다. 세그 0 에 두면 PSP 가
+   IVT·BDA 와 겹쳐 부팅 스텁을 지운다(실측: PSP:0x80 쓰기가 IVT[20h]
+   오프셋을 0 으로 만들었다). 세그 0x1000 — DOS 의 오랜 배치.
+   자식 COM 은 64KB 블록 한 장을 할당받은 자리에 실린다. *)
+let load_com ?(psp_seg = 0x1000) ?(child = false) t image =
+  let base = (psp_seg * 16) + 0x100 in
+  Bytes.blit (Bytes.of_string image) 0 t.mem base (String.length image);
+  write_psp ~init:(not child) t psp_seg;
+  if child then begin
+    t.blocks <- t.blocks @ [ (psp_seg, 0x1000) ];
+    t.free_base <- psp_seg
+  end;
+  Cpu86.set_seg t.cpu 1 psp_seg;
+  Cpu86.set_seg t.cpu 3 psp_seg;
+  Cpu86.set_seg t.cpu 0 psp_seg;
+  Cpu86.set_seg t.cpu 2 psp_seg;
+  Cpu86.set_ip t.cpu 0x100;
+  Cpu86.set_reg16 t.cpu 4 0xFFFE;
+  (* RET 로 돌아오면 PSP 의 INT 20h 로 끝나는 실기 관례 — 스택 맨 위에
+     0x0000 을 둔다. *)
+  wr16 t ((psp_seg * 16) + 0xFFFE) 0x0000;
+  t.exited <- false;
+  t.exit_code <- 0
+
+(* MZ EXE — 실기 배치. 프로그램은 conventional RAM 위쪽에 실린다:
+   LZEXE 같은 자기 압축 해제 스텁이 이 위치를 기준으로 원본 진입점을
+   계산하기 때문에, 낮은 고정 세그먼트에 두면 엉뚱한 주소로 뛴다
+   (ZZT 실측). 상한은 이미지 끝이 0xA000(비디오 메모리 시작)을 넘지
+   않는 자리다 — 넘으면 비디오 모드 세팅이 코드를 지운다.
+   [psp_seg] 를 주면 그 자리에(배치는 호출자 계약), 없으면 루트 공식
+   대로 memtop 아래에 블록 하나로 받는다. 자식 EXE 도 마찬가지로
+   남은 메모리를 통째로 블록으로 받는다 — 실기와 같아서, 자식이 다시
+   EXEC 하려면 먼저 AH=4Ah 로 줄여야 한다. *)
+let load_exe ?psp_seg ?(child = false) t image =
+  let u8 i = Char.code image.[i] in
+  let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
+  if not (u8 0 = 0x4D && u8 1 = 0x5A) then invalid_arg "not an MZ image";
+  let reloc_count = u16 0x06 in
+  let header_bytes = u16 0x08 * 16 in
+  let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
+  let exe_sp = u16 0x10 and exe_ss = u16 0x0E in
+  let img_paras = (String.length image - header_bytes + 15) / 16 in
+  let minalloc = u16 0x0A in
+  let psp_seg =
+    match psp_seg with
+    | Some p -> p
+    | None -> max 0x1000 (0x9FF0 - img_paras - minalloc)
+  in
+  let image_seg = psp_seg + 0x10 in
+  let image_base = image_seg * 16 in
+  Bytes.blit (Bytes.of_string image) header_bytes t.mem image_base
+    (String.length image - header_bytes);
+  for i = 0 to reloc_count - 1 do
+    let e = u16 0x18 + (i * 4) in
+    let off = u16 e and sg = u16 (e + 2) in
+    let addr = image_base + (sg * 16) + off in
+    wr16 t addr (rd16 t addr + image_seg)
+  done;
+  write_psp ~init:(not child) t psp_seg;
+  if child then begin
+    t.blocks <- t.blocks @ [ (psp_seg, t.free_top - psp_seg) ];
+    t.free_base <- psp_seg
+  end;
+  Cpu86.set_seg t.cpu 1 (image_seg + exe_cs);
+  Cpu86.set_ip t.cpu exe_ip;
+  Cpu86.set_seg t.cpu 2 (image_seg + exe_ss);
+  Cpu86.set_reg16 t.cpu 4 exe_sp;
+  (* DOS 는 DS/ES 를 PSP 세그먼트로 넘긴다 — 진입점이 곧바로
+     mov cx,[PSP+0x0C] 로 읽는다(실측). *)
+  Cpu86.set_seg t.cpu 3 psp_seg;
+  Cpu86.set_seg t.cpu 0 psp_seg;
+  t.exited <- false;
+  t.exit_code <- 0
+
+(* ---------- EXEC (AH=4Bh) · 자식 종료 ----------
+
+   자식은 같은 기계 위에서 이어서 돈다 — CPU 레지스터와 프로세스
+   상태(PSP·DTA·블록 표·핸들)만 갈아끼운다. IVT·BDA·시계는 하드웨어
+   그대로 공유한다(TSR 드라이버가 건 벡터가 다음 자식에게 남는 것도
+   그래서 자연스럽다). 부모의 재개점은 프레임에 찍어둔 IP 다 — 훅은
+   INT 명령의 fetch 가 IP 를 넘긴 뒤에 돌기 때문에 그 값이 곧 'INT
+   다음 명령'이다. *)
+
+let snapshot_cpu t =
+  let cpu = t.cpu in
+  {
+    snap_regs = Array.init 8 (Cpu86.reg16 cpu);
+    snap_segs = Array.init 4 (Cpu86.seg cpu);
+    snap_ip = Cpu86.dump_ip cpu;
+    snap_flags = Cpu86.flags cpu;
+  }
+
+let restore_cpu t s =
+  let cpu = t.cpu in
+  Array.iteri (Cpu86.set_reg16 cpu) s.snap_regs;
+  Array.iteri (Cpu86.set_seg cpu) s.snap_segs;
+  Cpu86.set_ip cpu s.snap_ip;
+  Cpu86.set_flags cpu s.snap_flags
+
+(* MZ 자식의 배치 — 실기 DOS 의 EXEC 처럼 남은 자리 맨 아래(first fit)
+   에 PSP+이미지+minalloc 을 얹는다. 위로 남는 메모리가 곧 자식 몫이
+   되어(MSC 런타임이 PSP+0x02 와 이미지 끝 사이로 환경·argv 공간을
+   재니 넉넉해야 한다 — R6009 실측). 루트 적재의 memtop 아래 공식은
+   LZEXE 자기 해제 스텁용이고 자식 계약이 아니다. LZEXE 로 묶인 자식은
+   이 배치를 기준 삼지 않으므로 아직 계약 밖이다. *)
+let exe_child_psp t ~img_paras ~minalloc =
+  find_free t (0x10 + img_paras + minalloc)
+
+(* 자식 종료. 프레임이 없으면(루트) 기계가 멈춘다. 있으면 부모를
+   되살린다 — [keep] 은 TSR(AH=31h·INT 27h) 이 자기 블록을 남기는
+   크기다. 자식이 연 핸들은 닫는다(쓴 데이터는 마운트 표로 돌아간다),
+   자식의 블록은 사라지고 TSR 몫만 남는다. *)
+let child_exit t ~code ~keep =
+  match t.exec_frames with
+  | [] ->
+    t.exited <- true;
+    t.exit_code <- code
+  | f :: rest ->
+    t.exec_frames <- rest;
+    t.last_child_code <- code;
+    let inherited = List.map fst f.parent_handles in
+    let opened_by_child =
+      Hashtbl.fold (fun h _ acc -> if not (List.mem h inherited) then h :: acc else acc)
+        t.handles []
+    in
+    List.iter (fun h -> ignore (close_handle t h)) opened_by_child;
+    (match keep with
+     | Some paras -> t.blocks <- f.parent_blocks @ [ (t.psp_seg, paras) ]
+     | None -> t.blocks <- f.parent_blocks);
+    t.free_base <- f.parent_free_base;
+    t.free_top <- f.parent_free_top;
+    t.psp_seg <- f.parent_psp;
+    t.dta <- f.parent_dta;
+    restore_cpu t f.parent;
+    (* EXEC 에서 돌아온 직후의 값 — AH=4Dh 로도 같은 코드를 읽는다 *)
+    Cpu86.set_reg16 t.cpu 0 code;
+    set_cf t false
+
+(* INT 21h AH=4Bh AL=00 — 불러 실행하기. AL 01·03(불러만·오버레이) 은
+   아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
+let exec_program t =
+  let cpu = t.cpu in
+  let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
+  if Cpu86.reg8 cpu 0 <> 0x00 then fail t 1
+  else
+    match Hashtbl.find_opt t.host_files name with
+    | None -> fail t 2                         (* 파일이 없다 *)
+    | Some img_bytes ->
+      let image = Bytes.to_string img_bytes in
+      let is_mz =
+        String.length image >= 2 && image.[0] = 'M' && image.[1] = 'Z'
+      in
+      (* 배치를 먼저 정한다 — 실패는 부모에게 즉시 돌아간다 *)
+      let placement =
+        if is_mz then begin
+          let u8 i = Char.code image.[i] in
+          let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
+          let img_paras =
+            (String.length image - (u16 0x08 * 16) + 15) / 16
+          in
+          exe_child_psp t ~img_paras ~minalloc:(u16 0x0A)
+        end
+        else find_free t 0x1000
+      in
+      (match placement with
+       | None ->
+         Cpu86.set_reg16 cpu 3 (largest_free t);
+         fail t 8                                (* 메모리가 모자란다 *)
+       | Some psp ->
+         (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
+         let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
+         let env_seg = rd16 t epb in
+         let tail_seg = rd16 t (epb + 4) and tail_off = rd16 t (epb + 2) in
+         let fcb1_seg = rd16 t (epb + 8) and fcb1_off = rd16 t (epb + 6) in
+         let fcb2_seg = rd16 t (epb + 12) and fcb2_off = rd16 t (epb + 10) in
+         t.exec_frames <-
+           {
+             parent = snapshot_cpu t;
+             parent_psp = t.psp_seg;
+             parent_dta = t.dta;
+             parent_free_base = t.free_base;
+             parent_free_top = t.free_top;
+             parent_blocks = t.blocks;
+             parent_handles =
+               Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles [];
+           }
+           :: t.exec_frames;
+         if is_mz then load_exe ~psp_seg:psp ~child:true t image
+         else load_com ~psp_seg:psp ~child:true t image;
+         (* 커맨드라인·FCB·환경 세그먼트를 자식 PSP 에 옮긴다 *)
+         let cpsp = t.psp_seg * 16 in
+         if env_seg <> 0 then wr16 t (cpsp + 0x2C) env_seg;
+         let copy_dword_into dst seg off n =
+           if seg <> 0 || off <> 0 then
+             for i = 0 to n - 1 do
+               wr8 t (dst + i) (rd8 t ((seg lsl 4) + off + i))
+             done
+         in
+         if tail_seg <> 0 || tail_off <> 0 then begin
+           let src = (tail_seg lsl 4) + tail_off in
+           let n = rd8 t src in
+           wr8 t (cpsp + 0x80) n;
+           copy_dword_into (cpsp + 0x81) tail_seg (tail_off + 1) n;
+           wr8 t (cpsp + 0x81 + n) 0x0D
+         end;
+         copy_dword_into (cpsp + 0x5C) fcb1_seg fcb1_off 12;
+         copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12)
+
+(* INT 27h — 옛 방식의 상주 종료. DX 는 '마지막 상주 바이트 다음
+   오프셋' 이고 블록은 16바이트로 올림한 만큼(마지막 한 칸은 여유)을
+   남긴다. *)
+let int27 t =
+  let dx = Cpu86.reg16 t.cpu 2 in
+  child_exit t ~code:0 ~keep:(Some ((dx + 15) / 16 + 1))
 
 (* ---------- findfirst / findnext ---------- *)
 
@@ -247,9 +508,13 @@ let rec service t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
   match ah with
-  | 0x00 -> t.exited <- true; t.exit_code <- 0
-  | 0x4C -> t.exited <- true; t.exit_code <- Cpu86.reg8 cpu 0
-  | 0x4D -> Cpu86.set_reg16 cpu 0 t.exit_code
+  | 0x00 -> child_exit t ~code:0 ~keep:None
+  | 0x4C -> child_exit t ~code:(Cpu86.reg8 cpu 0) ~keep:None
+  | 0x4D ->
+    (* 마지막 자식의 종료 코드 — AH 는 종료 사유, 정상 종료는 0 *)
+    Cpu86.set_reg8 cpu 0 t.last_child_code;
+    Cpu86.set_reg8 cpu 4 0;
+    ok t
   | 0x01 ->
     (match console_read t with
      | Some w ->
@@ -556,6 +821,10 @@ let rec service t =
      | Ok () -> ok t
      | Error 9 -> fail t 9
      | Error avail -> Cpu86.set_reg16 cpu 3 (max 0 avail); fail t 8)
+  | 0x4B -> exec_program t
+  | 0x31 ->
+    (* 상주 종료 — DX 는 남길 크기(단락 수). 코드는 AL. *)
+    child_exit t ~code:(Cpu86.reg8 cpu 0) ~keep:(Some (Cpu86.reg16 cpu 2))
   | 0x4E ->
     let pattern = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
     let all = Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [] in
@@ -594,15 +863,4 @@ let rec service t =
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
   | _ -> ()
 
-let terminate t =
-  t.exited <- true;
-  t.exit_code <- 0
-
-(* 실기 DOS 는 .EXE 에 남은 메모리를 통째로 준다. 힙이 필요한 프로그램은
-   AH=4Ah 로 제 블록을 줄여 뒤를 내놓고, 그 다음에야 AH=48h 이 성공한다
-   — Turbo Pascal 런타임이 정확히 그렇게 한다. 처음부터 남는 자리를
-   비워 두면 4Ah 없이도 할당이 되어 실기와 다르게 움직인다. *)
-let init_memory t ~psp_seg =
-  t.free_base <- psp_seg;
-  t.free_top <- conv_mem_top;
-  t.blocks <- [ (psp_seg, conv_mem_top - psp_seg) ]
+let terminate t = child_exit t ~code:0 ~keep:None

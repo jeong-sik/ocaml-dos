@@ -51,7 +51,7 @@ let create () =
       dta = 0x80; psp_seg = 0;
       kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
-      stubs = [];
+      stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
       mouse = {
@@ -77,82 +77,19 @@ let create () =
         match v with
         | 0x20 -> Dos_dos.terminate t
         | 0x21 -> Dos_dos.service t
+        | 0x27 -> Dos_dos.int27 t
         | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
         | _ -> ());
   t
 
-(* ---------- 로더 ---------- *)
+(* ---------- 로더 ----------
 
-let write_psp t psp_seg =
-  let psp = psp_seg * 16 in
-  wr8 t psp 0xCD;                      (* int 20h *)
-  wr8 t (psp + 1) 0x20;
-  wr16 t (psp + 2) Dos_dos.conv_mem_top;  (* 가진 메모리의 끝 *)
-  wr16 t (psp + 0x0A) 0;               (* 종료 주소 *)
-  wr16 t (psp + 0x0C) 0;
-  wr8 t (psp + 0x80) 0;                (* 커맨드라인 길이 0 *)
-  wr8 t (psp + 0x81) 0x0D;
-  t.psp_seg <- psp_seg;
-  t.dta <- psp + 0x80;                 (* 기본 DTA = PSP:0x80 *)
-  Dos_dos.init_memory t ~psp_seg
+   몸통은 Dos_dos 에 있다 — EXEC(AH=4Bh) 자식을 같은 코드로 싣기
+   때문이다. 여기선 루트 프로그램을 싣는 얼굴만 남긴다. *)
 
-(* COM: 실기 DOS 는 PSP 를 독립 세그먼트에 준다. 세그 0 에 두면 PSP 가
-   IVT·BDA 와 겹쳐 부팅 스텁을 지운다(실측: PSP:0x80 쓰기가 IVT[20h]
-   오프셋을 0 으로 만들었다). 세그 0x1000 — DOS 의 오랜 배치. *)
-let load_com t image =
-  let psp_seg = 0x1000 in
-  Bytes.blit (Bytes.of_string image) 0 t.mem ((psp_seg * 16) + 0x100)
-    (String.length image);
-  write_psp t psp_seg;
-  Cpu86.set_seg t.cpu 1 psp_seg;
-  Cpu86.set_seg t.cpu 3 psp_seg;
-  Cpu86.set_seg t.cpu 0 psp_seg;
-  Cpu86.set_seg t.cpu 2 psp_seg;
-  Cpu86.set_ip t.cpu 0x100;
-  Cpu86.set_reg16 t.cpu 4 0xFFFE;
-  (* RET 로 돌아오면 PSP 의 INT 20h 로 끝나는 실기 관례 — 스택 맨 위에
-     0x0000 을 둔다. *)
-  wr16 t ((psp_seg * 16) + 0xFFFE) 0x0000;
-  t.exited <- false;
-  t.exit_code <- 0
+let load_com t image = Dos_dos.load_com t image
 
-(* MZ EXE — 실기 배치. 프로그램은 conventional RAM 위쪽에 실린다:
-   LZEXE 같은 자기 압축 해제 스텁이 이 위치를 기준으로 원본 진입점을
-   계산하기 때문에, 낮은 고정 세그먼트에 두면 엉뚱한 주소로 뛴다
-   (ZZT 실측). 상한은 이미지 끝이 0xA000(비디오 메모리 시작)을 넘지
-   않는 자리다 — 넘으면 비디오 모드 세팅이 코드를 지운다. *)
-let load_exe t image =
-  let u8 i = Char.code image.[i] in
-  let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
-  if not (u8 0 = 0x4D && u8 1 = 0x5A) then invalid_arg "not an MZ image";
-  let reloc_count = u16 0x06 in
-  let header_bytes = u16 0x08 * 16 in
-  let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
-  let exe_sp = u16 0x10 and exe_ss = u16 0x0E in
-  let img_paras = (String.length image - header_bytes + 15) / 16 in
-  let minalloc = u16 0x0A in
-  let psp_seg = max 0x1000 (0x9FF0 - img_paras - minalloc) in
-  let image_seg = psp_seg + 0x10 in
-  let image_base = image_seg * 16 in
-  Bytes.blit (Bytes.of_string image) header_bytes t.mem image_base
-    (String.length image - header_bytes);
-  for i = 0 to reloc_count - 1 do
-    let e = u16 0x18 + (i * 4) in
-    let off = u16 e and sg = u16 (e + 2) in
-    let addr = image_base + (sg * 16) + off in
-    wr16 t addr (rd16 t addr + image_seg)
-  done;
-  write_psp t psp_seg;
-  Cpu86.set_seg t.cpu 1 (image_seg + exe_cs);
-  Cpu86.set_ip t.cpu exe_ip;
-  Cpu86.set_seg t.cpu 2 (image_seg + exe_ss);
-  Cpu86.set_reg16 t.cpu 4 exe_sp;
-  (* DOS 는 DS/ES 를 PSP 세그먼트로 넘긴다 — 진입점이 곧바로
-     mov cx,[PSP+0x0C] 로 읽는다(실측). *)
-  Cpu86.set_seg t.cpu 3 psp_seg;
-  Cpu86.set_seg t.cpu 0 psp_seg;
-  t.exited <- false;
-  t.exit_code <- 0
+let load_exe t image = Dos_dos.load_exe t image
 
 (* ---------- 파일 마운트 ---------- *)
 
