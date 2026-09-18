@@ -118,6 +118,21 @@ let () =
   Dos_machine.run m2 ~max_steps:1000;
   checkb "int33 position returns injected x"
     (Dos_machine.exit_code m2 = 100) true;
+  (* INT 21h AH=08 확장키 2바이트 계약 — 실기 DOS 는 방향키를 첫 읽기에
+     0x00, 다음 읽기에 스캔코드로 내준다. MSC getch 기반 게임 입력
+     (삼국지3 전투 배치의 커서 이동)의 전제. COM 은 게임과 같은
+     "0 이면 다시 읽기" 루프로 검증한다. *)
+  let rdloop = "\xb4\x08\xcd\x21\x3c\x00\x74\xfa\xb4\x4c\xcd\x21" in
+  let m3 = Dos_machine.create () in
+  Dos_machine.load_com m3 rdloop;
+  ignore (Dos_machine.run_with_keys m3 ~max_steps:4000 ~keys:[{ word = 0x5000; not_before = 0 }]);
+  checkb "int21 ah=08 delivers ext scan on 2nd read"
+    (Dos_machine.exit_code m3 = 0x50) true;
+  let m5 = Dos_machine.create () in
+  Dos_machine.load_com m5 rdloop;
+  ignore (Dos_machine.run_with_keys m5 ~max_steps:4000 ~keys:[{ word = 0x1c0d; not_before = 0 }]);
+  checkb "int21 ah=08 plain key reads ascii"
+    (Dos_machine.exit_code m5 = 0x0d) true;
   if !failed = 0 then print_endline "dos machine M2a: all passed"
   else begin
     Printf.eprintf "dos machine M2a: %d failures\n%!" !failed;

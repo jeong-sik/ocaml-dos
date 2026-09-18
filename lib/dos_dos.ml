@@ -512,6 +512,27 @@ let ascii_of_key w =
   let a = w land 0xff in
   if a = 0 then 0 else a
 
+(* 실기 DOS 콘솔 입력은 바이트 스트림이다 — 확장키(방향키 등, ascii=0)는
+   첫 읽기에 0x00, 다음 읽기에 스캔코드를 반환한다(MS-DOS AH=01/07/08
+   계약). 링은 단어 단위라 스캔을 잠시 여기에 걸어 두었다가 다음 읽기로
+   내준다. 게스트 왕복 테스트가 이 계약을 지킨다. *)
+let ext_read t =
+  if t.ext_scan_pending <> 0 then begin
+    let sc = t.ext_scan_pending in
+    t.ext_scan_pending <- 0;
+    Some sc
+  end
+  else
+    match console_read t with
+    | Some w ->
+      let a = w land 0xff and sc = w lsr 8 in
+      if a = 0 && sc <> 0 then begin
+        t.ext_scan_pending <- sc;
+        Some 0
+      end
+      else Some a
+    | None -> None
+
 (* ---------- INT 21h ---------- *)
 
 let rec service t =
@@ -526,15 +547,14 @@ let rec service t =
     Cpu86.set_reg8 cpu 4 0;
     ok t
   | 0x01 ->
-    (match console_read t with
-     | Some w ->
-       let c = ascii_of_key w in
+    (match ext_read t with
+     | Some c ->
        Cpu86.set_reg8 cpu 0 c;
        if c <> 0 then put_char t c 0x07
      | None -> Cpu86.set_reg8 cpu 0 0)
   | 0x07 | 0x08 ->
-    (match console_read t with
-     | Some w -> Cpu86.set_reg8 cpu 0 (ascii_of_key w)
+    (match ext_read t with
+     | Some c -> Cpu86.set_reg8 cpu 0 c
      | None -> Cpu86.set_reg8 cpu 0 0)
   | 0x02 -> put_char t (Cpu86.reg8 cpu 2) 0x07
   | 0x06 ->
