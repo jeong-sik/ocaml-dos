@@ -65,6 +65,7 @@ type t = {
   mutable dta : int;                          (** 전송 주소(물리) *)
   mutable psp_seg : int;
   mutable kbd_wait : bool;                    (** 키를 기다리다 굶었다 *)
+  mutable ext_scan_pending : int;             (** INT 21h 바이트 읽기용 확장키 스캔 대기 *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
   mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable pending_irq0 : bool;                (** IF 가 꺼져 못 넣은 틱 *)

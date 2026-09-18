@@ -50,6 +50,7 @@ let create () =
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
       kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
+      ext_scan_pending = 0;
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
