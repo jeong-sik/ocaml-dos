@@ -151,6 +151,10 @@ val psp_seg_of : t -> int
 val mem_read : t -> int -> int
 (** 물리 주소 한 바이트. *)
 
+val mem_write : t -> int -> int -> unit
+(** 물리 주소 한 바이트 쓰기({!mem_read} 의 짝). 하네스가 게스트 RAM 에
+    상태를 주입하는 용도. 값은 하위 8비트로 잘린다. *)
+
 val tick_count : t -> int
 (** BIOS 타이머 틱(0x40:0x6C). 18.2Hz 가 기본이고 게스트가 PIT 분주비를
     바꾸면 그만큼 빨라진다. *)

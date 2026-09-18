@@ -288,6 +288,7 @@ let frame_ppm t =
 let cpu_of t = t.cpu
 let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
+let mem_write t a v = wr8 t a v
 let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
