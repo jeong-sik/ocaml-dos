@@ -58,7 +58,10 @@ let create () =
       ems_pages = Hashtbl.create 2;
       ems_mapped = Array.make 4 (0, 0);
       mouse = {
-        mouse_present = false; mouse_x = 0; mouse_y = 0;
+        (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
+           KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
+           키보드 모드로 강제한다(전투 배치 같은 마우스 UI 잠김). *)
+        mouse_present = true; mouse_x = 0; mouse_y = 0;
         mouse_buttons = 0; mouse_visible = false;
         mouse_dx = 0; mouse_dy = 0;
       };

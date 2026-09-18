@@ -105,6 +105,19 @@ let () =
   checkb "mem_write roundtrip" (Dos_machine.mem_read mw 0x500 = 0xA5) true;
   Dos_machine.mem_write mw 0x500 0x1FF;
   checkb "mem_write masks to a byte" (Dos_machine.mem_read mw 0x500 = 0xFF) true;
+  (* INT 33h — 마우스 벡터가 호스트 핸들러로 산다: 기본 부착 감지와
+     set_mouse 주입 좌표 조회를 게스트에서 확인한다. *)
+  let m1 = Dos_machine.create () in
+  Dos_machine.load_com m1 "\xb8\x00\x00\xcd\x33\xb4\x4c\xcd\x21";
+  Dos_machine.run m1 ~max_steps:1000;
+  checkb "int33 reset reports installed"
+    (Dos_machine.exit_code m1 = 0xFF) true;
+  let m2 = Dos_machine.create () in
+  Dos_machine.load_com m2 "\xb8\x03\x00\xcd\x33\x89\xc8\xb4\x4c\xcd\x21";
+  Dos_machine.set_mouse m2 ~x:100 ~y:50 ~buttons:1;
+  Dos_machine.run m2 ~max_steps:1000;
+  checkb "int33 position returns injected x"
+    (Dos_machine.exit_code m2 = 100) true;
   if !failed = 0 then print_endline "dos machine M2a: all passed"
   else begin
     Printf.eprintf "dos machine M2a: %d failures\n%!" !failed;
