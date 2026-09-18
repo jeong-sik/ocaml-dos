@@ -99,6 +99,12 @@ let () =
   in
   check_rom_glyph 65 "rom font 'A'";
   check_rom_glyph 0x5F "rom font '_'";
+  (* mem_write: mem_read 의 쓰기 짝 — 하네스의 RAM 주입(관측/실험). *)
+  let mw = Dos_machine.create () in
+  Dos_machine.mem_write mw 0x500 0xA5;
+  checkb "mem_write roundtrip" (Dos_machine.mem_read mw 0x500 = 0xA5) true;
+  Dos_machine.mem_write mw 0x500 0x1FF;
+  checkb "mem_write masks to a byte" (Dos_machine.mem_read mw 0x500 = 0xFF) true;
   if !failed = 0 then print_endline "dos machine M2a: all passed"
   else begin
     Printf.eprintf "dos machine M2a: %d failures\n%!" !failed;
