@@ -152,6 +152,10 @@ let video t =
     (* AL 의 최상위 비트는 "화면을 지우지 말라" 는 뜻이다. *)
     let mode = al land 0x7f in
     Dos_video.set_mode t.video mode ~clear:(al land 0x80 = 0);
+    (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
+       AL bit7(화면 보존)과는 상관없다. 막는 길은 BDA 0x489 bit3
+       (기본 팔레트 싣기 금지, AX=1200h BL=31h 가 켜는 비트) 하나다. *)
+    if rd8 t 0x489 land 0x08 = 0 then Dos_ports.reset_dac t.ports;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
     wr8 t 0x484 (rows - 1);

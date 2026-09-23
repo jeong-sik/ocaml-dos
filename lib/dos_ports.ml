@@ -118,6 +118,19 @@ let create ~mem ~video =
     opl_t2_exp = false;
   }
 
+(* 모드를 세우면 BIOS 가 DAC 을 기본값으로 다시 싣는다. 앞 프로그램이
+   페이드아웃으로 DAC 을 전부 0 으로 만들고 끝나도, 다음 프로그램이
+   모드만 세우고 팔레트를 안 건드리면 기본색이 보인다 — 실기 계약이다
+   (삼국지3: OPEN.EXE 가 검게 페이드한 뒤 AX=0012h 로 끝나고, MAIN.EXE
+   의 카피프로텍션 화면은 DAC 을 쓰지 않는다). 쓰기 순번과 PEL 마스크도
+   처음 상태로 돌린다. *)
+let reset_dac t =
+  Array.iteri (fun i _ -> t.pal.(i) <- default_vga_pal i) t.pal;
+  t.dac_write_index <- 0;
+  t.dac_read_index <- 0;
+  t.dac_phase <- 0;
+  t.dac_mask <- 0xFF
+
 let set_now t n = t.now <- n
 let palette t = t.pal
 let set_scancode t sc = t.scancode <- sc land 0xff
