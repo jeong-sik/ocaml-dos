@@ -308,6 +308,28 @@ let test_input_requests_count_empty_reads () =
   Dos_machine.run m2 ~max_steps:100_000;
   check "키가 있으면 안 센다" (Dos_machine.input_requests m2) 0
 
+(* 키보드를 직접 읽는 게임은 INT 16h 를 부르지 않고 BDA 링의 머리
+   (0040:001A)를 꼬리(0040:001C)와 견준다 — 삼국지3 의 카피프로텍션과
+   이름 입력이 그렇다(로고 뒤로 INT 16h 가 한 번도 안 불린다). 머리를
+   읽는 것도 키를 묻는 것이므로, 빈 링이면 INT 16h 와 똑같이 센다. *)
+let test_direct_ring_poll_counts_as_request () =
+  let read_head_twice =
+    (* mov ax,0040h; mov ds,ax; (mov ax,[001Ah]; cmp ax,[001Ch]) x2 *)
+    let peek = "\xa1\x1a\x00\x3b\x06\x1c\x00" in
+    assemble (fun _ -> "\xb8\x40\x00\x8e\xd8" ^ peek ^ peek ^ quit) ""
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m read_head_twice;
+  Dos_machine.run m ~max_steps:100_000;
+  check "빈 링의 머리를 두 번 읽었다" (Dos_machine.input_requests m) 2;
+  check_true "직접 폴링도 기다림으로 보인다" (Dos_machine.kbd_waiting m);
+  let m2 = Dos_machine.create () in
+  Dos_machine.load_com m2 read_head_twice;
+  Dos_machine.type_string m2 "a";
+  Dos_machine.run m2 ~max_steps:100_000;
+  check "키가 있으면 안 센다" (Dos_machine.input_requests m2) 0;
+  check_true "키가 있으면 기다리지 않는다" (not (Dos_machine.kbd_waiting m2))
+
 (* AH=01h 의 답은 ZF 로 돌아간다 — 스텁의 iret 이 프레임의 플래그를
    되돌리므로 프레임 워드를 고쳐야 호출자의 je/jne 가 본다. 삼국지3
    메뉴 대기 루프가 je 를 항상 탄 채 키를 못 받은 실측을 고정한다. *)
@@ -546,6 +568,7 @@ let () =
   test_key_names ();
   test_screen_digest_follows_the_screen ();
   test_input_requests_count_empty_reads ();
+  test_direct_ring_poll_counts_as_request ();
   test_int16_ah01_reports_key_via_zf ();
   test_int21_cf_reaches_the_caller ();
   test_named_key_reaches_guest ();
