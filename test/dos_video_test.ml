@@ -195,6 +195,68 @@ let test_mode_set_clears_planes () =
   in
   check "모드를 다시 세우면 평면이 비워진다" (Dos_machine.pixel m ~x:3 ~y:3) 0
 
+(* DAC 쓰기: 포트 0x3C8 에 자리, 0x3C9 에 R·G·B 차례로 *)
+let dac_set idx (r, g, bl) =
+  mov_dx 0x3C8 ^ mov_al idx ^ "\xee"
+  ^ mov_dx 0x3C9 ^ mov_al r ^ "\xee" ^ mov_al g ^ "\xee" ^ mov_al bl ^ "\xee"
+
+(* 실기 BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다. 앞
+   프로그램이 페이드아웃으로 DAC 을 검게 두고 끝나도, 다음 프로그램이
+   모드만 세우면 기본색이 보인다(삼국지3 카피프로텍션 화면이 이 길이다).
+   AL bit7(화면 보존)도 팔레트 싣기는 막지 않는다. *)
+let test_mode_set_reloads_dac () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x12
+           ^ dac_set 15 (0, 0, 0)                (* 색 15 를 검게 *)
+           ^ mov_dx 0x3C6 ^ mov_al 0x00 ^ "\xee" (* PEL 마스크도 닫는다 *)
+           ^ set_mode 0x92                       (* 12h, 화면 보존 *)
+           ^ mov_ah 0x0C ^ mov_al 15 ^ mov_bx 0 ^ mov_cx 10 ^ mov_dx 10
+           ^ int_ 0x10
+           ^ mov_dx 0x3C6 ^ "\xec" ^ store_ax scratch
+           ^ quit)
+         "")
+  in
+  check "점의 색 번호" (Dos_machine.pixel m ~x:10 ~y:10) 15;
+  check_true "모드를 세우면 색 15 는 다시 흰색"
+    (rgb_at m ~x:10 ~y:10 = (0xFF, 0xFF, 0xFF));
+  check "PEL 마스크도 처음 값" (peek m scratch land 0xff) 0xFF
+
+(* BDA 0x489 bit3 은 "기본 팔레트 싣기 금지" 다. 켜져 있으면 모드를
+   세워도 게스트가 쓴 DAC 이 남는다. *)
+let test_mode_set_keeps_dac_when_inhibited () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x12
+           ^ dac_set 15 (63, 0, 0)               (* 색 15 를 빨강으로 *)
+           ^ mov_ax 0x0040 ^ "\x8e\xc0"          (* es = 0040h *)
+           ^ "\x26\x80\x0e\x89\x00\x08"         (* or byte es:[89h],08h *)
+           ^ set_mode 0x12
+           ^ mov_ah 0x0C ^ mov_al 15 ^ mov_bx 0 ^ mov_cx 10 ^ mov_dx 10
+           ^ int_ 0x10 ^ quit)
+         "")
+  in
+  check_true "금지 비트가 켜지면 게스트의 DAC 이 남는다"
+    (rgb_at m ~x:10 ~y:10 = (0xFF, 0x00, 0x00))
+
+(* 텍스트 화면의 글자도 IBM 순서로 그린다 — 최상위 비트가 왼쪽 점.
+   '/' 는 맨 윗줄이 오른쪽, 일곱째 줄이 맨 왼쪽에 점이 있다. *)
+let test_text_glyph_not_mirrored () =
+  let m =
+    run_com
+      (assemble (fun off -> set_mode 0x03 ^ mov_ah 0x09 ^ mov_dx off
+                             ^ int_ 0x21 ^ quit) "/$")
+  in
+  let lit x y = rgb_at m ~x ~y <> (0, 0, 0) in
+  (* 한 글리프 줄이 화면 두 줄이다: 글리프 6 번 줄은 y=12,13 *)
+  check_true "'/' 일곱째 줄의 맨 왼쪽 점이 켜진다" (lit 0 12);
+  check_true "'/' 맨 윗줄의 맨 왼쪽 점은 꺼져 있다" (not (lit 0 0));
+  check_true "'/' 맨 윗줄은 오른쪽에 점" (lit 5 0 || lit 6 0)
+
 (* ---------- CGA ---------- *)
 
 let test_cga_mode_4 () =
@@ -258,6 +320,9 @@ let () =
   test_attribute_palette_remaps_color ();
   test_mode_12_dims_and_corner ();
   test_mode_set_clears_planes ();
+  test_mode_set_reloads_dac ();
+  test_mode_set_keeps_dac_when_inhibited ();
+  test_text_glyph_not_mirrored ();
   test_cga_mode_4 ();
   test_cga_mode_6 ();
   test_forty_column_text ();

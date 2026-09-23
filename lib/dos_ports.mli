@@ -37,6 +37,11 @@ val palette : t -> (int * int * int) array
 (** 256색 DAC — 채널당 6비트. 포트 0x3C8/0x3C9 와 INT 10h AH=10h 이
     같은 배열을 쓴다. *)
 
+val reset_dac : t -> unit
+(** DAC 256 자리를 기본값으로, 쓰기·읽기 순번과 PEL 마스크(0x3C6)를
+    처음 상태로. INT 10h AH=00h 가 모드를 세울 때 부른다 — 실기 BIOS 가
+    그 순간 팔레트를 다시 싣는다. *)
+
 val set_scancode : t -> int -> unit
 (** 포트 0x60 이 돌려줄 마지막 스캔 코드. *)
 
