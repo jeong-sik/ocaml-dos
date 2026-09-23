@@ -256,8 +256,10 @@ let ring_hi = 0x3C
 
 let clamp_ptr v = if v < ring_lo || v > ring_hi then ring_lo else v
 
-let ring_head t = clamp_ptr (rd16 t 0x41A)
-let ring_tail t = clamp_ptr (rd16 t 0x41C)
+let bda_ring_head = 0x41A
+let bda_ring_tail = 0x41C
+let ring_head t = clamp_ptr (rd16 t bda_ring_head)
+let ring_tail t = clamp_ptr (rd16 t bda_ring_tail)
 let key_pending t = ring_head t <> ring_tail t
 
 let peek_key t = rd16 t (0x400 + ring_head t)

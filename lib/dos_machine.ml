@@ -20,8 +20,17 @@ let create () =
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
+  (* A game that reads the keyboard itself polls the BIOS ring's head word
+     at 0x41A against its tail instead of calling INT 16h (삼국지3's copy
+     protection and name entry measured: no INT 16h after the logo). Reading
+     the head is the guest looking at the keyboard, the same question INT
+     16h asks, so it answers the same way: an empty ring is a starve, a
+     pending key lowers the latch. The machine is built after this closure,
+     so the answer is wired in below. *)
+  let on_ring_poll = ref ignore in
   let read a =
     let a = a land 0xfffff in
+    if a = bda_ring_head then !on_ring_poll ();
     if Dos_video.owns_address video a then Dos_video.mem_read video a
     else Char.code (Bytes.get mem a)
   in
@@ -68,6 +77,8 @@ let create () =
       };
     }
   in
+  on_ring_poll :=
+    (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
   Cpu86.set_int_hook cpu (fun vec ->
       (* ROM 스텁을 지나온 호출(실벡터 + 0x80)을 실벡터로 되돌린다. *)
