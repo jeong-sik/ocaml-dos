@@ -213,3 +213,8 @@ let png_source = Dos_machine.frame_rgb m
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
+| `Dos_core_identity` | 이 빌드가 어떤 코어인지 — `lib/` 소스의 digest 를 빌드가 계산해 넣는다 (`ocaml-dos.core-identity`) |
+
+어떤 커밋의 digest 인지 알고 싶으면 그 커밋을 받아 `dune build` 하고
+`_build/default/lib/identity/dos_core_identity.ml` 을 보면 된다. 소스가
+같으면 커밋이 달라도 digest 는 같다.
