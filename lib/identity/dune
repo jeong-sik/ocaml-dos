@@ -1,0 +1,19 @@
+; Which core a client linked. The value is computed at build time from the
+; core's own sources in lib/, so a vendored copy, an opam install and a git
+; checkout of the same sources report the same digest, and a copy that
+; differs in any byte reports a different one.
+
+(library
+ (name dos_core_identity)
+ (public_name ocaml-dos.core-identity)
+ (modules dos_core_identity))
+
+(rule
+ (targets dos_core_identity.ml)
+ (deps
+  (glob_files ../*.ml)
+  (glob_files ../*.mli))
+ (action
+  (with-stdout-to
+   %{targets}
+   (run %{exe:gen/gen_core_identity.exe} %{deps}))))

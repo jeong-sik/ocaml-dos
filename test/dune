@@ -46,3 +46,10 @@
 (test
  (name dos_ems_test)
  (libraries dosmachine))
+
+(test
+ (name core_identity_test)
+ (deps
+  (glob_files %{project_root}/lib/*.ml)
+  (glob_files %{project_root}/lib/*.mli))
+ (libraries dos_core_identity core_digest))
