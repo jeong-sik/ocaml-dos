@@ -55,7 +55,6 @@ let create () =
       host_files = Hashtbl.create 8;
       handles = Hashtbl.create 4;
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
-      next_handle = 5;
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
       kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
@@ -64,7 +63,6 @@ let create () =
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
-      ems_next_handle = 1;
       ems_pages = Hashtbl.create 2;
       ems_mapped = Array.make 4 (0, 0);
       mouse = {

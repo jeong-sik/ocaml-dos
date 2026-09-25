@@ -105,3 +105,25 @@ val f_trap : int
 val f_interrupt : int
 val f_direction : int
 val f_overflow : int
+
+(** {1 Saved state}
+
+    What a machine snapshot needs from the CPU: the registers, the flags word,
+    HLT and the cycle count the machine's clock derives from. The model and
+    the memory, port and interrupt callbacks belong to whoever creates the
+    CPU and are not part of it. *)
+
+type saved = {
+  saved_regs : int array;  (** 8 × 16-bit, AX CX DX BX SP BP SI DI *)
+  saved_segs : int array;  (** 4 × segment, ES CS SS DS *)
+  saved_ip : int;
+  saved_flags : int;  (** as {!flags} returns it *)
+  saved_halted : bool;
+  saved_cycles : int;
+}
+
+val save_state : t -> saved
+
+val load_state : t -> saved -> unit
+(** Values are masked as the setters mask them. [Invalid_argument] unless
+    there are 8 registers and 4 segments. *)

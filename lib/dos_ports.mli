@@ -48,3 +48,13 @@ val set_scancode : t -> int -> unit
 val speaker_on : t -> bool
 (** 포트 0x61 의 bit0·bit1 이 둘 다 켜졌다 — 게이트와 데이터가 열렸다.
     소리를 내지는 않고, 하네스가 관측만 한다. *)
+
+(** {1 Snapshot} *)
+
+val write_state : Dos_snap_codec.writer -> t -> unit
+(** Every field but the RAM and the video adapter, which the machine writes.
+    For {!Dos_snapshot}. *)
+
+val read_state : Dos_snap_codec.reader -> t -> unit
+(** Overwrites [t] with what {!write_state} wrote. Raises
+    [Dos_snap_codec.Invalid] on a value out of range. *)

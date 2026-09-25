@@ -11,6 +11,16 @@ let rows = 25
 (* 4.77MHz — IBM PC 의 CPU 클럭. 사이클을 초로 바꾸는 유일한 환산비다. *)
 let cpu_hz = 4_772_727
 
+(* DOS 핸들 표(JFT). 실기 DOS 는 PSP 마다 20칸짜리 표(PSP:18h, 크기는
+   PSP:32h)를 두고, 0-4 는 stdin/stdout/stderr/stdaux/stdprn 이 이미
+   차지한다. AH=3Ch/3Dh/45h 는 가장 낮은 빈 칸 번호를 돌려주고, 빈 칸이
+   없으면 CF=1, AX=4 (too many open files) 로 답한다. AH=46h 는 CX 가 표
+   밖이면 AX=6 (invalid handle). 출처: Ralf Brown's Interrupt List,
+   INT 21h AH=3Ch/3Dh/45h/46h, 그리고 PSP 형식 표. AH=67h(표 늘리기)는 아직
+   모델 밖이라 표는 20칸 고정이다. *)
+let first_file_handle = 5
+let max_handles = 20
+
 type handle = {
   hname : string;
   mutable data : Bytes.t;
@@ -60,7 +70,7 @@ type t = {
   video : Dos_video.t;
   host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
   handles : (int, handle) Hashtbl.t;
-  mutable next_handle : int;
+        (** 핸들 번호 [first_file_handle] .. [max_handles - 1] 만 쓴다 *)
   fcbs : (int, Bytes.t * int) Hashtbl.t;
   mutable dta : int;                          (** 전송 주소(물리) *)
   mutable psp_seg : int;
@@ -84,9 +94,8 @@ type t = {
   mutable epoch_min : int;
   mutable epoch_sec : int;
   (* EMS 4.0 스텁(Dos_ems)의 상태 *)
-  mutable ems_next_handle : int;
   ems_pages : (int, Bytes.t array) Hashtbl.t;
-        (** 핸들 → 논리 페이지 배열(각 16KB) *)
+        (** 핸들(1 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB) *)
   mutable ems_mapped : (int * int) array;
         (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지) *)
   mouse : mouse;
@@ -103,7 +112,24 @@ let wr8 t a v = Bytes.set t.mem (a land 0xfffff) (Char.chr (v land 0xff))
 let rd16 t a = rd8 t a lor (rd8 t (a + 1) lsl 8)
 let wr16 t a v = wr8 t a v; wr8 t (a + 1) (v lsr 8)
 
-let seg_off t sreg reg = ((Cpu86.seg t.cpu sreg lsl 4) + Cpu86.reg16 t.cpu reg)
+(* The 8086 forms a physical address as segment*16 + offset over 20 address
+   lines, so FFFF:0010 and above wrap to the bottom of memory (the high
+   memory area exists only on a 286+ with the A20 line enabled, which this
+   machine does not model). Every INT 21h buffer and FCB address built here
+   is therefore a 20-bit physical address. *)
+let phys_mask = 0xfffff
+let physical seg off = ((seg lsl 4) + off) land phys_mask
+
+let seg_off t sreg reg = physical (Cpu86.seg t.cpu sreg) (Cpu86.reg16 t.cpu reg)
+
+(* Copies [len] bytes of [src] into guest memory at physical [dst], wrapping
+   at 1MB like [wr8]. A buffer that starts near the top of memory continues
+   at physical 0 instead of raising. *)
+let blit_to_mem t src src_off dst len =
+  let dst = dst land phys_mask in
+  let first = min len (phys_mask + 1 - dst) in
+  Bytes.blit src src_off t.mem dst first;
+  if len > first then Bytes.blit src (src_off + first) t.mem 0 (len - first)
 
 (* DS:DX 의 ASCIIZ — INT 21h 파일명 계열이 쓴다. *)
 let asciiz_at t base =

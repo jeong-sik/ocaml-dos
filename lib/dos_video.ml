@@ -326,3 +326,42 @@ let get_pixel t ~x ~y =
   | Linear256 ->
     let w, _ = dims t in
     Char.code (Bytes.get t.mem (planar_base + (y * w) + x))
+
+(* ---------- snapshot ---------- *)
+
+module C = Dos_snap_codec
+
+(* The full pattern fails the build when a field is added, until the
+   snapshot carries it. Keep [write_state] and [read_state] in one order;
+   both name the same range for each field. *)
+let write_state w t =
+  let { mem = _ (* the machine's RAM: the machine writes it *);
+        planes; latches; mode; gc_index; gc; seq_index; seq; attr_index;
+        attr_is_data; attr; cga_color_select } = t
+  in
+  let put what v = C.put w ~what C.byte v in
+  Array.iter (C.put_bytes w) planes;
+  C.put_int_array w ~what:"latches" C.byte latches;
+  put "video mode" mode;
+  put "gc_index" gc_index;
+  C.put_int_array w ~what:"gc" C.byte gc;
+  put "seq_index" seq_index;
+  C.put_int_array w ~what:"seq" C.byte seq;
+  put "attr_index" attr_index;
+  C.put_bool w attr_is_data;
+  C.put_int_array w ~what:"attr" C.byte attr;
+  put "cga_color_select" cga_color_select
+
+let read_state r t =
+  let get what = C.get r ~what C.byte in
+  Array.iter (C.fill_bytes r) t.planes;
+  C.fill_int_array r ~what:"latches" C.byte t.latches;
+  t.mode <- get "video mode";
+  t.gc_index <- get "gc_index";
+  C.fill_int_array r ~what:"gc" C.byte t.gc;
+  t.seq_index <- get "seq_index";
+  C.fill_int_array r ~what:"seq" C.byte t.seq;
+  t.attr_index <- get "attr_index";
+  t.attr_is_data <- C.get_bool r;
+  C.fill_int_array r ~what:"attr" C.byte t.attr;
+  t.cga_color_select <- get "cga_color_select"
