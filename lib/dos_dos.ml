@@ -60,11 +60,26 @@ let matches_pattern ~pattern ~name =
 
 let is_console h = h >= 0 && h <= 2
 
+(* 가장 낮은 빈 번호 — 실기 DOS 가 JFT 에서 첫 빈 칸을 고르는 것과 같다.
+   닫은 번호는 다시 쓰이고, 표가 차면 None (DOS 오류 4). 규칙은
+   Dos_state.max_handles 주석. *)
+let free_handle t =
+  let rec go h =
+    if h >= max_handles then None
+    else if Hashtbl.mem t.handles h then go (h + 1)
+    else Some h
+  in
+  go first_file_handle
+
+let too_many_open_files = 4
+let invalid_handle = 6
+
 let open_handle t name data =
-  let h = t.next_handle in
-  t.next_handle <- t.next_handle + 1;
-  Hashtbl.replace t.handles h { hname = name; data; pos = 0 };
-  h
+  match free_handle t with
+  | None -> None
+  | Some h ->
+    Hashtbl.replace t.handles h { hname = name; data; pos = 0 };
+    Some h
 
 (* 닫을 때 마운트 표로 되돌린다 — 저장한 파일을 같은 세션에서 다시
    열 수 있어야 게임의 세이브/로드가 성립한다. *)
@@ -179,7 +194,7 @@ let write_psp ?(init = true) t psp_seg =
   let eb = env_seg * 16 in
   wr8 t eb 0x00; wr8 t (eb + 1) 0x00;  (* 빈 환경: 이중 NUL 로 끝 *)
   t.psp_seg <- psp_seg;
-  t.dta <- psp + 0x80;                 (* 기본 DTA = PSP:0x80 *)
+  t.dta <- physical psp_seg 0x80;      (* 기본 DTA = PSP:0x80 *)
   if init then init_memory t ~psp_seg
 
 (* COM: 실기 DOS 는 PSP 를 독립 세그먼트에 준다. 세그 0 에 두면 PSP 가
@@ -312,17 +327,29 @@ let child_exit t ~code ~keep =
   | f :: rest ->
     t.exec_frames <- rest;
     t.last_child_code <- code;
-    let inherited = List.map fst f.parent_handles in
-    (* Close in handle order: two handles on one file each write their bytes
+    (* A handle is the parent's only if the same number still names the
+       same record: numbers are reused (lowest free), so a child that closed
+       an inherited handle and opened another under that number opened a
+       file of its own.
+       Close in handle order: two handles on one file each write their bytes
        back, so the order picks which write survives. The table's bucket
        order depends on its insertion history, which differs between a
        machine and one rebuilt from its snapshot. *)
+    let inherited h hd =
+      match List.assoc_opt h f.parent_handles with
+      | Some phd -> phd == hd
+      | None -> false
+    in
     let opened_by_child =
       List.sort compare
-        (Hashtbl.fold (fun h _ acc -> if not (List.mem h inherited) then h :: acc else acc)
+        (Hashtbl.fold (fun h hd acc -> if inherited h hd then acc else h :: acc)
            t.handles [])
     in
     List.iter (fun h -> ignore (close_handle t h)) opened_by_child;
+    (* The parent's table comes back as it was: real DOS gives the child a
+       copy of the JFT, so a handle the child closed stays open for the
+       parent. *)
+    List.iter (fun (h, hd) -> Hashtbl.replace t.handles h hd) f.parent_handles;
     (match keep with
      | Some paras -> t.blocks <- f.parent_blocks @ [ (t.psp_seg, paras) ]
      | None -> t.blocks <- f.parent_blocks);
@@ -381,7 +408,8 @@ let exec_program t =
              parent_free_top = t.free_top;
              parent_blocks = t.blocks;
              parent_handles =
-               Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles [];
+               List.sort (fun (a, _) (b, _) -> compare a b)
+                 (Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles []);
            }
            :: t.exec_frames;
          if is_mz then load_exe ~psp_seg:psp ~child:true t image
@@ -469,7 +497,7 @@ let fcb_service t ah =
        if avail <= 0 then Cpu86.set_reg8 cpu 0 1
        else begin
          let take = min recsize avail in
-         Bytes.blit data pos t.mem t.dta take;
+         blit_to_mem t data pos t.dta take;
          Hashtbl.replace t.fcbs fcb (data, pos + take);
          let recno = rd8 t (fcb + 0x20) + 1 in
          if recno >= 128 then begin
@@ -492,7 +520,7 @@ let fcb_service t ah =
        if off >= Bytes.length data then Cpu86.set_reg8 cpu 0 1
        else begin
          let take = min recsize (Bytes.length data - off) in
-         Bytes.blit data off t.mem t.dta take;
+         blit_to_mem t data off t.dta take;
          Hashtbl.replace t.fcbs fcb (data, off + take);
          Cpu86.set_reg8 cpu 0 (if take < recsize then 1 else 0)
        end
@@ -689,17 +717,20 @@ let rec service t =
     let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
     if ah = 0x5B && Hashtbl.mem t.host_files name then fail t 0x50
     else begin
-      Hashtbl.replace t.host_files name Bytes.empty;
-      let h = open_handle t name Bytes.empty in
-      Cpu86.set_reg16 cpu 0 h;
-      ok t
+      match open_handle t name Bytes.empty with
+      | None -> fail t too_many_open_files
+      | Some h ->
+        Hashtbl.replace t.host_files name Bytes.empty;
+        Cpu86.set_reg16 cpu 0 h;
+        ok t
     end
   | 0x3D ->
     let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
     (match Hashtbl.find_opt t.host_files name with
      | Some data ->
-       Cpu86.set_reg16 cpu 0 (open_handle t name data);
-       ok t
+       (match open_handle t name data with
+        | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
+        | None -> fail t too_many_open_files)
      | None -> fail t 2)
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
   (* dup/dup2 는 같은 열린 파일을 가리킨다 — 위치와 내용을 나눠 쓴다.
@@ -707,16 +738,20 @@ let rec service t =
   | 0x45 ->
     (match Hashtbl.find_opt t.handles (Cpu86.reg16 cpu 3) with
      | Some hd ->
-       let h = t.next_handle in
-       t.next_handle <- t.next_handle + 1;
-       Hashtbl.replace t.handles h hd;
-       Cpu86.set_reg16 cpu 0 h;
-       ok t
-     | None -> fail t 6)
+       (match free_handle t with
+        | Some h ->
+          Hashtbl.replace t.handles h hd;
+          Cpu86.set_reg16 cpu 0 h;
+          ok t
+        | None -> fail t too_many_open_files)
+     | None -> fail t invalid_handle)
   | 0x46 ->
     (match Hashtbl.find_opt t.handles (Cpu86.reg16 cpu 3) with
-     | Some hd -> Hashtbl.replace t.handles (Cpu86.reg16 cpu 1) hd; ok t
-     | None -> fail t 6)
+     | Some hd ->
+       let target = Cpu86.reg16 cpu 1 in
+       if target >= max_handles then fail t invalid_handle
+       else begin Hashtbl.replace t.handles target hd; ok t end
+     | None -> fail t invalid_handle)
   | 0x3F ->
     let h = Cpu86.reg16 cpu 3 in
     let want = Cpu86.reg16 cpu 1 in
@@ -747,7 +782,7 @@ let rec service t =
        | None -> fail t 6
        | Some hd ->
          let take = min want (max 0 (Bytes.length hd.data - hd.pos)) in
-         Bytes.blit hd.data hd.pos t.mem dst take;
+         blit_to_mem t hd.data hd.pos dst take;
          hd.pos <- hd.pos + take;
          Cpu86.set_reg16 cpu 0 take;
          ok t)

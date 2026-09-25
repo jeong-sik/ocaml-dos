@@ -29,14 +29,25 @@ type header = {
 type error =
   | Not_a_snapshot  (** no magic, or shorter than a header *)
   | Wrong_format of { saved : int; supported : int }
-  | Corrupt of string  (** the checksum or a value inside does not hold *)
+  | Corrupt of string
+      (** The checksum, a value's range, or the consistency between values
+          (EMS pages and mappings) does not hold. *)
 
 val error_to_string : error -> string
 
 val format_version : int
 (** The one format {!restore} reads and {!save} writes. *)
 
-val save : Dos_machine.t -> string
+type save_error =
+  | Unsaveable of string
+      (** The machine holds a value outside what a snapshot carries, or two
+          fields that disagree (an EMS frame mapping a page that does not
+          exist). [save] refuses exactly what {!restore} would refuse, so
+          it never writes a snapshot that cannot be read back. *)
+
+val save_error_to_string : save_error -> string
+
+val save : Dos_machine.t -> (string, save_error) result
 (** Does not advance or change the machine. *)
 
 val header : string -> (header, error) result

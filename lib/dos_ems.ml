@@ -18,12 +18,31 @@ open Dos_state
 let page_frame = 0xD000
 let page_size = 0x400                            (* 16KB = 0x400 단락 *)
 let frame_pages = 4
+let page_bytes = page_size * 16
 let emm_name = "EMMXXXX0"
 let emm_version = 0x40                           (* 4.0 *)
 let total_pages = 0x0800                         (* 32MB — 통보용. 카운트를
                                                     BX 로 읽는 관례(아래 0x43)
                                                     에서는 여유 계산이 필요
                                                     없지만 넉넉히 둔다 *)
+
+(* LIM EMS 4.0 은 핸들을 255 개(0-254)까지 준다. 0 은 운영체제 몫이라
+   Function 4(AH=43h) 가 돌려주는 건 1-254 이고, 다 쓰였으면 AH=85h
+   ("all EMM handles are being used"). 해제(AH=45h)한 번호는 다시 쓰인다 —
+   여기서는 가장 낮은 빈 번호. 출처: LIM EMS 4.0 명세, Function 4
+   Allocate Pages 의 오류 코드 표. [ems_mapped] 의 (0, 0) 은 '안 겹침'
+   이다 — 0 번은 할당되지 않으므로 헷갈리지 않는다. *)
+let first_handle = 1
+let max_handle = 254
+let no_more_handles = 0x85
+
+let free_handle t =
+  let rec go h =
+    if h > max_handle then None
+    else if Hashtbl.mem t.ems_pages h then go (h + 1)
+    else Some h
+  in
+  go first_handle
 
 let frame_addr p = (page_frame * 16) + (p * page_size * 16)
 
@@ -69,11 +88,12 @@ let service t =
     if want = 0 then err 0x89                    (* 0 페이지는 못 받는다 *)
     else if want > free_pages t then err 0x87    (* 페이지 부족 *)
     else begin
-      let h = t.ems_next_handle in
-      t.ems_next_handle <- h + 1;
-      Hashtbl.replace t.ems_pages h (Array.make want Bytes.empty);
-      Cpu86.set_reg16 cpu 2 h;
-      ok ()
+      match free_handle t with
+      | None -> err no_more_handles
+      | Some h ->
+        Hashtbl.replace t.ems_pages h (Array.make want Bytes.empty);
+        Cpu86.set_reg16 cpu 2 h;
+        ok ()
     end
   | 0x44 ->
     let phys = al and log = Cpu86.reg16 cpu 3 and h = Cpu86.reg16 cpu 2 in

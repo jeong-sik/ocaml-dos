@@ -325,6 +325,12 @@ let port_out t p v =
 
 module C = Dos_snap_codec
 
+(* One range per field, named by both [write_state] and [read_state], so a
+   value the writer accepts is one the reader accepts. *)
+let cycle = C.count
+let pit_access = C.range 0 3
+let dac_phase_r = C.range 0 2
+
 (* The full pattern fails the build when a field is added, until the
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
@@ -335,73 +341,73 @@ let write_state w t =
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
   in
-  C.put_int w now;
-  C.put_int w pit0_divisor;
+  let put what r v = C.put w ~what r v in
+  put "ports.now" cycle now;
+  put "pit0_divisor" C.word pit0_divisor;
   C.put_bool w pit0_write_hi;
   C.put_bool w pit0_read_hi;
   (match pit0_latched with
    | None -> C.put_bool w false
-   | Some v -> C.put_bool w true; C.put_int w v);
-  C.put_int w pit0_access;
-  C.put_int w pic_mask;
-  C.put_int w (Array.length pal);
-  Array.iter (fun (r, g, b) -> C.put_int w r; C.put_int w g; C.put_int w b) pal;
-  C.put_int w dac_write_index;
-  C.put_int w dac_read_index;
-  C.put_int w dac_phase;
-  C.put_int w dac_mask;
-  C.put_int w crtc_index;
-  C.put_int_array w crtc;
-  C.put_int w scancode;
-  C.put_int w port_b;
+   | Some v -> C.put_bool w true; put "pit0_latched" C.word v);
+  put "pit0_access" pit_access pit0_access;
+  put "pic_mask" C.byte pic_mask;
+  put "DAC size" C.count (Array.length pal);
+  Array.iter
+    (fun (r, g, b) -> put "DAC red" C.byte r; put "DAC green" C.byte g; put "DAC blue" C.byte b)
+    pal;
+  put "dac_write_index" C.byte dac_write_index;
+  put "dac_read_index" C.byte dac_read_index;
+  put "dac_phase" dac_phase_r dac_phase;
+  put "dac_mask" C.byte dac_mask;
+  put "crtc_index" C.byte crtc_index;
+  C.put_int_array w ~what:"crtc" C.byte crtc;
+  put "scancode" C.byte scancode;
+  put "port_b" C.byte port_b;
   C.put_bool w cga_status;
-  C.put_int w mode_control;
-  C.put_int w color_select;
-  C.put_int w cmos_index;
-  C.put_int w opl_reg;
-  C.put_int w opl_t1_count;
-  C.put_int w opl_t2_count;
-  C.put_int w opl_t1_at;
-  C.put_int w opl_t2_at;
+  put "mode_control" C.byte mode_control;
+  put "color_select" C.byte color_select;
+  put "cmos_index" C.byte cmos_index;
+  put "opl_reg" C.byte opl_reg;
+  put "opl_t1_count" C.byte opl_t1_count;
+  put "opl_t2_count" C.byte opl_t2_count;
+  put "opl_t1_at" cycle opl_t1_at;
+  put "opl_t2_at" cycle opl_t2_at;
   C.put_bool w opl_t1_exp;
   C.put_bool w opl_t2_exp
 
 let read_state r t =
-  let byte () = C.get_int r ~min:0 ~max:0xff in
-  let word () = C.get_int r ~min:0 ~max:0xffff in
-  let cycle () = C.get_int r ~min:0 ~max:max_int in
-  t.now <- cycle ();
-  t.pit0_divisor <- word ();
+  let get what rng = C.get r ~what rng in
+  t.now <- get "ports.now" cycle;
+  t.pit0_divisor <- get "pit0_divisor" C.word;
   t.pit0_write_hi <- C.get_bool r;
   t.pit0_read_hi <- C.get_bool r;
-  t.pit0_latched <- (if C.get_bool r then Some (word ()) else None);
-  t.pit0_access <- C.get_int r ~min:0 ~max:3;
-  t.pic_mask <- byte ();
-  if C.get_int r ~min:0 ~max:max_int <> Array.length t.pal then
-    C.fail "DAC size differs";
+  t.pit0_latched <- (if C.get_bool r then Some (get "pit0_latched" C.word) else None);
+  t.pit0_access <- get "pit0_access" pit_access;
+  t.pic_mask <- get "pic_mask" C.byte;
+  if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri
     (fun i _ ->
-      let red = byte () in
-      let green = byte () in
-      let blue = byte () in
+      let red = get "DAC red" C.byte in
+      let green = get "DAC green" C.byte in
+      let blue = get "DAC blue" C.byte in
       t.pal.(i) <- (red, green, blue))
     t.pal;
-  t.dac_write_index <- byte ();
-  t.dac_read_index <- byte ();
-  t.dac_phase <- C.get_int r ~min:0 ~max:2;
-  t.dac_mask <- byte ();
-  t.crtc_index <- byte ();
-  C.fill_int_array r ~min:0 ~max:0xff t.crtc;
-  t.scancode <- byte ();
-  t.port_b <- byte ();
+  t.dac_write_index <- get "dac_write_index" C.byte;
+  t.dac_read_index <- get "dac_read_index" C.byte;
+  t.dac_phase <- get "dac_phase" dac_phase_r;
+  t.dac_mask <- get "dac_mask" C.byte;
+  t.crtc_index <- get "crtc_index" C.byte;
+  C.fill_int_array r ~what:"crtc" C.byte t.crtc;
+  t.scancode <- get "scancode" C.byte;
+  t.port_b <- get "port_b" C.byte;
   t.cga_status <- C.get_bool r;
-  t.mode_control <- byte ();
-  t.color_select <- byte ();
-  t.cmos_index <- byte ();
-  t.opl_reg <- byte ();
-  t.opl_t1_count <- byte ();
-  t.opl_t2_count <- byte ();
-  t.opl_t1_at <- cycle ();
-  t.opl_t2_at <- cycle ();
+  t.mode_control <- get "mode_control" C.byte;
+  t.color_select <- get "color_select" C.byte;
+  t.cmos_index <- get "cmos_index" C.byte;
+  t.opl_reg <- get "opl_reg" C.byte;
+  t.opl_t1_count <- get "opl_t1_count" C.byte;
+  t.opl_t2_count <- get "opl_t2_count" C.byte;
+  t.opl_t1_at <- get "opl_t1_at" cycle;
+  t.opl_t2_at <- get "opl_t2_at" cycle;
   t.opl_t1_exp <- C.get_bool r;
   t.opl_t2_exp <- C.get_bool r

@@ -6,8 +6,10 @@ module C = Dos_snap_codec
 let magic = "OCAML-DOS-SNAPSHOT\000"
 
 (* Bump by hand whenever what [save] writes changes shape or meaning. A
-   snapshot of any other version is refused; nothing reads an old one. *)
-let format_version = 1
+   snapshot of any other version is refused; nothing reads an old one.
+   2: no next-handle counters (DOS and EMS handles reuse the lowest free
+   number), and every int is range-checked on write as well as read. *)
+let format_version = 2
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -27,17 +29,65 @@ let error_to_string = function
     Printf.sprintf "snapshot format %d; this core reads only format %d" saved supported
   | Corrupt message -> "corrupt snapshot: " ^ message
 
+type save_error = Unsaveable of string
+
+let save_error_to_string (Unsaveable message) = "machine cannot be saved: " ^ message
+
+(* ---------- ranges ----------
+
+   Each int field has one range, named by the writer and the reader alike,
+   so [save] refuses exactly the values [restore] would. *)
+
+let reg = C.word
+let handle_number = C.range 0 (max_handles - 1)
+let ems_handle_key = C.range Dos_ems.first_handle Dos_ems.max_handle
+(* [ems_mapped] uses handle 0 for "nothing mapped". *)
+let ems_mapped_handle = C.range 0 Dos_ems.max_handle
+let file_pos = C.count
+let vector = C.byte
+
+(* ---------- consistency ----------
+
+   What a range cannot say because it relates two fields. [save] checks it
+   before writing and [restore] after reading, so both refuse the same
+   machines, and a crafted snapshot is refused at restore instead of
+   raising later inside [step] (a mapped page that does not exist, a page
+   the EMS blit cannot copy). A DOS handle's position may lie past the end
+   of its file: AH=42h can seek there and AH=40h then fills the gap. *)
+let check_consistency t =
+  let page_ok p = let n = Bytes.length p in n = 0 || n = Dos_ems.page_bytes in
+  let bad_page =
+    Hashtbl.fold (fun h pages acc ->
+        if acc = None && not (Array.for_all page_ok pages) then Some h else acc)
+      t.ems_pages None
+  in
+  let mapped_ok (h, p) =
+    (h = 0 && p = 0)
+    || (match Hashtbl.find_opt t.ems_pages h with
+        | Some pages -> p < Array.length pages
+        | None -> false)
+  in
+  match bad_page with
+  | Some h -> Error (Printf.sprintf "EMS handle %d has a page that is not 0 or %d bytes" h
+                       Dos_ems.page_bytes)
+  | None ->
+    if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
+    else if not (Array.for_all mapped_ok t.ems_mapped) then
+      Error "an EMS frame page maps a page that does not exist"
+    else Ok ()
+
 (* ---------- writing ---------- *)
 
 let sorted_bindings tbl =
   List.sort (fun (a, _) (b, _) -> compare a b)
     (Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl [])
 
-let put_pairs w l =
-  C.put_int w (List.length l);
-  List.iter (fun (a, b) -> C.put_int w a; C.put_int w b) l
+let put_list w ~what put l =
+  C.put w ~what:(what ^ " count") C.count (List.length l);
+  List.iter put l
 
-let put_list w put l = C.put_int w (List.length l); List.iter put l
+let put_pairs w ~what ~a ~b l =
+  put_list w ~what (fun (x, y) -> C.put w ~what a x; C.put w ~what b y) l
 
 (* Handle records are shared: dup (AH=45h/46h) files one record under two
    numbers, and an EXEC frame keeps the parent's records, so a read or write
@@ -65,114 +115,121 @@ let handle_pool t =
 
 let put_handle w h =
   let { hname; data; pos } = h in
-  C.put_string w hname; C.put_bytes w data; C.put_int w pos
+  C.put_string w hname; C.put_bytes w data; C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
   let { parent; parent_psp; parent_dta; parent_free_base; parent_free_top;
         parent_blocks; parent_handles = _ (* as pool indexes: [handles] *) } = f
   in
   let { snap_regs; snap_segs; snap_ip; snap_flags } = parent in
-  C.put_int_array w snap_regs;
-  C.put_int_array w snap_segs;
-  C.put_int w snap_ip;
-  C.put_int w snap_flags;
-  C.put_int w parent_psp;
-  C.put_int w parent_dta;
-  C.put_int w parent_free_base;
-  C.put_int w parent_free_top;
-  put_pairs w parent_blocks;
-  put_pairs w handles
+  C.put_int_array w ~what:"frame registers" reg snap_regs;
+  C.put_int_array w ~what:"frame segments" reg snap_segs;
+  C.put w ~what:"frame ip" reg snap_ip;
+  C.put w ~what:"frame flags" reg snap_flags;
+  C.put w ~what:"parent psp" C.word parent_psp;
+  C.put w ~what:"parent dta" C.physical parent_dta;
+  C.put w ~what:"parent free base" C.word parent_free_base;
+  C.put w ~what:"parent free top" C.word parent_free_top;
+  put_pairs w ~what:"parent block" ~a:C.word ~b:C.word parent_blocks;
+  put_pairs w ~what:"parent handle" ~a:handle_number ~b:C.count handles
 
 (* Every [Dos_state.t] field is named: a field added to the machine fails the
    build here until the snapshot carries it or says why not. [read_payload]
-   reads in exactly this order. *)
+   reads in exactly this order with the same ranges. *)
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
-        handles = _; next_handle; fcbs; dta; psp_seg; kbd_wait;
+        handles = _; fcbs; dta; psp_seg; kbd_wait;
         ext_scan_pending; kbd_requests; last_tick; pending_irq0; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_next_handle; ems_pages; ems_mapped;
+        epoch_min; epoch_sec; ems_pages; ems_mapped;
         mouse } = t
   in
+  let put what r v = C.put w ~what r v in
   let { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted;
         saved_cycles } = Cpu86.save_state cpu
   in
-  C.put_int_array w saved_regs;
-  C.put_int_array w saved_segs;
-  C.put_int w saved_ip;
-  C.put_int w saved_flags;
+  C.put_int_array w ~what:"registers" reg saved_regs;
+  C.put_int_array w ~what:"segments" reg saved_segs;
+  put "ip" reg saved_ip;
+  put "flags" reg saved_flags;
   C.put_bool w saved_halted;
-  C.put_int w saved_cycles;
+  put "cycles" C.count saved_cycles;
   C.put_bytes w mem;
   Dos_video.write_state w video;
   Dos_ports.write_state w ports;
   C.put_bool w exited;
-  C.put_int w exit_code;
-  put_list w (fun (k, v) -> C.put_string w k; C.put_bytes w v) (sorted_bindings host_files);
+  put "exit code" C.byte exit_code;
+  put_list w ~what:"host file" (fun (k, v) -> C.put_string w k; C.put_bytes w v)
+    (sorted_bindings host_files);
   let pool, live, frames = handle_pool t in
-  put_list w (put_handle w) pool;
-  put_pairs w live;
-  C.put_int w next_handle;
-  put_list w (fun (k, (b, n)) -> C.put_int w k; C.put_bytes w b; C.put_int w n)
+  put_list w ~what:"handle record" (put_handle w) pool;
+  put_pairs w ~what:"handle" ~a:handle_number ~b:C.count live;
+  put_list w ~what:"FCB"
+    (fun (k, (b, n)) -> put "FCB address" C.physical k; C.put_bytes w b;
+      put "FCB position" file_pos n)
     (sorted_bindings fcbs);
-  C.put_int w dta;
-  C.put_int w psp_seg;
+  put "dta" C.physical dta;
+  put "psp" C.word psp_seg;
   C.put_bool w kbd_wait;
-  C.put_int w ext_scan_pending;
-  C.put_int w kbd_requests;
-  C.put_int w last_tick;
+  put "pending extended scan" C.byte ext_scan_pending;
+  put "keyboard requests" C.count kbd_requests;
+  put "last tick" C.count last_tick;
   C.put_bool w pending_irq0;
-  C.put_int w free_base;
-  C.put_int w free_top;
-  put_pairs w blocks;
-  put_list w (C.put_string w) find_queue;
-  put_pairs w stubs;
-  C.put_int w (List.length frames);
+  put "free base" C.word free_base;
+  put "free top" C.word free_top;
+  put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
+  put_list w ~what:"find queue" (C.put_string w) find_queue;
+  put_pairs w ~what:"stub" ~a:vector ~b:C.word stubs;
+  put "EXEC frame count" C.count (List.length frames);
   List.iter2 (put_frame w) t.exec_frames frames;
-  C.put_int w last_child_code;
-  List.iter (C.put_int w)
+  put "last child code" C.byte last_child_code;
+  (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
+  List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
-  C.put_int w ems_next_handle;
-  put_list w
-    (fun (k, pages) -> C.put_int w k; put_list w (C.put_bytes w) (Array.to_list pages))
+  put_list w ~what:"EMS handle"
+    (fun (k, pages) ->
+      put "EMS handle" ems_handle_key k;
+      put_list w ~what:"EMS page" (C.put_bytes w) (Array.to_list pages))
     (sorted_bindings ems_pages);
-  put_pairs w (Array.to_list ems_mapped);
+  put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
         mouse_dx; mouse_dy } = mouse
   in
   C.put_bool w mouse_present;
-  C.put_int w mouse_x;
-  C.put_int w mouse_y;
-  C.put_int w mouse_buttons;
+  put "mouse x" C.any mouse_x;
+  put "mouse y" C.any mouse_y;
+  put "mouse buttons" C.any mouse_buttons;
   C.put_bool w mouse_visible;
-  C.put_int w mouse_dx;
-  C.put_int w mouse_dy
+  put "mouse dx" C.any mouse_dx;
+  put "mouse dy" C.any mouse_dy
 
 let save t =
-  let w = C.writer () in
-  write_payload w t;
-  let payload = C.contents w in
-  let version = Bytes.create version_len in
-  Bytes.set_int64_be version 0 (Int64.of_int format_version);
-  String.concat ""
-    [ magic; Bytes.to_string version; Dos_core_identity.source_digest;
-      Digest.string payload; payload ]
+  match check_consistency t with
+  | Error message -> Error (Unsaveable message)
+  | Ok () ->
+    let w = C.writer () in
+    match write_payload w t with
+    | exception C.Unsaveable message -> Error (Unsaveable message)
+    | () ->
+      let payload = C.contents w in
+      let version = Bytes.create version_len in
+      Bytes.set_int64_be version 0 (Int64.of_int format_version);
+      Ok
+        (String.concat ""
+           [ magic; Bytes.to_string version; Dos_core_identity.source_digest;
+             Digest.string payload; payload ])
 
 (* ---------- reading ---------- *)
 
-let byte r = C.get_int r ~min:0 ~max:0xff
-let word r = C.get_int r ~min:0 ~max:0xffff
-let physical r = C.get_int r ~min:0 ~max:0xfffff
-let count r = C.get_int r ~min:0 ~max:max_int
-let any r = C.get_int r ~min:min_int ~max:max_int
-
 (* Every element takes at least one byte, so a count above what is left is
    a lie the reader refuses before allocating for it. *)
-let get_list r get = List.init (C.get_int r ~min:0 ~max:(C.remaining r)) (fun _ -> get ())
+let get_list r ~what get =
+  List.init (C.get r ~what:(what ^ " count") (C.range 0 (C.remaining r))) (fun _ -> get ())
 
-let get_pairs r ~a ~b = get_list r (fun () -> let x = a r in let y = b r in (x, y))
+let get_pairs r ~what ~a ~b =
+  get_list r ~what (fun () -> let x = C.get r ~what a in let y = C.get r ~what b in (x, y))
 
 let fill_table tbl bindings =
   Hashtbl.reset tbl;
@@ -182,99 +239,103 @@ let fill_table tbl bindings =
       Hashtbl.replace tbl k v)
     bindings
 
-let get_int_array r ~len ~max =
+let get_int_array r ~what ~len rng =
   let a = Array.make len 0 in
-  C.fill_int_array r ~min:0 ~max a;
+  C.fill_int_array r ~what rng a;
   a
 
 let read_payload r =
   (* A fresh machine brings the closures (memory, ports, the interrupt hook)
      and the containers; everything else is overwritten from the bytes. *)
   let t = Dos_machine.create () in
-  let saved_regs = get_int_array r ~len:8 ~max:0xffff in
-  let saved_segs = get_int_array r ~len:4 ~max:0xffff in
-  let saved_ip = word r in
-  let saved_flags = word r in
+  let get what rng = C.get r ~what rng in
+  let saved_regs = get_int_array r ~what:"registers" ~len:8 reg in
+  let saved_segs = get_int_array r ~what:"segments" ~len:4 reg in
+  let saved_ip = get "ip" reg in
+  let saved_flags = get "flags" reg in
   let saved_halted = C.get_bool r in
-  let saved_cycles = count r in
+  let saved_cycles = get "cycles" C.count in
   Cpu86.load_state t.cpu
     { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles };
   C.fill_bytes r t.mem;
   Dos_video.read_state r t.video;
   Dos_ports.read_state r t.ports;
   t.exited <- C.get_bool r;
-  t.exit_code <- byte r;
+  t.exit_code <- get "exit code" C.byte;
   fill_table t.host_files
-    (get_list r (fun () -> let k = C.get_string r in (k, C.get_bytes r)));
+    (get_list r ~what:"host file" (fun () -> let k = C.get_string r in (k, C.get_bytes r)));
   let pool =
     Array.of_list
-      (get_list r (fun () ->
+      (get_list r ~what:"handle record" (fun () ->
            let hname = C.get_string r in
            let data = C.get_bytes r in
-           { hname; data; pos = count r }))
+           { hname; data; pos = get "handle position" file_pos }))
   in
   let resolve = List.map (fun (n, i) ->
       if i >= Array.length pool then C.fail "a handle names no record" else (n, pool.(i)))
   in
-  fill_table t.handles (resolve (get_pairs r ~a:word ~b:count));
-  t.next_handle <- word r;
+  fill_table t.handles (resolve (get_pairs r ~what:"handle" ~a:handle_number ~b:C.count));
   fill_table t.fcbs
-    (get_list r (fun () ->
-         let k = physical r in
+    (get_list r ~what:"FCB" (fun () ->
+         let k = get "FCB address" C.physical in
          let b = C.get_bytes r in
-         (k, (b, count r))));
-  t.dta <- physical r;
-  t.psp_seg <- word r;
+         (k, (b, get "FCB position" file_pos))));
+  t.dta <- get "dta" C.physical;
+  t.psp_seg <- get "psp" C.word;
   t.kbd_wait <- C.get_bool r;
-  t.ext_scan_pending <- byte r;
-  t.kbd_requests <- count r;
-  t.last_tick <- count r;
+  t.ext_scan_pending <- get "pending extended scan" C.byte;
+  t.kbd_requests <- get "keyboard requests" C.count;
+  t.last_tick <- get "last tick" C.count;
   t.pending_irq0 <- C.get_bool r;
-  t.free_base <- word r;
-  t.free_top <- word r;
-  t.blocks <- get_pairs r ~a:word ~b:word;
-  t.find_queue <- get_list r (fun () -> C.get_string r);
-  t.stubs <- get_pairs r ~a:byte ~b:word;
+  t.free_base <- get "free base" C.word;
+  t.free_top <- get "free top" C.word;
+  t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
+  t.find_queue <- get_list r ~what:"find queue" (fun () -> C.get_string r);
+  t.stubs <- get_pairs r ~what:"stub" ~a:vector ~b:C.word;
+  let frame_count = get "EXEC frame count" (C.range 0 (C.remaining r)) in
   t.exec_frames <-
-    get_list r (fun () ->
-        let snap_regs = get_int_array r ~len:8 ~max:0xffff in
-        let snap_segs = get_int_array r ~len:4 ~max:0xffff in
-        let snap_ip = word r in
-        let snap_flags = word r in
-        let parent_psp = word r in
-        let parent_dta = physical r in
-        let parent_free_base = word r in
-        let parent_free_top = word r in
-        let parent_blocks = get_pairs r ~a:word ~b:word in
-        let parent_handles = resolve (get_pairs r ~a:word ~b:count) in
+    List.init frame_count (fun _ ->
+        let snap_regs = get_int_array r ~what:"frame registers" ~len:8 reg in
+        let snap_segs = get_int_array r ~what:"frame segments" ~len:4 reg in
+        let snap_ip = get "frame ip" reg in
+        let snap_flags = get "frame flags" reg in
+        let parent_psp = get "parent psp" C.word in
+        let parent_dta = get "parent dta" C.physical in
+        let parent_free_base = get "parent free base" C.word in
+        let parent_free_top = get "parent free top" C.word in
+        let parent_blocks = get_pairs r ~what:"parent block" ~a:C.word ~b:C.word in
+        let parent_handles =
+          resolve (get_pairs r ~what:"parent handle" ~a:handle_number ~b:C.count)
+        in
         { parent = { snap_regs; snap_segs; snap_ip; snap_flags };
           parent_psp; parent_dta; parent_free_base; parent_free_top;
           parent_blocks; parent_handles });
-  t.last_child_code <- byte r;
-  (* [Dos_machine.set_clock] takes any ints; a snapshot must not refuse one. *)
-  t.epoch_year <- any r;
-  t.epoch_month <- any r;
-  t.epoch_day <- any r;
-  t.epoch_hour <- any r;
-  t.epoch_min <- any r;
-  t.epoch_sec <- any r;
-  t.ems_next_handle <- word r;
+  t.last_child_code <- get "last child code" C.byte;
+  t.epoch_year <- get "clock" C.any;
+  t.epoch_month <- get "clock" C.any;
+  t.epoch_day <- get "clock" C.any;
+  t.epoch_hour <- get "clock" C.any;
+  t.epoch_min <- get "clock" C.any;
+  t.epoch_sec <- get "clock" C.any;
   fill_table t.ems_pages
-    (get_list r (fun () ->
-         let k = word r in
-         (k, Array.of_list (get_list r (fun () -> C.get_bytes r)))));
-  let mapped = get_pairs r ~a:word ~b:word in
+    (get_list r ~what:"EMS handle" (fun () ->
+         let k = get "EMS handle" ems_handle_key in
+         (k, Array.of_list (get_list r ~what:"EMS page" (fun () -> C.get_bytes r)))));
+  let mapped = get_pairs r ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word in
   if List.length mapped <> Array.length t.ems_mapped then C.fail "EMS frame size differs";
   List.iteri (fun i p -> t.ems_mapped.(i) <- p) mapped;
   let m = t.mouse in
   m.mouse_present <- C.get_bool r;
-  m.mouse_x <- any r;
-  m.mouse_y <- any r;
-  m.mouse_buttons <- any r;
+  m.mouse_x <- get "mouse x" C.any;
+  m.mouse_y <- get "mouse y" C.any;
+  m.mouse_buttons <- get "mouse buttons" C.any;
   m.mouse_visible <- C.get_bool r;
-  m.mouse_dx <- any r;
-  m.mouse_dy <- any r;
+  m.mouse_dx <- get "mouse dx" C.any;
+  m.mouse_dy <- get "mouse dy" C.any;
   C.end_of_input r;
+  (match check_consistency t with
+   | Ok () -> ()
+   | Error message -> C.fail message);
   t
 
 let header s =
@@ -299,7 +360,8 @@ let restore s =
       if not (String.equal sum (Digest.string payload)) then
         Error (Corrupt "checksum mismatch")
       else (
+        (* Only the decoder's own refusal is [Corrupt]. Any other exception
+           is a bug in this module or the machine and propagates. *)
         match read_payload (C.reader payload) with
         | t -> Ok t
-        | exception C.Invalid message -> Error (Corrupt message)
-        | exception Invalid_argument message -> Error (Corrupt message))
+        | exception C.Invalid message -> Error (Corrupt message))

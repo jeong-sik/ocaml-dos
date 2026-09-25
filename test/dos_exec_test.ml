@@ -158,6 +158,38 @@ let () =
   check "later handle's write wins"
     (if Dos_machine.read_mounted m "F.DAT" = Some "B" then 1 else 0) 1
 
+(* 5) Handle numbers are reused (lowest free), so a number alone does not
+   say whose handle it is. The parent opens F.DAT as 5 and EXECs a child
+   that closes 5 and opens G.DAT, which gets 5 again. On exit the child's
+   G.DAT handle is closed, and the parent's 5 is F.DAT again: real DOS gives
+   the child its own copy of the handle table. The parent then reads one
+   byte through 5 into BUF. *)
+let () =
+  let child =
+    "\xb4\x3e\xbb\x05\x00\xcd\x21"              (* close 5 *)
+    ^ "\xb8\x02\x3d\xba\x14\x01\xcd\x21"        (* open G.DAT -> 5 *)
+    ^ "\xb8\x00\x4c\xcd\x21"                    (* exit, G.DAT open *)
+    ^ "G.DAT\x00"
+  in
+  assert (String.index child 'G' = 0x14);
+  let parent =
+    "\xb4\x4a\xbb\x20\x00\xcd\x21"              (* shrink *)
+    ^ "\xb8\x02\x3d\xba\x2c\x01\xcd\x21"        (* open F.DAT -> 5 *)
+    ^ "\xb8\x00\x4b\xba\x32\x01\xbb\x3c\x01\xcd\x21" (* EXEC CHILD.COM *)
+    ^ "\xb4\x3f\xbb\x05\x00\xb9\x01\x00\xba\x4a\x01\xcd\x21" (* read 1 via 5 *)
+    ^ "\xb8\x00\x4c\xcd\x21"
+    ^ "F.DAT\x00" ^ "CHILD.COM\x00" ^ String.make 14 '\x00'
+  in
+  assert (String.index parent 'F' = 0x2c);
+  let m = Dos_machine.create () in
+  Dos_machine.mount_file m "F.DAT" "f";
+  Dos_machine.mount_file m "G.DAT" "g";
+  Dos_machine.mount_file m "CHILD.COM" child;
+  Dos_machine.load_com m parent;
+  Dos_machine.run m ~max_steps:5000;
+  check "parent exits" (if Dos_machine.exited m then 1 else 0) 1;
+  check "parent's handle 5 is F.DAT again" (Dos_machine.mem_read m 0x1014a) (Char.code 'f')
+
 let () =
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;

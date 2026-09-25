@@ -9,6 +9,16 @@ val page_frame : int
 (** 물리 페이지 넷이 겹쳐지는 첫 세그먼트(0xD000). *)
 
 val frame_pages : int
+
+val page_bytes : int
+(** 논리 페이지 하나의 크기(16KB). 아직 안 건드린 페이지는 빈 [Bytes]. *)
+
+val first_handle : int
+(** 할당되는 첫 핸들(1). 0 은 운영체제 몫이다. *)
+
+val max_handle : int
+(** 할당되는 마지막 핸들(254). 1..254 가 다 쓰이면 AH=43h 가 85h 로 답한다. *)
+
 val emm_name : string
 val emm_version : int
 
