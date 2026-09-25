@@ -22,7 +22,8 @@ let lib_dir = Filename.concat Filename.parent_dir_name "lib"
 let lib_sources () =
   Sys.readdir lib_dir |> Array.to_list
   |> List.filter (fun f ->
-         (Filename.check_suffix f ".ml" || Filename.check_suffix f ".mli")
+         (String.equal f "dune"
+          || Filename.check_suffix f ".ml" || Filename.check_suffix f ".mli")
          && not (Sys.is_directory (Filename.concat lib_dir f)))
   |> List.map (Filename.concat lib_dir)
 
