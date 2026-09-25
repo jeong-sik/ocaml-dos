@@ -326,3 +326,40 @@ let get_pixel t ~x ~y =
   | Linear256 ->
     let w, _ = dims t in
     Char.code (Bytes.get t.mem (planar_base + (y * w) + x))
+
+(* ---------- snapshot ---------- *)
+
+module C = Dos_snap_codec
+
+(* The full pattern fails the build when a field is added, until the
+   snapshot carries it. Keep [write_state] and [read_state] in one order. *)
+let write_state w t =
+  let { mem = _ (* the machine's RAM: the machine writes it *);
+        planes; latches; mode; gc_index; gc; seq_index; seq; attr_index;
+        attr_is_data; attr; cga_color_select } = t
+  in
+  Array.iter (C.put_bytes w) planes;
+  C.put_int_array w latches;
+  C.put_int w mode;
+  C.put_int w gc_index;
+  C.put_int_array w gc;
+  C.put_int w seq_index;
+  C.put_int_array w seq;
+  C.put_int w attr_index;
+  C.put_bool w attr_is_data;
+  C.put_int_array w attr;
+  C.put_int w cga_color_select
+
+let read_state r t =
+  let byte () = C.get_int r ~min:0 ~max:0xff in
+  Array.iter (C.fill_bytes r) t.planes;
+  C.fill_int_array r ~min:0 ~max:0xff t.latches;
+  t.mode <- byte ();
+  t.gc_index <- byte ();
+  C.fill_int_array r ~min:0 ~max:0xff t.gc;
+  t.seq_index <- byte ();
+  C.fill_int_array r ~min:0 ~max:0xff t.seq;
+  t.attr_index <- byte ();
+  t.attr_is_data <- C.get_bool r;
+  C.fill_int_array r ~min:0 ~max:0xff t.attr;
+  t.cga_color_select <- byte ()

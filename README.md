@@ -213,6 +213,8 @@ let png_source = Dos_machine.frame_rgb m
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
+| `Dos_snapshot` | 기계 전체를 바이트로 저장하고 새 기계로 되살린다. 형식 번호가 다르면 거절하고, 코어 digest 는 보여 주기만 한다 |
+| `Dos_snap_codec` | 스냅숏의 정수·불·바이트 인코딩. 읽을 때 범위를 검사한다 |
 | `Dos_core_identity` | 이 빌드가 어떤 코어인지 — `lib/` 소스의 digest 를 빌드가 계산해 넣는다 (`ocaml-dos.core-identity`) |
 
 어떤 커밋의 digest 인지 알고 싶으면 그 커밋을 받아 `dune build` 하고

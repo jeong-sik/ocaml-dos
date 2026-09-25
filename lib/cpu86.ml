@@ -1188,3 +1188,38 @@ let step t =
       (match t.int_hook with Some f -> f 1 | None -> ());
     used_cycles
   end
+
+(* ---------- saved state ---------- *)
+
+type saved = {
+  saved_regs : int array;
+  saved_segs : int array;
+  saved_ip : int;
+  saved_flags : int;
+  saved_halted : bool;
+  saved_cycles : int;
+}
+
+(* The full pattern is the point: a field added to [t] fails the build here
+   until a snapshot either carries it or says why it does not. *)
+let save_state t =
+  let { model = _ (* fixed by whoever creates the CPU *);
+        regs; segs; ip;
+        cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
+        of_ = _ (* the nine flags travel as one word, [flags t] *);
+        halted; cycles;
+        int_hook = _; read = _; write = _; port_in = _; port_out = _
+        (* closures: the machine that owns this CPU wires them *) } = t
+  in
+  { saved_regs = Array.copy regs; saved_segs = Array.copy segs; saved_ip = ip;
+    saved_flags = flags t; saved_halted = halted; saved_cycles = cycles }
+
+let load_state t s =
+  if Array.length s.saved_regs <> 8 || Array.length s.saved_segs <> 4 then
+    invalid_arg "Cpu86.load_state: 8 registers and 4 segments";
+  Array.iteri (fun i v -> set_reg16 t i v) s.saved_regs;
+  Array.iteri (fun i v -> set_seg t i v) s.saved_segs;
+  set_ip t s.saved_ip;
+  set_flags t s.saved_flags;
+  t.halted <- s.saved_halted;
+  t.cycles <- s.saved_cycles

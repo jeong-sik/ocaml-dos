@@ -70,3 +70,13 @@ val get_pixel : t -> x:int -> y:int -> int
 val cga_color_select : t -> int
 val set_cga_color_select : t -> int -> unit
 (** CGA 4색 모드의 팔레트·바탕색을 고르는 레지스터(포트 0x3D9). *)
+
+(** {1 Snapshot} *)
+
+val write_state : Dos_snap_codec.writer -> t -> unit
+(** Every field but the RAM it shares with the machine, which the machine
+    writes. For {!Dos_snapshot}. *)
+
+val read_state : Dos_snap_codec.reader -> t -> unit
+(** Overwrites [t] with what {!write_state} wrote. Raises
+    [Dos_snap_codec.Invalid] on a value out of range. *)

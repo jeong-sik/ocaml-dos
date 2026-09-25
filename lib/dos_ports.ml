@@ -320,3 +320,88 @@ let port_out t p v =
        end
      | _ -> ())                        (* 음색 레지스터 — 소리가 없어 무시 *)
   | _ -> ()
+
+(* ---------- snapshot ---------- *)
+
+module C = Dos_snap_codec
+
+(* The full pattern fails the build when a field is added, until the
+   snapshot carries it. Keep [write_state] and [read_state] in one order. *)
+let write_state w t =
+  let { mem = _; video = _ (* the machine's: it writes them itself *);
+        now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
+        pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
+        dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
+        mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
+        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
+  in
+  C.put_int w now;
+  C.put_int w pit0_divisor;
+  C.put_bool w pit0_write_hi;
+  C.put_bool w pit0_read_hi;
+  (match pit0_latched with
+   | None -> C.put_bool w false
+   | Some v -> C.put_bool w true; C.put_int w v);
+  C.put_int w pit0_access;
+  C.put_int w pic_mask;
+  C.put_int w (Array.length pal);
+  Array.iter (fun (r, g, b) -> C.put_int w r; C.put_int w g; C.put_int w b) pal;
+  C.put_int w dac_write_index;
+  C.put_int w dac_read_index;
+  C.put_int w dac_phase;
+  C.put_int w dac_mask;
+  C.put_int w crtc_index;
+  C.put_int_array w crtc;
+  C.put_int w scancode;
+  C.put_int w port_b;
+  C.put_bool w cga_status;
+  C.put_int w mode_control;
+  C.put_int w color_select;
+  C.put_int w cmos_index;
+  C.put_int w opl_reg;
+  C.put_int w opl_t1_count;
+  C.put_int w opl_t2_count;
+  C.put_int w opl_t1_at;
+  C.put_int w opl_t2_at;
+  C.put_bool w opl_t1_exp;
+  C.put_bool w opl_t2_exp
+
+let read_state r t =
+  let byte () = C.get_int r ~min:0 ~max:0xff in
+  let word () = C.get_int r ~min:0 ~max:0xffff in
+  let cycle () = C.get_int r ~min:0 ~max:max_int in
+  t.now <- cycle ();
+  t.pit0_divisor <- word ();
+  t.pit0_write_hi <- C.get_bool r;
+  t.pit0_read_hi <- C.get_bool r;
+  t.pit0_latched <- (if C.get_bool r then Some (word ()) else None);
+  t.pit0_access <- C.get_int r ~min:0 ~max:3;
+  t.pic_mask <- byte ();
+  if C.get_int r ~min:0 ~max:max_int <> Array.length t.pal then
+    C.fail "DAC size differs";
+  Array.iteri
+    (fun i _ ->
+      let red = byte () in
+      let green = byte () in
+      let blue = byte () in
+      t.pal.(i) <- (red, green, blue))
+    t.pal;
+  t.dac_write_index <- byte ();
+  t.dac_read_index <- byte ();
+  t.dac_phase <- C.get_int r ~min:0 ~max:2;
+  t.dac_mask <- byte ();
+  t.crtc_index <- byte ();
+  C.fill_int_array r ~min:0 ~max:0xff t.crtc;
+  t.scancode <- byte ();
+  t.port_b <- byte ();
+  t.cga_status <- C.get_bool r;
+  t.mode_control <- byte ();
+  t.color_select <- byte ();
+  t.cmos_index <- byte ();
+  t.opl_reg <- byte ();
+  t.opl_t1_count <- byte ();
+  t.opl_t2_count <- byte ();
+  t.opl_t1_at <- cycle ();
+  t.opl_t2_at <- cycle ();
+  t.opl_t1_exp <- C.get_bool r;
+  t.opl_t2_exp <- C.get_bool r
