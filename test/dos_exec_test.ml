@@ -126,6 +126,38 @@ let () =
   Dos_machine.run m ~max_steps:8000;
   check "exe child code" (Dos_machine.exit_code m) 33
 
+(* 4) A child that exits with files open: DOS closes them for it, and each
+   close writes that handle's bytes back to the file. The handle opened last
+   closes last and wins -- by number, not by the hash table's bucket order,
+   which a machine restored from a snapshot does not share with the one that
+   saved it. The child opens three handles (5, 6, 7) so the bucket order
+   (7 before 6) and the number order disagree. *)
+let () =
+  let open_f = "\xb8\x02\x3d\xba\x3b\x01\xcd\x21" in    (* open F.DAT *)
+  let child =
+    open_f                                               (* handle 5, unused *)
+    ^ "\x90\x90"
+    ^ open_f ^ "\x89\xc3"                                (* handle 6 -> bx *)
+    ^ open_f ^ "\x89\xc6"                                (* handle 7 -> si *)
+    ^ "\xb4\x40\xb9\x01\x00\xba\x39\x01\xcd\x21"    (* write 'A' via 6 *)
+    ^ "\x89\xf3"                                          (* mov bx,si *)
+    ^ "\xb4\x40\xb9\x01\x00\xba\x3a\x01\xcd\x21"    (* write 'B' via 7 *)
+    ^ "\xb8\x00\x4c\xcd\x21"                            (* exit, files open *)
+    ^ "AB" ^ "F.DAT\x00"
+  in
+  assert (String.index child 'A' = 0x39);
+  let parent =
+    build_parent ~shrink:0x20 ~child1:"CHILD.COM" ~child2:""
+      ~fin:"\xb4\x4c\xcd\x21"
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.mount_file m "F.DAT" "";
+  Dos_machine.mount_file m "CHILD.COM" child;
+  Dos_machine.load_com m parent;
+  Dos_machine.run m ~max_steps:5000;
+  check "later handle's write wins"
+    (if Dos_machine.read_mounted m "F.DAT" = Some "B" then 1 else 0) 1
+
 let () =
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;

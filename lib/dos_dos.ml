@@ -313,9 +313,14 @@ let child_exit t ~code ~keep =
     t.exec_frames <- rest;
     t.last_child_code <- code;
     let inherited = List.map fst f.parent_handles in
+    (* Close in handle order: two handles on one file each write their bytes
+       back, so the order picks which write survives. The table's bucket
+       order depends on its insertion history, which differs between a
+       machine and one rebuilt from its snapshot. *)
     let opened_by_child =
-      Hashtbl.fold (fun h _ acc -> if not (List.mem h inherited) then h :: acc else acc)
-        t.handles []
+      List.sort compare
+        (Hashtbl.fold (fun h _ acc -> if not (List.mem h inherited) then h :: acc else acc)
+           t.handles [])
     in
     List.iter (fun h -> ignore (close_handle t h)) opened_by_child;
     (match keep with
