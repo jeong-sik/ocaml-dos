@@ -127,11 +127,14 @@ let () =
   check "exe child code" (Dos_machine.exit_code m) 33
 
 (* 4) A child that exits with files open: DOS closes them for it, and each
-   close writes that handle's bytes back to the file. The handle opened last
-   closes last and wins -- by number, not by the hash table's bucket order,
-   which a machine restored from a snapshot does not share with the one that
-   saved it. The child opens three handles (5, 6, 7) so the bucket order
-   (7 before 6) and the number order disagree. *)
+   close writes the file's shared buffer back (#35 -- every handle on one
+   name shares it, so a close by any of them writes the same bytes).
+   Handles 6 and 7 both open fresh, so both start at position 0; the write
+   through 7 lands after the write through 6 and both are to that same
+   offset, so 7's byte is what survives regardless of which handle closes
+   first. The child opens three handles (5, 6, 7) so a bug keying anything
+   off the hash table's bucket order (7 before 6), rather than open order,
+   would show up here too. *)
 let () =
   let open_f = "\xb8\x02\x3d\xba\x3b\x01\xcd\x21" in    (* open F.DAT *)
   let child =
@@ -157,6 +160,72 @@ let () =
   Dos_machine.run m ~max_steps:5000;
   check "later handle's write wins"
     (if Dos_machine.read_mounted m "F.DAT" = Some "B" then 1 else 0) 1
+
+(* 4b) #35: two handles opened separately on one name (not dup) share the
+   file's bytes, each keeping its own position. Writing 'A' through the
+   first at its fresh position 0, seeking the second to 1 and writing 'B'
+   there, then closing both must leave "AB" on the mount table -- not
+   whichever one closed last discarding the other's byte. Data and the
+   filename sit before the code (past a short jump) so every offset used
+   below is a small, hand-checked literal instead of a computed one. *)
+let () =
+  let child =
+    "\xeb\x08"                                          (* jmp +8 *)
+    ^ "A" ^ "B" ^ "F.DAT\x00"                            (* 0x102 'A', 0x103 'B', 0x104 name *)
+    ^ "\xb8\x02\x3d\xba\x04\x01\xcd\x21\x89\xc7"    (* open -> handle A in di *)
+    ^ "\xb8\x02\x3d\xba\x04\x01\xcd\x21\x89\xc6"    (* open -> handle B in si *)
+    ^ "\x89\xfb"                                          (* bx = di (A) *)
+    ^ "\xb4\x40\xb9\x01\x00\xba\x02\x01\xcd\x21"    (* write 'A' via A at pos 0 *)
+    ^ "\x89\xf3"                                          (* bx = si (B) *)
+    ^ "\xb4\x42\xb0\x00\xb9\x00\x00\xba\x01\x00\xcd\x21" (* seek B to offset 1 *)
+    ^ "\x89\xf3"                                          (* bx = si (B) *)
+    ^ "\xb4\x40\xb9\x01\x00\xba\x03\x01\xcd\x21"    (* write 'B' via B at pos 1 *)
+    ^ "\x89\xfb\xb4\x3e\xcd\x21"                        (* close A *)
+    ^ "\x89\xf3\xb4\x3e\xcd\x21"                        (* close B *)
+    ^ "\xb8\x00\x4c\xcd\x21"                            (* exit *)
+  in
+  assert (String.index child 'A' = 0x02);
+  assert (String.index child 'B' = 0x03);
+  assert (String.index child 'F' = 0x04);
+  let m = Dos_machine.create () in
+  Dos_machine.mount_file m "F.DAT" "";
+  Dos_machine.load_com m child;
+  Dos_machine.run m ~max_steps:2000;
+  check "both handles' writes survive, at their own offsets"
+    (if Dos_machine.read_mounted m "F.DAT" = Some "AB" then 1 else 0) 1
+
+(* 4c) Once every handle on a name has closed, the shared buffer behind
+   it goes too -- otherwise a later fresh open would read the buffer from
+   before instead of whatever the mount table holds now (a host-side
+   remount between two runs on one machine, as here, or a save loaded
+   somewhere the previous run never touched). *)
+let () =
+  let opener =
+    "\xeb\x06" ^ "F.DAT\x00"
+    ^ "\xb8\x02\x3d\xba\x02\x01\xcd\x21"        (* open -> ax *)
+    ^ "\x89\xc3"                                  (* bx = ax *)
+    ^ "\xb4\x3e\xcd\x21"                          (* close *)
+    ^ "\xb8\x00\x4c\xcd\x21"                    (* exit *)
+  in
+  assert (String.index opener 'F' = 0x02);
+  let m = Dos_machine.create () in
+  Dos_machine.mount_file m "F.DAT" "old";
+  Dos_machine.load_com m opener;
+  Dos_machine.run m ~max_steps:1000;
+  check "the opener exits" (if Dos_machine.exited m then 1 else 0) 1;
+  Dos_machine.mount_file m "F.DAT" "NEW";
+  let reader =
+    "\xeb\x06" ^ "F.DAT\x00"
+    ^ "\xb8\x02\x3d\xba\x02\x01\xcd\x21"        (* open -> ax *)
+    ^ "\x89\xc3"                                  (* bx = ax *)
+    ^ "\xb4\x3f\xb9\x03\x00\xba\x00\x02\xcd\x21" (* read 3 bytes into 0x200 *)
+    ^ "\xb8\x00\x4c\xcd\x21"                    (* exit *)
+  in
+  Dos_machine.load_com m reader;
+  Dos_machine.run m ~max_steps:1000;
+  let got = String.init 3 (fun i -> Char.chr (Dos_machine.mem_read m (0x10200 + i))) in
+  check "a fresh open after everyone closed reads the current mount table, not a stale buffer"
+    (if got = "NEW" then 1 else 0) 1
 
 (* 5) Handle numbers are reused (lowest free), so a number alone does not
    say whose handle it is. The parent opens F.DAT as 5 and EXECs a child

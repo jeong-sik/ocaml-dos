@@ -116,6 +116,57 @@ let () =
       | _ -> check (Printf.sprintf "garbage %S is refused" garbage) false)
     [ ""; "not a snapshot"; String.sub saved 0 (magic_len + 4) ]
 
+(* #35: two SEPARATE opens (AH=3Dh twice, not [dup]) on one name share only
+   the underlying bytes, each keeping its own position. The snapshot codec
+   already pooled handle *records* by physical identity (that's what the
+   [dup] test above proves survives a round trip); this fix adds a second
+   pool, for the *buffer* a name's separate opens share. Cutting the round
+   trip right after both opens -- before either write -- means restoring
+   has to rebuild that sharing itself, not just carry over bytes that
+   already matched: if the two handles came back with independent copies of
+   the buffer instead, each write below would land in its own copy and only
+   whichever handle closed last would reach the file. *)
+let separate_opens_com =
+  "\xeb\x08"                                          (* jmp +8 *)
+  ^ "A" ^ "B" ^ "F.DAT\x00"
+  ^ "\xb8\x02\x3d\xba\x04\x01\xcd\x21\x89\xc7"    (* open -> handle A in di *)
+  ^ "\xb8\x02\x3d\xba\x04\x01\xcd\x21\x89\xc6"    (* open -> handle B in si *)
+  ^ "\x89\xfb"                                          (* bx = di (A) *)
+  ^ "\xb4\x40\xb9\x01\x00\xba\x02\x01\xcd\x21"    (* write 'A' via A at pos 0 *)
+  ^ "\x89\xf3"                                          (* bx = si (B) *)
+  ^ "\xb4\x42\xb0\x00\xb9\x00\x00\xba\x01\x00\xcd\x21" (* seek B to offset 1 *)
+  ^ "\x89\xf3"                                          (* bx = si (B) *)
+  ^ "\xb4\x40\xb9\x01\x00\xba\x03\x01\xcd\x21"    (* write 'B' via B at pos 1 *)
+  ^ "\x89\xfb\xb4\x3e\xcd\x21"                        (* close A *)
+  ^ "\x89\xf3\xb4\x3e\xcd\x21"                        (* close B *)
+  ^ "\xb8\x00\x4c\xcd\x21"                            (* exit *)
+
+let boot_separate_opens () =
+  let t = Dos_machine.create () in
+  Dos_machine.mount_file t "F.DAT" "";
+  Dos_machine.load_com t separate_opens_com;
+  t
+
+let () =
+  (* [round_trip] returns the snapshot at the cut (after n steps), the same
+     as [boot_dup]'s use above -- checking anything past that point means
+     restoring it again and running on, which is what follows.
+     [read_mounted] only reflects a name's bytes from the moment something
+     closes it (that is what flushes a handle's buffer back to
+     [host_files]), so measuring directly: at n=20 the file still reads
+     empty and the machine has not exited -- both opens are done (a shared
+     buffer exists) but neither write, either close, or exit has happened
+     yet. m=5,000 clears the rest of the program with plenty of room
+     ([run_until] stops at [exited] regardless, so extra budget past
+     completion is harmless). *)
+  let saved = round_trip ~name:"separate-opens" ~boot:boot_separate_opens ~n:20 ~m:5000 in
+  let t = restore_exn saved in
+  run t 5000;
+  check "separate-opens: the program exited" (Dos_machine.exited t);
+  check "separate-opens: two handles opened separately still share one buffer \
+         after a snapshot round trip, so both offsets' writes survive"
+    (Dos_machine.read_mounted t "F.DAT" = Some "AB")
+
 (* ---------- a machine with every subsystem away from its default ----------
 
    A parent shrinks its block, EXECs C1.COM (exits with code 42h) and then
@@ -299,7 +350,7 @@ let () =
   check "a closed number is reused" (word 16 = 7);
   ignore (restore_exn (save_exn t));
   Hashtbl.replace t.Dos_state.handles Dos_state.max_handles
-    { Dos_state.hname = "F.DAT"; data = Bytes.empty; pos = 0 };
+    { Dos_state.hname = "F.DAT"; data = ref Bytes.empty; pos = 0 };
   refused_at_save "a handle number past the table" t
 
 (* 255 EMS allocations: handles 1..254, then 85h. Freeing 3 and allocating

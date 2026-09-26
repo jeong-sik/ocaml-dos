@@ -1,9 +1,11 @@
 (* DOS 표면 — INT 21h 와 INT 20h.
 
    파일 계약: 하네스가 마운트한 것만 보인다. 호스트 경로로 나가는 길은
-   없다. 쓰기는 메모리 사본에 쌓였다가 닫을 때 마운트 표에 되돌아간다 —
-   같은 세션 안에서 저장하고 다시 불러오는 게 그래서 된다(게임 세이브).
-   호스트 디스크의 원본은 바뀌지 않는다.
+   없다. 한 이름을 여는 모든 핸들은 메모리 위 버퍼 하나를 같이 쓴다 —
+   한 핸들의 쓰기가 다른 핸들의 다음 읽기에 그대로 보인다. 닫을 때마다
+   그 버퍼를 마운트 표에 되돌린다 — 같은 세션 안에서 저장하고 다시
+   불러오는 게 그래서 된다(게임 세이브). 호스트 디스크의 원본은 바뀌지
+   않는다.
 
    메모리 계약: 프로그램 뒤부터 0x9FFF 까지가 할당 가능한 자리다.
    첫 맞는 자리(first fit)로 준다 — MCB 사슬을 게스트에게 보여주지는
@@ -74,21 +76,49 @@ let free_handle t =
 let too_many_open_files = 4
 let invalid_handle = 6
 
+(* [name]을 아직 물고 있는 핸들이 있는지 — 살아있는 [t.handles] 뿐 아니라
+   EXEC 로 잠든 부모 핸들(자식이 실행되는 동안은 [t.handles] 밖에 있다)도
+   센다. 자식이 상속받은 핸들을 닫았다 다시 그 이름을 여는 사이, 부모의
+   원래 자리는 여전히 그 이름을 물고 있다고 봐야 한다 — 아니면 그 사이의
+   open 이 이미 지워진 공유 버퍼를 못 찾고 새로 하나 만들어, 부모가
+   복귀했을 때 둘이 다시 갈라진다. *)
+let name_still_claimed t name =
+  Hashtbl.fold (fun _ hd acc -> acc || hd.hname = name) t.handles false
+  || List.exists
+       (fun (f : exec_frame) -> List.exists (fun (_, hd) -> hd.hname = name) f.parent_handles)
+       t.exec_frames
+
+(* [name]이 지금 열려 있으면 그 공유 버퍼를, 아니면 [seed]로 새로 만든
+   버퍼를 돌려준다. 같은 이름을 여는 모든 핸들이 이 버퍼 하나를
+   가리켜서, 한 핸들의 쓰기가 다른 핸들의 다음 읽기에 그대로 보인다. *)
+let shared_buffer t name seed =
+  match Hashtbl.find_opt t.open_files name with
+  | Some buf -> buf
+  | None ->
+    let buf = ref seed in
+    Hashtbl.replace t.open_files name buf;
+    buf
+
 let open_handle t name data =
   match free_handle t with
   | None -> None
   | Some h ->
-    Hashtbl.replace t.handles h { hname = name; data; pos = 0 };
+    Hashtbl.replace t.handles h { hname = name; data = shared_buffer t name data; pos = 0 };
     Some h
 
 (* 닫을 때 마운트 표로 되돌린다 — 저장한 파일을 같은 세션에서 다시
-   열 수 있어야 게임의 세이브/로드가 성립한다. *)
+   열 수 있어야 게임의 세이브/로드가 성립한다. 공유 버퍼는 같은 이름의
+   다른 핸들이 남아 있으면(부모의 잠든 자리 포함) 그대로 두고, 아무도
+   안 남았을 때만 지운다 — 다음 open 이 다시 [host_files] 에서 시작하게. *)
 let close_handle t h =
   match Hashtbl.find_opt t.handles h with
   | None -> false
   | Some hd ->
-    if hd.hname <> "" then Hashtbl.replace t.host_files hd.hname hd.data;
     Hashtbl.remove t.handles h;
+    if hd.hname <> "" then begin
+      Hashtbl.replace t.host_files hd.hname !(hd.data);
+      if not (name_still_claimed t hd.hname) then Hashtbl.remove t.open_files hd.hname
+    end;
     true
 
 (* ---------- 메모리 할당 ---------- *)
@@ -721,6 +751,13 @@ let rec service t =
       | None -> fail t too_many_open_files
       | Some h ->
         Hashtbl.replace t.host_files name Bytes.empty;
+        (* [open_handle] joins a buffer already shared by another live
+           handle on [name] instead of seeding a fresh empty one -- create
+           truncates regardless, so force it empty here too, visible to
+           whoever else already has [name] open. *)
+        (match Hashtbl.find_opt t.handles h with
+         | Some hd -> hd.data := Bytes.empty
+         | None -> ());
         Cpu86.set_reg16 cpu 0 h;
         ok t
     end
@@ -781,8 +818,8 @@ let rec service t =
       (match Hashtbl.find_opt t.handles h with
        | None -> fail t 6
        | Some hd ->
-         let take = min want (max 0 (Bytes.length hd.data - hd.pos)) in
-         blit_to_mem t hd.data hd.pos dst take;
+         let take = min want (max 0 (Bytes.length !(hd.data) - hd.pos)) in
+         blit_to_mem t !(hd.data) hd.pos dst take;
          hd.pos <- hd.pos + take;
          Cpu86.set_reg16 cpu 0 take;
          ok t)
@@ -805,15 +842,15 @@ let rec service t =
          for i = 0 to n - 1 do
            Bytes.set chunk i (Char.chr (rd8 t (src + i)))
          done;
-         let len = Bytes.length hd.data in
+         let len = Bytes.length !(hd.data) in
          let grown =
            if hd.pos + n <= len then begin
-             let copy = Bytes.copy hd.data in
+             let copy = Bytes.copy !(hd.data) in
              Bytes.blit chunk 0 copy hd.pos n;
              copy
            end
            else begin
-             let head = Bytes.sub hd.data 0 (min hd.pos len) in
+             let head = Bytes.sub !(hd.data) 0 (min hd.pos len) in
              let gap =
                if hd.pos > len then Bytes.make (hd.pos - len) '\000'
                else Bytes.empty
@@ -821,7 +858,7 @@ let rec service t =
              Bytes.concat Bytes.empty [ head; gap; chunk ]
            end
          in
-         hd.data <- grown;
+         hd.data := grown;
          hd.pos <- hd.pos + n;
          Cpu86.set_reg16 cpu 0 n;
          ok t)
@@ -840,7 +877,7 @@ let rec service t =
      | Some hd ->
        let signed =
          if off32 >= 0x80000000 then off32 - 0x100000000 else off32 in
-       let size = Bytes.length hd.data in
+       let size = Bytes.length !(hd.data) in
        let newpos =
          match Cpu86.reg8 cpu 0 with
          | 0 -> signed

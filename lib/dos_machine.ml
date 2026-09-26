@@ -54,6 +54,7 @@ let create () =
       exited = false; exit_code = 0; video;
       host_files = Hashtbl.create 8;
       handles = Hashtbl.create 4;
+      open_files = Hashtbl.create 4;
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
