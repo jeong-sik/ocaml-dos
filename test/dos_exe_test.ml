@@ -131,6 +131,19 @@ let () =
     Printf.eprintf "FAIL vga pixel red: r=%d g=%d b=%d\n%!" r g b
   end;
 
+  (* #30: an "MZ"-signed image shorter than the fixed header (0x1C bytes)
+     used to index past the string and raise a bare
+     [Invalid_argument "index out of bounds"]. It now raises a named error
+     before touching any header field past the magic bytes. *)
+  checkb "a truncated MZ image raises a named error, not an index fault"
+    (try
+       Dos_machine.load_exe (Dos_machine.create ()) ("MZ" ^ String.make 8 '\x00');
+       false
+     with
+     | Invalid_argument message -> message = "MZ header too short"
+     | _ -> false)
+    true;
+
   if !failed = 0 then print_endline "dos M2b: all passed"
   else begin
     Printf.eprintf "dos M2b: %d failures\n%!" !failed;

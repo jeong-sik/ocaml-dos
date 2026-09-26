@@ -231,9 +231,11 @@ let load_com ?(psp_seg = 0x1000) ?(child = false) t image =
    남은 메모리를 통째로 블록으로 받는다 — 실기와 같아서, 자식이 다시
    EXEC 하려면 먼저 AH=4Ah 로 줄여야 한다. *)
 let load_exe ?psp_seg ?(child = false) t image =
+  if String.length image < 2 || image.[0] <> 'M' || image.[1] <> 'Z' then
+    invalid_arg "not an MZ image";
+  if String.length image < 0x1C then invalid_arg "MZ header too short";
   let u8 i = Char.code image.[i] in
   let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
-  if not (u8 0 = 0x4D && u8 1 = 0x5A) then invalid_arg "not an MZ image";
   let reloc_count = u16 0x06 in
   let header_bytes = u16 0x08 * 16 in
   let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
@@ -376,6 +378,13 @@ let exec_program t =
       let is_mz =
         String.length image >= 2 && image.[0] = 'M' && image.[1] = 'Z'
       in
+      (* "MZ" 서명만 있고 나머지 고정 헤더(0x1C 바이트, e_lfarlc 까지)가
+         없으면 아래 [u16 0x08]/[u16 0x0A] 가 이미지 밖을 읽어
+         [Invalid_argument] 로 EXEC 호출 자체를 깨뜨린다. 그 앞에서
+         DOS 오류 11(잘못된 형식)로 답하고 멈춘다 — 이 호출만 실패하고
+         부모는 그대로 산다. *)
+      if is_mz && String.length image < 0x1C then fail t 11
+      else
       (* 배치를 먼저 정한다 — 실패는 부모에게 즉시 돌아간다 *)
       let placement =
         if is_mz then begin
