@@ -311,6 +311,15 @@ let step t =
       in
       let opcode = prefixes () in
       let bad what =
+        (* [t.ip] already passed the opcode and modrm bytes [prefixes]/the
+           dispatch below consumed while deciding this instruction is
+           unsupported. Left there, the next [step] would resume mid
+           instruction and run whatever bytes follow as a fresh one --
+           real hardware instead re-faults on the same instruction (#UD
+           points at it, not past it). Rewinding to [base_ip] here gives
+           the same guarantee: nothing runs until a caller does something
+           about the fault. *)
+        t.ip <- base_ip;
         raise (Unsupported (Printf.sprintf "%s @%04x:%04x (opcode %02x)"
                   what (seg t 1) base_ip opcode))
       in

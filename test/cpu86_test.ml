@@ -126,6 +126,23 @@ let () =
      incr failed;
      Printf.eprintf "FAIL unsupported 0xf1: no exception\n%!"
    with Cpu86.Unsupported _ -> ());
+  (* #31: a fault used to leave [ip] past the faulting instruction, so a
+     second [step] ran whatever bytes followed as a fresh one instead of
+     re-faulting on the same one. [lea ax, ax] (8d c0) followed by the
+     zero bytes [run_from]'s backing memory starts as -- the shape a COM
+     image's tail actually has -- used to execute those zero bytes as
+     [add [bx+si], al] and return normally on the second step. *)
+  let t = run_from "\x8d\xc0" in
+  (try
+     ignore (Cpu86.step t);
+     incr failed;
+     Printf.eprintf "FAIL lea on register: first step did not fault\n%!"
+   with Cpu86.Unsupported _ -> ());
+  (try
+     ignore (Cpu86.step t);
+     incr failed;
+     Printf.eprintf "FAIL lea on register: second step ran past the fault instead of re-faulting\n%!"
+   with Cpu86.Unsupported _ -> ());
   if !failed = 0 then print_endline "cpu86 M0: all passed"
   else begin
     Printf.eprintf "cpu86 M0: %d failures\n%!" !failed;
