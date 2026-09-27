@@ -8,8 +8,13 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
 (* Bump by hand whenever what [save] writes changes shape or meaning. A
    snapshot of any other version is refused; nothing reads an old one.
    2: no next-handle counters (DOS and EMS handles reuse the lowest free
-   number), and every int is range-checked on write as well as read. *)
-let format_version = 2
+   number), and every int is range-checked on write as well as read.
+   3: a handle's [data] is a pool index into a separate buffer pool
+   (#35), not inline bytes -- two handles opened separately on one name
+   now share a buffer, and the pool keeps that sharing across a
+   save/restore round trip the way it already kept [dup]'s whole-record
+   sharing. *)
+let format_version = 3
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -89,13 +94,33 @@ let put_list w ~what put l =
 let put_pairs w ~what ~a ~b l =
   put_list w ~what (fun (x, y) -> C.put w ~what a x; C.put w ~what b y) l
 
-(* Handle records are shared: dup (AH=45h/46h) files one record under two
-   numbers, and an EXEC frame keeps the parent's records, so a read or write
-   through either number moves the one position. The snapshot keeps the
-   sharing: each record goes into a pool once, by physical identity, and
-   every table names a pool index. Pool order is first appearance in the
-   sorted live table, then in the frames, so the bytes are deterministic. *)
+(* Handle records are shared two ways. Dup (AH=45h/46h) files one whole
+   record under two numbers, position included, and an EXEC frame keeps
+   the parent's records dormant while a child runs -- either way, a read
+   or write through any of those numbers moves the one record. Two names
+   opened separately (AH=3Dh twice, Dos_dos.open_handle) instead share
+   only the underlying bytes: each keeps its own position, but a write
+   through one is a read through the other because [handle.data] is the
+   same [Bytes.t ref].
+
+   The snapshot keeps both. Handle records pool by physical identity of
+   the record, as before. Inside that, buffers pool separately by
+   physical identity of the [Bytes.t ref] a record's [data] names, so two
+   records that shared a buffer before saving still share the one
+   restored ref, not two copies of the same bytes. Pool order is first
+   appearance in the sorted live table, then in the frames, so the bytes
+   are deterministic. *)
 let handle_pool t =
+  let buffers = ref [] and buffer_count = ref 0 in
+  let buffer_index buf =
+    match List.find_opt (fun (b, _) -> b == buf) !buffers with
+    | Some (_, i) -> i
+    | None ->
+      let i = !buffer_count in
+      buffers := (buf, i) :: !buffers;
+      incr buffer_count;
+      i
+  in
   let pool = ref [] and count = ref 0 in
   let index h =
     match List.find_opt (fun (x, _) -> x == h) !pool with
@@ -111,11 +136,16 @@ let handle_pool t =
     List.map (fun f -> List.map (fun (n, h) -> (n, index h)) f.parent_handles)
       t.exec_frames
   in
-  (List.rev_map fst !pool, live, frames)
+  let handles = List.rev_map fst !pool in
+  let handles_with_buffers = List.map (fun h -> (h, buffer_index h.data)) handles in
+  (handles_with_buffers, List.rev_map fst !buffers, live, frames)
 
-let put_handle w h =
-  let { hname; data; pos } = h in
-  C.put_string w hname; C.put_bytes w data; C.put w ~what:"handle position" file_pos pos
+let put_buffer w buf = C.put_bytes w !buf
+
+let put_handle w (h, buffer_idx) =
+  let { hname; data = _; pos } = h in
+  C.put_string w hname; C.put w ~what:"handle buffer" C.count buffer_idx;
+  C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
   let { parent; parent_psp; parent_dta; parent_free_base; parent_free_top;
@@ -142,6 +172,8 @@ let write_payload w t =
         ext_scan_pending; kbd_requests; last_tick; pending_irq0; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
+        open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
+                           read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
         epoch_min; epoch_sec; ems_pages; ems_mapped;
         mouse } = t
@@ -163,7 +195,8 @@ let write_payload w t =
   put "exit code" C.byte exit_code;
   put_list w ~what:"host file" (fun (k, v) -> C.put_string w k; C.put_bytes w v)
     (sorted_bindings host_files);
-  let pool, live, frames = handle_pool t in
+  let pool, buffers, live, frames = handle_pool t in
+  put_list w ~what:"handle buffer" (put_buffer w) buffers;
   put_list w ~what:"handle record" (put_handle w) pool;
   put_pairs w ~what:"handle" ~a:handle_number ~b:C.count live;
   put_list w ~what:"FCB"
@@ -264,16 +297,32 @@ let read_payload r =
   t.exit_code <- get "exit code" C.byte;
   fill_table t.host_files
     (get_list r ~what:"host file" (fun () -> let k = C.get_string r in (k, C.get_bytes r)));
+  let buffers =
+    Array.of_list (get_list r ~what:"handle buffer" (fun () -> ref (C.get_bytes r)))
+  in
   let pool =
     Array.of_list
       (get_list r ~what:"handle record" (fun () ->
            let hname = C.get_string r in
-           let data = C.get_bytes r in
-           { hname; data; pos = get "handle position" file_pos }))
+           let buffer_idx = get "handle buffer" C.count in
+           if buffer_idx >= Array.length buffers then C.fail "a handle names no buffer"
+           else
+             { hname; data = buffers.(buffer_idx); pos = get "handle position" file_pos }))
   in
   let resolve = List.map (fun (n, i) ->
       if i >= Array.length pool then C.fail "a handle names no record" else (n, pool.(i)))
   in
+  (* [open_files] is a lookup accelerator, not authority -- every name it
+     needs to know is already in [pool], each with the one buffer every
+     record sharing that name points at (by construction: [handle_pool]
+     never puts two different buffers under the same live name). Rebuild
+     it here so the next [Dos_dos.open_handle] on a name already open
+     joins the restored buffer instead of starting a fresh, disconnected
+     one. *)
+  Hashtbl.reset t.open_files;
+  Array.iter
+    (fun h -> if h.hname <> "" then Hashtbl.replace t.open_files h.hname h.data)
+    pool;
   fill_table t.handles (resolve (get_pairs r ~what:"handle" ~a:handle_number ~b:C.count));
   fill_table t.fcbs
     (get_list r ~what:"FCB" (fun () ->

@@ -21,9 +21,17 @@ let cpu_hz = 4_772_727
 let first_file_handle = 5
 let max_handles = 20
 
+(* [data] is shared: every handle opened on the same [hname] (through
+   [Dos_dos.open_handle], not [dup]) points at the same ref, so a write
+   through one is a read through the other -- real DOS keeps one file on
+   disk regardless of how many times it is open. [pos] is each handle's
+   own, since two independent opens read and write at their own offsets.
+   [dup] (AH=45h/46h) instead shares the whole record under a second
+   number, [pos] included -- that is a different number naming the same
+   open file, not a second open. *)
 type handle = {
   hname : string;
-  mutable data : Bytes.t;
+  data : Bytes.t ref;
   mutable pos : int;
 }
 
@@ -71,6 +79,10 @@ type t = {
   host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
   handles : (int, handle) Hashtbl.t;
         (** 핸들 번호 [first_file_handle] .. [max_handles - 1] 만 쓴다 *)
+  open_files : (string, Bytes.t ref) Hashtbl.t;
+        (** 이름 하나가 지금 열려 있는 동안의 공유 버퍼. [handles] 의 어떤
+            항목도, [exec_frames] 의 어떤 부모 핸들도 그 이름을 더는 물지
+            않으면 지운다 — 다음 open 은 [host_files] 에서 새로 시작한다. *)
   fcbs : (int, Bytes.t * int) Hashtbl.t;
   mutable dta : int;                          (** 전송 주소(물리) *)
   mutable psp_seg : int;
