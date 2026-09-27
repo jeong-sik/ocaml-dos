@@ -190,6 +190,22 @@ let () =
   check "parent exits" (if Dos_machine.exited m then 1 else 0) 1;
   check "parent's handle 5 is F.DAT again" (Dos_machine.mem_read m 0x1014a) (Char.code 'f')
 
+(* 6) An "MZ"-signed file shorter than the fixed header (0x1C bytes) used
+   to make EXEC read past the image and raise Invalid_argument, crashing
+   the call instead of failing it. Now it answers DOS error 11 (bad
+   format) and the parent runs on. *)
+let () =
+  let short_mz = "MZ" ^ String.make 8 '\x00' in
+  let parent =
+    build_parent ~shrink:0x20 ~child1:"BAD.EXE" ~child2:"" ~fin:"\xb4\x4c\xcd\x21"
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.mount_file m "BAD.EXE" short_mz;
+  Dos_machine.load_com m parent;
+  Dos_machine.run m ~max_steps:5000;
+  check "parent survives a truncated MZ child and reads DOS error 11"
+    (Dos_machine.exit_code m) 11
+
 let () =
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;
