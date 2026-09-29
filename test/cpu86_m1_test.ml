@@ -204,6 +204,42 @@ let () =
   check "enter 가 BP 를 프레임에 둔다" (Cpu86.reg16 t 5) 0x07FE;
   check "enter 가 지역변수 자리를 잡는다" (Cpu86.reg16 t 4) 0x07EE;
   check "enter 가 옛 BP 를 밀었다" (read 0x7FE lor (read 0x7FF lsl 8)) 0x0123;
+  (* enter 0x10,2 : 옛 BP 를 밀고, 바깥 프레임 포인터 하나([BP-2])와 이 프레임
+     포인터를 디스플레이로 민다. SP 는 디스플레이를 민 **뒤의** SP 에서 0x10
+     아래다(Intel: SP <- SP - Size). 프레임에서 빼면 지역변수가 디스플레이를
+     덮는다. *)
+  let t = run_from "\xc8\x10\x00\x02\xf4" in
+  Cpu86.set_seg t 2 0;
+  Cpu86.set_reg16 t 4 0x0800;
+  Cpu86.set_reg16 t 5 0x0900;
+  Bytes.set mem 0x8FE '\xaa'; Bytes.set mem 0x8FF '\xbb';
+  steps t 1;
+  check "enter 2 단계 BP" (Cpu86.reg16 t 5) 0x07FE;
+  check "enter 2 단계 SP 는 디스플레이 아래" (Cpu86.reg16 t 4) 0x07EA;
+  check "enter 2 단계 옛 BP" (read 0x7FE lor (read 0x7FF lsl 8)) 0x0900;
+  check "enter 2 단계 바깥 프레임" (read 0x7FC lor (read 0x7FD lsl 8)) 0xBBAA;
+  check "enter 2 단계 이 프레임" (read 0x7FA lor (read 0x7FB lsl 8)) 0x07FE;
+  let t = run_from "\xc8\x10\x00\x01\xf4" in
+  Cpu86.set_seg t 2 0;
+  Cpu86.set_reg16 t 4 0x0800;
+  Cpu86.set_reg16 t 5 0x0123;
+  steps t 1;
+  check "enter 1 단계 SP" (Cpu86.reg16 t 4) 0x07EC;
+  check "enter 1 단계 이 프레임" (read 0x7FC lor (read 0x7FD lsl 8)) 0x07FE;
+  (* 186 부터 시프트·회전 횟수는 아래 5비트만 쓴다. 33 은 1, 32 는 0 이다
+     (0 이면 피연산자도 플래그도 그대로). 8086 은 자르지 않는다 — 그쪽은
+     실칩 스위트가 본다. *)
+  let t = run_from "\xc1\xe0\x21\xf4" in           (* shl ax,33 *)
+  Cpu86.set_reg16 t 0 1;
+  steps t 1;
+  check "shl ax,33 은 shl ax,1" (Cpu86.reg16 t 0) 2;
+  let t = run_from "\xd3\xe0\xf4" in               (* shl ax,cl *)
+  Cpu86.set_reg16 t 0 0x1234;
+  Cpu86.set_reg8 t 1 0x20;
+  Cpu86.set_flags t 0x0003;
+  steps t 1;
+  check "shl ax,cl=32 은 그대로" (Cpu86.reg16 t 0) 0x1234;
+  check "shl ax,cl=32 은 플래그도 그대로" (Cpu86.flags t land 0xfff) 0x0003;
   (* leave 가 되돌린다 *)
   let t = run_from "\xc8\x10\x00\x00\xc9\xf4" in
   Cpu86.set_seg t 2 0;

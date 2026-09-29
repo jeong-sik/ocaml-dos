@@ -357,6 +357,8 @@ let step t =
          ZF/SF/PF 는 논리 shift 만 갱신(rotate 는 갱신 안 함 — 8086 규칙),
          OF 는 count=1 일 때만 정의된다. *)
       let shift_group regf width rm_op count =
+        (* 186 부터 횟수는 아래 5비트만 쓴다. 8086 은 자르지 않고 전부 돈다. *)
+        let count = match t.model with I8086 -> count | I80186 -> count land 0x1f in
         if count > 0 && t.model = I8086 && regf = 6 then begin
           (* SETMO/SETMOC — 8086·8088 의 문서 외 명령. 피연산자를 전부 1
              로 만들고 논리 연산처럼 플래그를 세운다. 186 부터 이 자리는
@@ -718,10 +720,11 @@ let step t =
           done;
           push16 t frame
         end;
-        (* BP 는 프레임 바닥, SP 는 그보다 size 만큼 아래 — size 가 지역
-           변수 자리다. 이걸 빼면 다음 push 가 지역변수를 덮어쓴다. *)
+        (* BP 는 프레임 바닥, SP 는 디스플레이를 민 뒤의 SP 에서 size 만큼
+           아래 — size 가 지역변수 자리다(Intel: SP <- SP - Size). 프레임에서
+           빼면 nesting>0 일 때 지역변수가 방금 민 디스플레이를 덮는다. *)
         set_reg16 t 5 frame;
-        set_reg16 t 4 ((frame - size) land 0xffff);
+        set_reg16 t 4 ((t.regs.(4) - size) land 0xffff);
         19
       | 0xc9 (* leave *) ->
         set_reg16 t 4 (reg16 t 5);
