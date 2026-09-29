@@ -60,6 +60,15 @@ let () =
     ^ "\xb8" ^ w 0x4400 ^ "\x2b\xdb" ^ int_ 0x67
     ^ "\x26\x8a\x06" ^ w 0x100
     ^ "\xa2" ^ w 0x200D
+    (* 7. 삼국지3 가 매달 부르는 모양: 이미 물리 3 에 있는 논리 0 을 다시
+       물리 3 에 매핑한다(AX=4403h, BX=0). 실기 EMS 에서는 아무 일도 없는
+       호출이다 — 프레임에 쓴 값이 그대로 보여야 한다. *)
+    ^ "\xb8" ^ w 0x4403 ^ "\x2b\xdb" ^ int_ 0x67
+    ^ "\xb8" ^ w 0xDC00 ^ "\x8e\xc0"              (* mov es,0xDC00 (물리 3) *)
+    ^ "\x26\xc6\x06" ^ w 0x200 ^ b 0x5A           (* mov es:[200],5Ah *)
+    ^ "\xb8" ^ w 0x4403 ^ "\x2b\xdb" ^ int_ 0x67
+    ^ "\x26\x8a\x06" ^ w 0x200
+    ^ "\xa2" ^ w 0x200E
     ^ quit
   in
   Dos_machine.load_com m code;
@@ -74,6 +83,7 @@ let () =
   check "핸들 발급" (if peek16 m 0x200A >= 1 then 1 else 0) 1;
   check "논리 1 은 백지" (peek m 0x200C) 0;
   check "논리 0 표식 보존" (peek m 0x200D) 0xA5;
+  check "같은 매핑을 다시 해도 프레임 내용은 그대로" (peek m 0x200E) 0x5A;
   if !failed = 0 then print_endline "dos ems: all passed"
   else begin
     Printf.eprintf "dos ems: %d failures\n%!" !failed;

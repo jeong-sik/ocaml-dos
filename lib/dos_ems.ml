@@ -103,17 +103,33 @@ let service t =
       | None -> err 0x83                         (* 알 수 없는 핸들 *)
       | Some pages ->
         if log >= Array.length pages then err 0x8A
+        else if t.ems_mapped.(phys) = (h, log) then
+          (* 이미 그 자리에 있는 페이지다. 실기 EMS 에서 프레임은 페이지 그
+             자체라 아무 일도 없다 — 여기서 되저장본을 다시 겹치면 게스트가
+             그동안 프레임에 쓴 값이 사라진다. 삼국지3 는 이 호출
+             (AX=4403h BX=0)을 수시로 부른다. *)
+          ok ()
         else begin
           (* 프레임의 지금 내용을 옛 논리 페이지에 되저장하고 새 페이지를
              겹친다. *)
           (match t.ems_mapped.(phys) with
-           | oh, ol when oh > 0 && (oh, ol) <> (h, log) ->
+           | oh, ol when oh > 0 ->
              (match Hashtbl.find_opt t.ems_pages oh with
               | Some opages when ol < Array.length opages ->
                 Bytes.blit t.mem (frame_addr phys) (ensure_page opages ol) 0
                   (page_size * 16)
               | _ -> ())
            | _ -> ());
+          (* 같은 논리 페이지가 다른 물리 페이지에도 떠 있으면 그 창이
+             최신이다. 되저장본을 먼저 그 창으로 맞춘 뒤 가져온다. 두 창이
+             서로의 쓰기를 곧바로 보지는 못한다 — 프레임을 복사로 흉내 내는
+             한계다. *)
+          Array.iteri
+            (fun q shown ->
+              if q <> phys && shown = (h, log) then
+                Bytes.blit t.mem (frame_addr q) (ensure_page pages log) 0
+                  (page_size * 16))
+            t.ems_mapped;
           Bytes.blit (ensure_page pages log) 0 t.mem (frame_addr phys)
             (page_size * 16);
           t.ems_mapped.(phys) <- (h, log);
