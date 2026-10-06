@@ -73,6 +73,7 @@ let create () =
         mouse_present = true; mouse_x = 0; mouse_y = 0;
         mouse_buttons = 0; mouse_visible = false;
         mouse_dx = 0; mouse_dy = 0;
+        mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
       };
     }
   in
@@ -320,10 +321,41 @@ let set_clock t ~year ~month ~day ~hour ~minute ~second =
 let attach_mouse t = t.mouse.mouse_present <- true
 
 let set_mouse t ~x ~y ~buttons =
-  t.mouse.mouse_dx <- t.mouse.mouse_dx + (x - t.mouse.mouse_x);
-  t.mouse.mouse_dy <- t.mouse.mouse_dy + (y - t.mouse.mouse_y);
-  t.mouse.mouse_x <- x;
-  t.mouse.mouse_y <- y;
-  t.mouse.mouse_buttons <- buttons
+  let m = t.mouse in
+  let moved = x <> m.mouse_x || y <> m.mouse_y in
+  m.mouse_dx <- m.mouse_dx + (x - m.mouse_x);
+  m.mouse_dy <- m.mouse_dy + (y - m.mouse_y);
+  m.mouse_x <- x;
+  m.mouse_y <- y;
+  let old_buttons = m.mouse_buttons in
+  m.mouse_buttons <- buttons;
+  (* AX=0x0C 등록에 닿은 이벤트를 핸들러에 far call 로 건넨다. 비트 번호는
+     실기 마우스 드라이버와 같다(Ralf Brown rb-5968): 0x01 이동,
+     0x02/0x04 왼쪽 누름/뗌, 0x08/0x10 오른쪽 누름/뗌, 0x20/0x40 가운데
+     누름/뗌. 마스크가 0 이면 등록이 꺼진 것으로 보고 부르지 않는다. *)
+  let edge bit press release =
+    let was = old_buttons land bit <> 0 and now = buttons land bit <> 0 in
+    if (not was) && now then press else if was && (not now) then release else 0
+  in
+  let events =
+    (if moved then 0x01 else 0)
+    lor edge 0x1 0x02 0x04 lor edge 0x2 0x08 0x10 lor edge 0x4 0x20 0x40
+  in
+  let mask = m.mouse_handler_mask in
+  if mask <> 0 && events land mask <> 0
+     && (m.mouse_handler_seg <> 0 || m.mouse_handler_off <> 0)
+  then begin
+    let cpu = t.cpu in
+    Cpu86.set_reg16 cpu 0 events;
+    Cpu86.set_reg16 cpu 3 m.mouse_buttons;
+    Cpu86.set_reg16 cpu 1 x;
+    Cpu86.set_reg16 cpu 2 y;
+    Cpu86.set_reg16 cpu 6 m.mouse_dx;
+    Cpu86.set_reg16 cpu 7 m.mouse_dy;
+    (* 이동량은 호출이 소비한다 — AX=0x0B 와 같은 읽기다. *)
+    m.mouse_dx <- 0;
+    m.mouse_dy <- 0;
+    Dos_state.deliver_call t m.mouse_handler_seg m.mouse_handler_off
+  end
 
 let free_paras t = Dos_dos.largest_free t

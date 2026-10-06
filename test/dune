@@ -57,3 +57,7 @@
 (test
  (name dos_snapshot_test)
  (libraries dosmachine dos_core_identity unix))
+
+(test
+ (name dos_mouse_callback_test)
+ (libraries dosmachine))

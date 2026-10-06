@@ -374,8 +374,9 @@ let clock t =
 
 (* ---------- INT 33h 마우스 ---------- *)
 
-(* 마우스는 하네스가 움직인다. 기본은 미장착 — 없는 장치를 있다고 하면
-   게임이 커서를 기다린다. Dos_machine.attach_mouse 로 붙인다. *)
+(* 마우스는 하네스가 움직인다. 기본은 장착 — KOEI 계열 게임은 부팅에서
+   AX=0 으로 드라이버를 검사하고, 없으면 키보드 모드로 강제한다.
+   AX=0x0C 로 건 핸들러는 Dos_machine.set_mouse 가 이벤트와 함께 부른다. *)
 let mouse t =
   let cpu = t.cpu in
   let m = t.mouse in
@@ -398,6 +399,13 @@ let mouse t =
     Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);
     m.mouse_dx <- 0;
     m.mouse_dy <- 0
+  | 0x0C ->
+    (* DEFINE INTERRUPT SUBROUTINE PARAMETERS — CX 마스크, ES:DX 루틴.
+       돌려주는 값은 없다(Ralf Brown rb-5968: Return 없음). AX 를 건드리면
+       없는 규약을 지어내는 것이니 저장만 한다. *)
+    m.mouse_handler_mask <- Cpu86.reg16 cpu 1;
+    m.mouse_handler_seg <- Cpu86.seg cpu 0;
+    m.mouse_handler_off <- Cpu86.reg16 cpu 2
   | _ -> ()
 
 (* ---------- 묶음 ---------- *)
