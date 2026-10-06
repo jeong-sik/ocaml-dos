@@ -13,8 +13,12 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    (#35), not inline bytes -- two handles opened separately on one name
    now share a buffer, and the pool keeps that sharing across a
    save/restore round trip the way it already kept [dup]'s whole-record
-   sharing. *)
-let format_version = 3
+   sharing.
+   4: the mouse carries its INT 33h AX=0x0C registration (mask, segment,
+   offset) after dx/dy, so a restored machine keeps calling the handler
+   the guest registered. Snapshots of format 3 are refused; only the
+   current format is read. *)
+let format_version = 4
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -228,7 +232,8 @@ let write_payload w t =
     (sorted_bindings ems_pages);
   put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
-        mouse_dx; mouse_dy } = mouse
+        mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
+        mouse_handler_off } = mouse
   in
   C.put_bool w mouse_present;
   put "mouse x" C.any mouse_x;
@@ -236,7 +241,10 @@ let write_payload w t =
   put "mouse buttons" C.any mouse_buttons;
   C.put_bool w mouse_visible;
   put "mouse dx" C.any mouse_dx;
-  put "mouse dy" C.any mouse_dy
+  put "mouse dy" C.any mouse_dy;
+  put "mouse handler mask" C.word mouse_handler_mask;
+  put "mouse handler seg" C.word mouse_handler_seg;
+  put "mouse handler off" C.word mouse_handler_off
 
 let save t =
   match check_consistency t with
@@ -381,6 +389,9 @@ let read_payload r =
   m.mouse_visible <- C.get_bool r;
   m.mouse_dx <- get "mouse dx" C.any;
   m.mouse_dy <- get "mouse dy" C.any;
+  m.mouse_handler_mask <- get "mouse handler mask" C.word;
+  m.mouse_handler_seg <- get "mouse handler seg" C.word;
+  m.mouse_handler_off <- get "mouse handler off" C.word;
   C.end_of_input r;
   (match check_consistency t with
    | Ok () -> ()

@@ -35,6 +35,9 @@ type handle = {
   mutable pos : int;
 }
 
+(* INT 33h AX=0x0C 로 건 마우스 이벤트 핸들러의 등록. [mouse_handler_mask]
+   0 은 미등록 — 마스크가 0 이면 주소가 남아 있어도 부르지 않는다. 세 값은
+   16비트(Cpu86.set_reg16·set_seg 가 마스크한다). *)
 type mouse = {
   mutable mouse_present : bool;
   mutable mouse_x : int;
@@ -43,6 +46,9 @@ type mouse = {
   mutable mouse_visible : bool;
   mutable mouse_dx : int;
   mutable mouse_dy : int;
+  mutable mouse_handler_mask : int;
+  mutable mouse_handler_seg : int;
+  mutable mouse_handler_off : int;
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
@@ -324,16 +330,17 @@ let push_key t word =
    실기 순서: 현재 플래그를 그대로 밀고 '그 다음에' IF·TF 를 끈다.
    끄지 않으면 핸들러 도중에 다음 틱이 들어와 프레임이 쌓인다. IRET 이
    밀어둔 값을 되돌리므로 IF 는 핸들러가 끝나면 살아난다. *)
+let push_word t w =
+  Cpu86.set_reg16 t.cpu 4 (Cpu86.reg16 t.cpu 4 - 2);
+  let base = Cpu86.seg t.cpu 2 lsl 4 and o = Cpu86.reg16 t.cpu 4 in
+  wr8 t (base + o) (w land 0xff);
+  wr8 t (base + ((o + 1) land 0xffff)) (w lsr 8)
+
 let deliver_ivt t v =
   let off = rd16 t (v * 4) and sg = rd16 t ((v * 4) + 2) in
   if off <> 0 || sg <> 0 then begin
     let flags = Cpu86.flags t.cpu in
-    let push w =
-      Cpu86.set_reg16 t.cpu 4 (Cpu86.reg16 t.cpu 4 - 2);
-      let base = Cpu86.seg t.cpu 2 lsl 4 and o = Cpu86.reg16 t.cpu 4 in
-      wr8 t (base + o) (w land 0xff);
-      wr8 t (base + ((o + 1) land 0xffff)) (w lsr 8)
-    in
+    let push = push_word t in
     push flags;
     push (Cpu86.seg t.cpu 1);
     push (Cpu86.dump_ip t.cpu);
@@ -344,6 +351,18 @@ let deliver_ivt t v =
     true
   end
   else false
+
+(* 마우스 이벤트 핸들러(INT 33h AX=0x0C 등록)를 far call 로 부른다.
+   인터럽트가 아니라 CALL 이라 플래그를 밀지 않고 IF·TF 도 안 건드린다 —
+   핸들러는 RETF 로 돌아온다. 레지스터(AX 이벤트, BX 단추, CX·DX 좌표,
+   SI·DI 이동량)는 부르는 쪽이 미리 채운다. 호출자는 run 사이에만 불리므로
+   (지금은 Dos_machine.set_mouse) CPU 는 명령 경계에 있다. *)
+let deliver_call t seg off =
+  let push = push_word t in
+  push (Cpu86.seg t.cpu 1);
+  push (Cpu86.dump_ip t.cpu);
+  Cpu86.set_seg t.cpu 1 seg;
+  Cpu86.set_ip t.cpu off
 
 (* 게스트가 키를 물었는데 링이 비어 있었다. 래치는 읽기가 성공해야
    내려가므로 "지금 기다리는가" 만 알려주고 "몇 번 물었는가" 는 못
