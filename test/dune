@@ -11,6 +11,10 @@
  (libraries dosmachine))
 
 (test
+ (name dos_blocking_input_test)
+ (libraries dosmachine))
+
+(test
  (name dos_exe_test)
  (libraries dosmachine))
 

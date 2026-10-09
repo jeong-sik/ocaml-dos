@@ -7,8 +7,10 @@
 val conv_mem_top : int
 (** 할당 가능한 마지막 세그먼트 — 비디오 메모리 바로 앞. *)
 
-val service : Dos_state.t -> unit
-(** AH 에 맞는 INT 21h 기능을 실행한다. *)
+val service : Dos_state.t -> return_to:Dos_state.service_return -> Dos_state.service_result
+(** Execute INT 21h. An EXEC preserves its owned return frame until the
+    child returns; terminating or starting a process transfers control
+    instead of completing the current interrupt frame. *)
 
 val terminate : Dos_state.t -> unit
 (** INT 20h — RET 로 돌아온 프로그램의 종료. *)

@@ -284,11 +284,12 @@ let seg_override_of = function
 
 (* ---------- step: 한 명령 ---------- *)
 
+let idle t =
+  t.cycles <- t.cycles + 2;
+  2
+
 let step t =
-  if t.halted then begin
-    t.cycles <- t.cycles + 2;
-    2
-  end
+  if t.halted then idle t
   else begin
     let base_ip = t.ip in
     (* 트랩 플래그는 명령 진입 시점 값으로 판정한다 — 그 명령이 TF 를

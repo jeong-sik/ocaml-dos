@@ -181,9 +181,14 @@ ignore (Dos_machine.run_until m ~max_steps:100_000 ~stop:(fun _ -> false));
 let png_source = Dos_machine.frame_rgb m
 ```
 
-`Dos_machine.kbd_waiting` 이 true 면 게스트가 입력을 기다리다 굶은
-것이다 — 그때 키를 넣으면 된다. `run_with_keys` 가 그 정책을 그대로
-담고 있다.
+`run_until`은 `machine_steps`, `instructions`, `elapsed_cycles`, `stop_reason`을
+담은 결과를 돌려준다. `max_steps`와 `run_with_keys`의 키 주입 시점은 입력 대기와
+HLT idle을 포함한 machine-step clock이다. 실제 guest 명령 수는 `instructions`로
+따로 센다. IRQ handler가 실행한 명령은 이 명령 수에 포함된다.
+
+BIOS INT 16h AH=00/10은 키가 없으면 호출자를 멈추며, IRQ handler는 실행될 수
+있다. `kbd_waiting`은 마지막 읽기나 비차단 poll이 빈 링을 관측했다는 뜻이다.
+이 관측만으로 게임의 화면 전환 완료를 보장하지는 않는다.
 
 ## 지금 못 하는 것
 

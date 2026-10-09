@@ -12,6 +12,40 @@ type t = Dos_state.t
 open Dos_state
 
 let starve_threshold = 2000
+let service_control_mask = Cpu86.f_interrupt lor Cpu86.f_trap
+
+let accept_service t ~return_to = function
+  | Completed -> finish_service_return t return_to
+  | Control_transferred -> ()
+  | Awaiting_input request ->
+    let flags = Cpu86.flags t.cpu in
+    t.input_continuations <-
+      { request; service_return = return_to;
+        return_control_flags = flags land service_control_mask;
+        return_cs = Cpu86.seg t.cpu 1; return_ip = Cpu86.dump_ip t.cpu;
+        return_ss = Cpu86.seg t.cpu 2; return_sp = Cpu86.reg16 t.cpu 4 }
+      :: t.input_continuations;
+    (* The host BIOS/DOS wait loop admits hardware IRQs. Keep the caller's
+       control flags in its continuation, rather than leaking STI through
+       the eventual service return. This also works beneath an old-vector
+       guest hook, where the interrupt entry already cleared IF. *)
+    Cpu86.set_flags t.cpu ((flags lor Cpu86.f_interrupt) land lnot Cpu86.f_trap)
+
+let host_service t ~return_to v =
+  match v with
+  | 0x20 -> Dos_dos.terminate t; Control_transferred
+  | 0x21 -> Dos_dos.service t ~return_to
+  | 0x27 -> Dos_dos.int27 t; Control_transferred
+  | 0x67 -> Dos_ems.service t; Completed
+  | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
+  | _ -> Completed
+
+let service_status_mask t v =
+  match v, Cpu86.reg8 t.cpu 4 with
+  | 0x16, (0x01 | 0x11) -> Cpu86.f_zero
+  | 0x21, 0x06 -> Cpu86.f_zero
+  | 0x21, _ -> Cpu86.f_carry
+  | _ -> 0
 
 let create () =
   let mem = Bytes.make (1024 * 1024) '\000' in
@@ -59,7 +93,7 @@ let create () =
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
       kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
-      ext_scan_pending = 0;
+      ext_scan_pending = 0; input_continuations = [];
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
@@ -81,24 +115,19 @@ let create () =
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
   Cpu86.set_int_hook cpu (fun vec ->
-      (* ROM 스텁을 지나온 호출(실벡터 + 0x80)을 실벡터로 되돌린다. *)
       let raw = vec land 0xff in
-      let v =
-        if raw >= 0x80 && List.mem (raw - 0x80) Dos_bios.host_served then
-          raw - 0x80
-        else raw
-      in
-      (* 게스트가 건 벡터가 먼저다. 비어 있거나 아직 우리 스텁이면
-         호스트 구현으로 간다 — 스텁으로 다시 들어가면 무한루프다. *)
-      if (not (Dos_bios.ivt_is_own_stub t v)) && deliver_ivt t v then ()
-      else
-        match v with
-        | 0x20 -> Dos_dos.terminate t
-        | 0x21 -> Dos_dos.service t
-        | 0x27 -> Dos_dos.int27 t
-        | 0x67 -> Dos_ems.service t
-        | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
-        | _ -> ());
+      match Dos_bios.private_service_vector t raw with
+      | Some v ->
+        (* A guest hook chaining to its saved old vector already chose this
+           service. Looking up the real IVT again would reenter that hook. *)
+        let status_mask = service_status_mask t v in
+        let return_to = Interrupt_return {
+          frame_ss = Cpu86.seg cpu 2; frame_sp = Cpu86.reg16 cpu 4; status_mask } in
+        accept_service t ~return_to (host_service t ~return_to v)
+      | None ->
+        if (not (Dos_bios.ivt_is_own_stub t raw)) && deliver_ivt t raw then ()
+        else accept_service t ~return_to:Direct_return
+            (host_service t ~return_to:Direct_return raw));
   t
 
 (* ---------- 로더 ----------
@@ -106,9 +135,13 @@ let create () =
    몸통은 Dos_dos 에 있다 — EXEC(AH=4Bh) 자식을 같은 코드로 싣기
    때문이다. 여기선 루트 프로그램을 싣는 얼굴만 남긴다. *)
 
-let load_com t image = Dos_dos.load_com t image
+let load_com t image =
+  t.input_continuations <- [];
+  Dos_dos.load_com t image
 
-let load_exe t image = Dos_dos.load_exe t image
+let load_exe t image =
+  Dos_dos.load_exe t image;
+  t.input_continuations <- []
 
 (* ---------- 파일 마운트 ---------- *)
 
@@ -125,8 +158,15 @@ let mounted_names t =
 
 (* ---------- 실행 ---------- *)
 
-let step t =
-  if t.exited then 2
+type step_result =
+  | Instruction of int
+  | Waiting_for_input of int
+  | Service_completed of int
+  | Halted of int
+  | Exited
+
+let step_result t =
+  if t.exited then Exited
   else begin
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
     let interval = Dos_ports.cycles_per_tick t.ports in
@@ -145,8 +185,40 @@ let step t =
       Cpu86.wake t.cpu;
       ignore (deliver_ivt t 8)
     end;
-    Cpu86.step t.cpu
+    match t.input_continuations with
+    | wait :: rest
+      when Cpu86.seg t.cpu 1 = wait.return_cs && Cpu86.dump_ip t.cpu = wait.return_ip
+           && Cpu86.seg t.cpu 2 = wait.return_ss && Cpu86.reg16 t.cpu 4 = wait.return_sp ->
+      let result = match wait.request with Bios_key -> Dos_bios.read_key t in
+      (match result with
+       | Completed ->
+         t.input_continuations <- rest;
+         Cpu86.set_flags t.cpu
+           ((Cpu86.flags t.cpu land lnot service_control_mask) lor wait.return_control_flags);
+         finish_service_return t wait.service_return;
+         (* Cpu86 normally delivers the single-step trap after an INT hook
+            returns. A suspended hook deferred that boundary; do not execute
+            the caller's next opcode before delivering its pending trap. *)
+         if wait.return_control_flags land Cpu86.f_trap <> 0 then
+           ignore (deliver_ivt t 1);
+         Service_completed (Cpu86.idle t.cpu)
+       | Control_transferred ->
+         t.input_continuations <- rest;
+         Service_completed (Cpu86.idle t.cpu)
+       | Awaiting_input request ->
+         t.input_continuations <- { wait with request } :: rest;
+         Waiting_for_input (Cpu86.idle t.cpu))
+    | _ ->
+      let was_halted = Cpu86.halted t.cpu in
+      let cycles = Cpu86.step t.cpu in
+      if was_halted then Halted cycles else Instruction cycles
   end
+
+let step t =
+  match step_result t with
+  | Instruction cycles | Waiting_for_input cycles | Service_completed cycles
+  | Halted cycles -> cycles
+  | Exited -> 2
 
 let exited t = t.exited
 let exit_code t = t.exit_code
@@ -159,14 +231,29 @@ let run t ~max_steps =
     incr n
   done
 
+type stop_reason = Program_exited | Stop_requested | Budget_exhausted
+
+type run_report = {
+  machine_steps : int;
+  instructions : int;
+  elapsed_cycles : int;
+  stop_reason : stop_reason;
+}
+
 let run_until t ~max_steps ~stop =
-  let n = ref 0 and stopped = ref false in
+  let n = ref 0 and instructions = ref 0 and stopped = ref false in
+  let start_cycles = Cpu86.cycles t.cpu in
   while (not t.exited) && (not !stopped) && !n < max_steps do
-    ignore (step t);
+    (match step_result t with
+     | Instruction _ -> incr instructions
+     | Waiting_for_input _ | Service_completed _ | Halted _ | Exited -> ());
     incr n;
     if stop t then stopped := true
   done;
-  !n
+  { machine_steps = !n; instructions = !instructions;
+    elapsed_cycles = Cpu86.cycles t.cpu - start_cycles;
+    stop_reason = if t.exited then Program_exited
+      else if !stopped then Stop_requested else Budget_exhausted }
 
 (* ---------- 키 ---------- *)
 

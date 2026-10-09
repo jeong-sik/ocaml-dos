@@ -288,7 +288,7 @@ let test_screen_digest_follows_the_screen () =
   let written = Dos_machine.screen_digest m in
   check_true "글자가 찍히면 지문이 바뀐다" (written <> blank);
   (* 프로그램은 이제 제자리를 돌 뿐이다 — 화면이 안 변하니 지문도 같다 *)
-  ignore (Dos_machine.run_until m ~max_steps:200_000 ~stop:(fun _ -> false) : int);
+  ignore (Dos_machine.run_until m ~max_steps:200_000 ~stop:(fun _ -> false));
   check "화면이 안 변하면 지문도 같다" (Dos_machine.screen_digest m) written
 
 let test_input_requests_count_empty_reads () =

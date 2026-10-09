@@ -17,8 +17,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    4: the mouse carries its INT 33h AX=0x0C registration (mask, segment,
    offset) after dx/dy, so a restored machine keeps calling the handler
    the guest registered. Snapshots of format 3 are refused; only the
-   current format is read. *)
-let format_version = 4
+   current format is read.
+   5: suspended BIOS input services carry their return boundary, and both
+   input and EXEC carry their owned ROM service return frame. *)
+let format_version = 5
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -76,6 +78,15 @@ let check_consistency t =
         | Some pages -> p < Array.length pages
         | None -> false)
   in
+  let return_ok = function
+    | Direct_return -> true
+    | Interrupt_return { status_mask; _ } ->
+      status_mask land lnot (Cpu86.f_carry lor Cpu86.f_zero) = 0
+  in
+  let input_ok wait =
+    wait.return_control_flags land lnot (Cpu86.f_interrupt lor Cpu86.f_trap) = 0
+    && return_ok wait.service_return
+  in
   match bad_page with
   | Some h -> Error (Printf.sprintf "EMS handle %d has a page that is not 0 or %d bytes" h
                        Dos_ems.page_bytes)
@@ -83,6 +94,10 @@ let check_consistency t =
     if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
     else if not (Array.for_all mapped_ok t.ems_mapped) then
       Error "an EMS frame page maps a page that does not exist"
+    else if not (List.for_all input_ok t.input_continuations) then
+      Error "an input continuation has invalid flag masks"
+    else if not (List.for_all (fun frame -> return_ok frame.parent_service_return) t.exec_frames) then
+      Error "an EXEC return has an invalid flag mask"
     else Ok ()
 
 (* ---------- writing ---------- *)
@@ -97,6 +112,21 @@ let put_list w ~what put l =
 
 let put_pairs w ~what ~a ~b l =
   put_list w ~what (fun (x, y) -> C.put w ~what a x; C.put w ~what b y) l
+
+let put_service_return w = function
+  | Direct_return -> C.put_bool w false
+  | Interrupt_return { frame_ss; frame_sp; status_mask } ->
+    C.put_bool w true;
+    List.iter (C.put w ~what:"service return frame" C.word) [frame_ss; frame_sp; status_mask]
+
+let put_input_continuation w wait =
+  let { request = Bios_key; return_cs; return_ip; return_ss; return_sp;
+        return_control_flags; service_return } = wait in
+  C.put w ~what:"input request" (C.range 0 0) 0;
+  List.iter (C.put w ~what:"input return boundary" C.word)
+    [return_cs; return_ip; return_ss; return_sp];
+  C.put w ~what:"input return control flags" C.word return_control_flags;
+  put_service_return w service_return
 
 (* Handle records are shared two ways. Dup (AH=45h/46h) files one whole
    record under two numbers, position included, and an EXEC frame keeps
@@ -152,7 +182,7 @@ let put_handle w (h, buffer_idx) =
   C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
-  let { parent; parent_psp; parent_dta; parent_free_base; parent_free_top;
+  let { parent; parent_service_return; parent_psp; parent_dta; parent_free_base; parent_free_top;
         parent_blocks; parent_handles = _ (* as pool indexes: [handles] *) } = f
   in
   let { snap_regs; snap_segs; snap_ip; snap_flags } = parent in
@@ -160,6 +190,7 @@ let put_frame w f handles =
   C.put_int_array w ~what:"frame segments" reg snap_segs;
   C.put w ~what:"frame ip" reg snap_ip;
   C.put w ~what:"frame flags" reg snap_flags;
+  put_service_return w parent_service_return;
   C.put w ~what:"parent psp" C.word parent_psp;
   C.put w ~what:"parent dta" C.physical parent_dta;
   C.put w ~what:"parent free base" C.word parent_free_base;
@@ -173,7 +204,7 @@ let put_frame w f handles =
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; kbd_requests; last_tick; pending_irq0; free_base;
+        ext_scan_pending; input_continuations; kbd_requests; last_tick; pending_irq0; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
@@ -211,6 +242,7 @@ let write_payload w t =
   put "psp" C.word psp_seg;
   C.put_bool w kbd_wait;
   put "pending extended scan" C.byte ext_scan_pending;
+  put_list w ~what:"input continuation" (put_input_continuation w) input_continuations;
   put "keyboard requests" C.count kbd_requests;
   put "last tick" C.count last_tick;
   C.put_bool w pending_irq0;
@@ -285,6 +317,15 @@ let get_int_array r ~what ~len rng =
   C.fill_int_array r ~what rng a;
   a
 
+let get_service_return r =
+  if not (C.get_bool r) then Direct_return
+  else
+    let get () = C.get r ~what:"service return frame" C.word in
+    let frame_ss = get () in
+    let frame_sp = get () in
+    let status_mask = get () in
+    Interrupt_return { frame_ss; frame_sp; status_mask }
+
 let read_payload r =
   (* A fresh machine brings the closures (memory, ports, the interrupt hook)
      and the containers; everything else is overwritten from the bytes. *)
@@ -341,6 +382,17 @@ let read_payload r =
   t.psp_seg <- get "psp" C.word;
   t.kbd_wait <- C.get_bool r;
   t.ext_scan_pending <- get "pending extended scan" C.byte;
+  t.input_continuations <-
+    get_list r ~what:"input continuation" (fun () ->
+        ignore (get "input request" (C.range 0 0));
+        let return_cs = get "input return boundary" C.word in
+        let return_ip = get "input return boundary" C.word in
+        let return_ss = get "input return boundary" C.word in
+        let return_sp = get "input return boundary" C.word in
+        let return_control_flags = get "input return control flags" C.word in
+        let service_return = get_service_return r in
+        { request = Bios_key; return_cs; return_ip; return_ss; return_sp;
+          return_control_flags; service_return });
   t.kbd_requests <- get "keyboard requests" C.count;
   t.last_tick <- get "last tick" C.count;
   t.pending_irq0 <- C.get_bool r;
@@ -356,6 +408,7 @@ let read_payload r =
         let snap_segs = get_int_array r ~what:"frame segments" ~len:4 reg in
         let snap_ip = get "frame ip" reg in
         let snap_flags = get "frame flags" reg in
+        let parent_service_return = get_service_return r in
         let parent_psp = get "parent psp" C.word in
         let parent_dta = get "parent dta" C.physical in
         let parent_free_base = get "parent free base" C.word in
@@ -365,6 +418,7 @@ let read_payload r =
           resolve (get_pairs r ~what:"parent handle" ~a:handle_number ~b:C.count)
         in
         { parent = { snap_regs; snap_segs; snap_ip; snap_flags };
+          parent_service_return;
           parent_psp; parent_dta; parent_free_base; parent_free_top;
           parent_blocks; parent_handles });
   t.last_child_code <- get "last child code" C.byte;

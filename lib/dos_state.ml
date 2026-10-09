@@ -65,14 +65,36 @@ type cpu_snapshot = {
   snap_flags : int;                       (* Cpu86.flags 합성 값 *)
 }
 
+type service_return =
+  | Direct_return
+  | Interrupt_return of { frame_ss : int; frame_sp : int; status_mask : int }
+
 type exec_frame = {
   parent : cpu_snapshot;
+  parent_service_return : service_return;
   parent_psp : int;
   parent_dta : int;
   parent_free_base : int;
   parent_free_top : int;
   parent_blocks : (int * int) list;
   parent_handles : (int * handle) list;   (** 자식 종료 시 이 목록 밖의 핸들을 닫는다 *)
+}
+
+(* A suspended host service is plain data, including its exact return
+   boundary. IRQ handlers can run above that boundary, and may themselves
+   suspend, without letting the original caller execute its next opcode. *)
+type input_request = Bios_key
+
+type service_result = Completed | Control_transferred | Awaiting_input of input_request
+
+type input_continuation = {
+  request : input_request;
+  return_cs : int;
+  return_ip : int;
+  return_ss : int;
+  return_sp : int;
+  return_control_flags : int;  (* caller IF/TF, before the service's wait loop *)
+  service_return : service_return;
 }
 
 type t = {
@@ -94,6 +116,7 @@ type t = {
   mutable psp_seg : int;
   mutable kbd_wait : bool;                    (** 키를 기다리다 굶었다 *)
   mutable ext_scan_pending : int;             (** INT 21h 바이트 읽기용 확장키 스캔 대기 *)
+  mutable input_continuations : input_continuation list;
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
   mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable pending_irq0 : bool;                (** IF 가 꺼져 못 넣은 틱 *)
@@ -137,6 +160,15 @@ let wr16 t a v = wr8 t a v; wr8 t (a + 1) (v lsr 8)
    is therefore a 20-bit physical address. *)
 let phys_mask = 0xfffff
 let physical seg off = ((seg lsl 4) + off) land phys_mask
+
+let finish_service_return t = function
+  | Direct_return -> ()
+  | Interrupt_return { frame_ss; frame_sp; status_mask } ->
+    let addr n = physical frame_ss ((frame_sp + n) land 0xffff) in
+    let saved = rd8 t (addr 4) lor (rd8 t (addr 5) lsl 8) in
+    let flags = (saved land lnot status_mask) lor (Cpu86.flags t.cpu land status_mask) in
+    wr8 t (addr 4) flags;
+    wr8 t (addr 5) (flags lsr 8)
 
 let seg_off t sreg reg = physical (Cpu86.seg t.cpu sreg) (Cpu86.reg16 t.cpu reg)
 

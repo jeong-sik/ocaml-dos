@@ -39,17 +39,41 @@ val mounted_names : t -> string list
 
 (** {1 실행} *)
 
+type step_result =
+  | Instruction of int
+  | Waiting_for_input of int
+  | Service_completed of int
+  | Halted of int
+  | Exited
+(** Cycles used, distinguished from a completed guest instruction. *)
+
+val step_result : t -> step_result
+
 val step : t -> int
-(** 한 명령. 타이머 틱이 찼고 인터럽트가 열려 있으면 그 전에 IRQ0 을
-    넣는다. 종료 후에는 무해하게 2 를 돌려준다. *)
+(** One guest instruction, or an idle quantum while a host input service
+    waits. The caller's next instruction cannot run until that service
+    completes. IRQ0 handlers still run and return to the suspended boundary.
+    Returns the cycles used; after exit, returns 2 without advancing. *)
 
 val run : t -> max_steps:int -> unit
 (** 종료·HLT·[max_steps] 중 먼저 오는 것까지. HLT 에서 멈추므로
-    타이머로 깨어나는 대기 루프를 계속 돌리려면 [run_until] 을 쓴다. *)
+    타이머로 깨어나는 대기 루프를 계속 돌리려면 [run_until] 을 쓴다.
+    [max_steps] includes input-service wait and completion quanta. *)
 
-val run_until : t -> max_steps:int -> stop:(t -> bool) -> int
-(** 종료·[stop]·[max_steps] 까지 돌리고 실행한 명령 수를 돌려준다.
-    HLT 는 멈춤 조건이 아니다 — 타이머 인터럽트가 깨운다. *)
+type stop_reason = Program_exited | Stop_requested | Budget_exhausted
+
+type run_report = {
+  machine_steps : int;
+  instructions : int;
+  elapsed_cycles : int;
+  stop_reason : stop_reason;
+}
+
+val run_until : t -> max_steps:int -> stop:(t -> bool) -> run_report
+(** Bounded execution with separate resource-budget consumption, completed
+    guest instructions, and elapsed cycles. Every idle quantum consumes the
+    machine-step budget, so an empty blocking read cannot run indefinitely.
+    HLT is not a stop condition; timer interrupts may wake it. *)
 
 type key_plan = { word : int; not_before : int }
 (** [word] 는 (스캔 코드 lsl 8) lor ASCII. [not_before] 이전 스텝에는
@@ -62,9 +86,9 @@ val run_with_keys :
 (** 키를 미리 다 밀어 넣지 않고, 게스트가 입력을 기다리다 굶는 순간
     하나씩 넣는다. 미리 넣으면 앞선 메뉴의 "아무 키나" 루프가 전부 먹어
     치운다. 어떤 상태가 된 다음에 넣어야 하는 키는 [not_before] 로
-    묶는다. 실행한 명령 수를 돌려준다.
+    묶는다. 대기 시간을 포함한 machine-step budget 소비량을 돌려준다.
 
-    [on_step] 은 명령마다, [on_key] 는 키를 넣을 때마다 불린다 — 추적
+    [on_step] 은 machine step마다, [on_key] 는 키를 넣을 때마다 불린다 — 추적
     출력을 붙이는 자리다. *)
 
 val exited : t -> bool
@@ -110,8 +134,8 @@ val input_requests : t -> int
     를 알려면 앞뒤로 이 값을 재야 한다. *)
 
 val kbd_waiting : t -> bool
-(** 직전 입력 요청이 빈 링으로 돌아갔다 — 실기라면 지금 블록 중이다.
-    하네스가 이걸 보고 키를 넣는다. *)
+(** The last keyboard read or poll found an empty ring. This observation
+    includes nonblocking polls; it does not itself suspend guest execution. *)
 
 val attach_mouse : t -> unit
 (** INT 33h 에 마우스가 있다고 답하게 한다. 이미 기본으로 장착돼 있다 —

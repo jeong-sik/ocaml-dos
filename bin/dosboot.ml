@@ -146,7 +146,7 @@ let () =
        "NAME=PATH  게스트에 파일 마운트 (INT 21h open 대상)");
       ("--save", Arg.String (fun m -> saves := m :: !saves),
        "NAME=PATH  끝난 뒤 게스트가 쓴 파일을 호스트로 꺼낸다");
-      ("--steps", Arg.Int (fun n -> steps := n), "N  최대 명령 수");
+      ("--steps", Arg.Int (fun n -> steps := n), "N  최대 machine step 수 (입력 대기·idle 포함)");
       ("--feed", Arg.Set_string feed,
        "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
       ("--feed-sync", Arg.Set_string feed_sync,

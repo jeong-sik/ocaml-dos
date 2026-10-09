@@ -392,17 +392,18 @@ let child_exit t ~code ~keep =
     restore_cpu t f.parent;
     (* EXEC 에서 돌아온 직후의 값 — AH=4Dh 로도 같은 코드를 읽는다 *)
     Cpu86.set_reg16 t.cpu 0 code;
-    set_cf t false
+    set_cf t false;
+    finish_service_return t f.parent_service_return
 
 (* INT 21h AH=4Bh AL=00 — 불러 실행하기. AL 01·03(불러만·오버레이) 은
    아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
-let exec_program t =
+let exec_program t ~return_to =
   let cpu = t.cpu in
   let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-  if Cpu86.reg8 cpu 0 <> 0x00 then fail t 1
+  if Cpu86.reg8 cpu 0 <> 0x00 then begin fail t 1; Completed end
   else
     match Hashtbl.find_opt t.host_files name with
-    | None -> fail t 2                         (* 파일이 없다 *)
+    | None -> fail t 2; Completed              (* 파일이 없다 *)
     | Some img_bytes ->
       let image = Bytes.to_string img_bytes in
       let is_mz =
@@ -413,7 +414,7 @@ let exec_program t =
          [Invalid_argument] 로 EXEC 호출 자체를 깨뜨린다. 그 앞에서
          DOS 오류 11(잘못된 형식)로 답하고 멈춘다 — 이 호출만 실패하고
          부모는 그대로 산다. *)
-      if is_mz && String.length image < 0x1C then fail t 11
+      if is_mz && String.length image < 0x1C then begin fail t 11; Completed end
       else
       (* 배치를 먼저 정한다 — 실패는 부모에게 즉시 돌아간다 *)
       let placement =
@@ -430,7 +431,7 @@ let exec_program t =
       (match placement with
        | None ->
          Cpu86.set_reg16 cpu 3 (largest_free t);
-         fail t 8                                (* 메모리가 모자란다 *)
+         fail t 8; Completed                    (* 메모리가 모자란다 *)
        | Some psp ->
          (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
          let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
@@ -441,6 +442,7 @@ let exec_program t =
          t.exec_frames <-
            {
              parent = snapshot_cpu t;
+             parent_service_return = return_to;
              parent_psp = t.psp_seg;
              parent_dta = t.dta;
              parent_free_base = t.free_base;
@@ -470,7 +472,8 @@ let exec_program t =
            wr8 t (cpsp + 0x81 + n) 0x0D
          end;
          copy_dword_into (cpsp + 0x5C) fcb1_seg fcb1_off 12;
-         copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12)
+         copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12;
+         Control_transferred)
 
 (* INT 27h — 옛 방식의 상주 종료. DX 는 '마지막 상주 바이트 다음
    오프셋' 이고 블록은 16바이트로 올림한 만큼(마지막 한 칸은 여유)을
@@ -607,12 +610,10 @@ let ext_read t =
 
 (* ---------- INT 21h ---------- *)
 
-let rec service t =
+let rec service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
   match ah with
-  | 0x00 -> child_exit t ~code:0 ~keep:None
-  | 0x4C -> child_exit t ~code:(Cpu86.reg8 cpu 0) ~keep:None
   | 0x4D ->
     (* 마지막 자식의 종료 코드 — AH 는 종료 사유, 정상 종료는 0 *)
     Cpu86.set_reg8 cpu 0 t.last_child_code;
@@ -696,7 +697,7 @@ let rec service t =
     (match sub_fn with
      | 0x01 | 0x06 | 0x07 | 0x08 | 0x0A ->
        Cpu86.set_reg8 cpu 4 sub_fn;
-       service t
+       service_immediate t
      | _ -> Cpu86.set_reg8 cpu 0 0)
   | 0x0D -> ()                              (* 디스크 리셋 *)
   | 0x0E -> Cpu86.set_reg8 cpu 0 (default_drive + 1)
@@ -937,10 +938,6 @@ let rec service t =
      | Ok () -> ok t
      | Error 9 -> fail t 9
      | Error avail -> Cpu86.set_reg16 cpu 3 (max 0 avail); fail t 8)
-  | 0x4B -> exec_program t
-  | 0x31 ->
-    (* 상주 종료 — DX 는 남길 크기(단락 수). 코드는 AL. *)
-    child_exit t ~code:(Cpu86.reg8 cpu 0) ~keep:(Some (Cpu86.reg16 cpu 2))
   | 0x4E ->
     let pattern = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
     let all = Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [] in
@@ -980,3 +977,13 @@ let rec service t =
   | _ -> ()
 
 let terminate t = child_exit t ~code:0 ~keep:None
+
+let service t ~return_to =
+  match Cpu86.reg8 t.cpu 4 with
+  | 0x4B -> exec_program t ~return_to
+  | 0x00 -> terminate t; Control_transferred
+  | 0x4C -> child_exit t ~code:(Cpu86.reg8 t.cpu 0) ~keep:None; Control_transferred
+  | 0x31 ->
+    child_exit t ~code:(Cpu86.reg8 t.cpu 0) ~keep:(Some (Cpu86.reg16 t.cpu 2));
+    Control_transferred
+  | _ -> service_immediate t; Completed
