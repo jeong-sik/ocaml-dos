@@ -571,8 +571,7 @@ let fcb_service t ah =
 
 (* ---------- 콘솔 입력 ---------- *)
 
-(* 실기는 키가 올 때까지 블록한다. 빈 링이면 굶주림을 올리고 0 을
-   돌려준다 — 하네스가 그걸 보고 키를 넣는다. *)
+(* An empty ring is absence, never a completed zero-valued input. *)
 let console_read t =
   if key_pending t then begin
     t.kbd_wait <- false;
@@ -595,6 +594,7 @@ let ext_read t =
   if t.ext_scan_pending <> 0 then begin
     let sc = t.ext_scan_pending in
     t.ext_scan_pending <- 0;
+    t.kbd_wait <- false;
     Some sc
   end
   else
@@ -608,9 +608,91 @@ let ext_read t =
       else Some a
     | None -> None
 
+type line_result = Line_complete of string | Line_waiting of line_input
+
+let echo_line_character t c =
+  if c = 0x09 then begin
+    let col, _ = get_cursor t in
+    let width = 8 - (col mod 8) in
+    for _ = 1 to width do put_char t 0x20 0x07 done;
+    width
+  end
+  else if c < 0x20 then begin
+    put_char t 0x5e 0x07;
+    put_char t (c + 0x40) 0x07;
+    2
+  end
+  else begin put_char t c 0x07; 1 end
+
+let erase_line_character t width =
+  for _ = 1 to width do
+    let col, row = get_cursor t in
+    let col, row = if col > 0 then col - 1, row
+      else if row > 0 then cols t - 1, row - 1 else 0, 0 in
+    write_cell t row col 0x0720;
+    set_cursor t col row
+  done
+
+let rec read_line t ~capacity line =
+  match console_read t with
+  | None -> Line_waiting line
+  | Some w ->
+    let c = ascii_of_key w in
+    match c, line.echo_widths with
+    | 0x0d, _ -> put_char t 0x0d 0x07; Line_complete line.text
+    | (0x08 | 0x7f), width :: widths ->
+      erase_line_character t width;
+      read_line t ~capacity
+        { text = String.sub line.text 0 (String.length line.text - 1); echo_widths = widths }
+    | (0x00 | 0x08 | 0x7f), _ -> read_line t ~capacity line
+    | 0x0a, _ ->
+      if line.text <> "" then begin put_char t 0x0d 0x07; put_char t 0x0a 0x07 end;
+      read_line t ~capacity line
+    | _, _ when String.length line.text >= capacity - 1 ->
+      put_char t 0x07 0x07; (* Full buffers still wait for CR or an editing key. *)
+      read_line t ~capacity line
+    | _, _ ->
+      let width = echo_line_character t c in
+      read_line t ~capacity
+        { text = line.text ^ String.make 1 (Char.chr c); echo_widths = width :: line.echo_widths }
+
+let return_console_bytes t ~destination ~length =
+  let count = min length (String.length t.console_pending) in
+  String.iteri (fun i c -> wr8 t (destination + i) (Char.code c))
+    (String.sub t.console_pending 0 count);
+  t.console_pending <- String.sub t.console_pending count (String.length t.console_pending - count);
+  Cpu86.set_reg16 t.cpu 0 count;
+  ok t;
+  Completed
+
+let resume_input t request =
+  match request with
+  | Read_character { echo } ->
+    (match ext_read t with
+     | None -> Awaiting_input (Dos_input request)
+     | Some c ->
+       Cpu86.set_reg8 t.cpu 0 c;
+       if echo && c <> 0 then put_char t c 0x07;
+       Completed)
+  | Read_buffered_line ({ base; capacity; line } as input) ->
+    (match read_line t ~capacity line with
+     | Line_waiting line -> Awaiting_input (Dos_input (Read_buffered_line { input with line }))
+     | Line_complete text ->
+       wr8 t (base + 1) (String.length text);
+       String.iteri (fun i c -> wr8 t (base + 2 + i) (Char.code c)) (text ^ "\r");
+       Completed)
+  | Read_console_line ({ destination; length; line } as input) ->
+    (match read_line t ~capacity:console_line_capacity line with
+     | Line_waiting line -> Awaiting_input (Dos_input (Read_console_line { input with line }))
+     | Line_complete text ->
+       put_char t 0x0a 0x07;
+       t.console_pending <-
+         if String.length text > 0 && text.[0] = '\026' then "" else text ^ "\r\n";
+       return_console_bytes t ~destination ~length)
+
 (* ---------- INT 21h ---------- *)
 
-let rec service_immediate t =
+let service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
   match ah with
@@ -619,16 +701,6 @@ let rec service_immediate t =
     Cpu86.set_reg8 cpu 0 t.last_child_code;
     Cpu86.set_reg8 cpu 4 0;
     ok t
-  | 0x01 ->
-    (match ext_read t with
-     | Some c ->
-       Cpu86.set_reg8 cpu 0 c;
-       if c <> 0 then put_char t c 0x07
-     | None -> Cpu86.set_reg8 cpu 0 0)
-  | 0x07 | 0x08 ->
-    (match ext_read t with
-     | Some c -> Cpu86.set_reg8 cpu 0 c
-     | None -> Cpu86.set_reg8 cpu 0 0)
   | 0x02 -> put_char t (Cpu86.reg8 cpu 2) 0x07
   | 0x06 ->
     (* 직접 콘솔 입출력. DL=FF 면 읽기(ZF 로 있고없음), 아니면 쓰기.
@@ -636,14 +708,14 @@ let rec service_immediate t =
        화면에 아무 흔적 없이 죽는다(실측: "Runtime error 006"). *)
     let dl = Cpu86.reg8 cpu 2 in
     if dl = 0xFF then
-      if key_pending t then begin
-        Cpu86.set_reg8 cpu 0 (ascii_of_key (pop_key t));
-        Cpu86.set_flags cpu (Cpu86.flags cpu land lnot Cpu86.f_zero)
-      end
-      else begin
+      (match ext_read t with
+       | Some c ->
+         Cpu86.set_reg8 cpu 0 c;
+         Cpu86.set_flags cpu (Cpu86.flags cpu land lnot Cpu86.f_zero)
+       | None ->
         Cpu86.set_reg8 cpu 0 0;
         Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero)
-      end
+      )
     else put_char t dl 0x07
   | 0x09 ->
     (* '$' 로 끝나는 문자열. 길이를 안 주는 대신 끝 표시를 찾는다. *)
@@ -654,51 +726,10 @@ let rec service_immediate t =
       if c = Char.code '$' then stop := true
       else begin put_char t c 0x07; incr i end
     done
-  | 0x0A ->
-    (* 줄 입력: DS:DX 의 0 번째 바이트가 최대 길이, 1 번째가 실제 길이,
-       2 번째부터 글자. CR 을 만나면 끝난다. 키가 없으면 굶주림만
-       올리고 돌아간다 — 하네스가 키를 채우면 게스트가 다시 부른다. *)
-    let base = seg_off t 3 2 in
-    let limit = rd8 t base in
-    let n = ref (rd8 t (base + 1)) in
-    let stop = ref false in
-    while (not !stop) && !n < limit - 1 do
-      match console_read t with
-      | None -> stop := true
-      | Some w ->
-        let c = ascii_of_key w in
-        if c = 0x0D then begin
-          wr8 t (base + 2 + !n) 0x0D;
-          wr8 t (base + 1) !n;
-          put_char t 0x0D 0x07;
-          put_char t 0x0A 0x07;
-          stop := true;
-          n := limit                       (* 끝났다는 표시 *)
-        end
-        else if c = 0x08 then begin
-          if !n > 0 then begin decr n; put_char t 0x08 0x07 end
-        end
-        else if c <> 0 then begin
-          wr8 t (base + 2 + !n) c;
-          incr n;
-          put_char t c 0x07
-        end
-    done;
-    if !n < limit then wr8 t (base + 1) !n
   | 0x0B ->
-    Cpu86.set_reg8 cpu 0 (if key_pending t then 0xFF else 0x00);
-    if not (key_pending t) then starve t
-  | 0x0C ->
-    (* 버퍼를 비운 뒤 AL 이 가리키는 입력 기능을 실제로 부른다. 비우기만
-       하고 끝내면 게스트는 오지 않을 글자를 기다린다. AL 이 입력 기능이
-       아니면 비우기만 한다(실기와 같다). *)
-    let sub_fn = Cpu86.reg8 cpu 0 in
-    while key_pending t do ignore (pop_key t) done;
-    (match sub_fn with
-     | 0x01 | 0x06 | 0x07 | 0x08 | 0x0A ->
-       Cpu86.set_reg8 cpu 4 sub_fn;
-       service_immediate t
-     | _ -> Cpu86.set_reg8 cpu 0 0)
+    let available = t.ext_scan_pending <> 0 || key_pending t in
+    Cpu86.set_reg8 cpu 0 (if available then 0xFF else 0x00);
+    if available then t.kbd_wait <- false else starve t
   | 0x0D -> ()                              (* 디스크 리셋 *)
   | 0x0E -> Cpu86.set_reg8 cpu 0 (default_drive + 1)
   | 0x19 -> Cpu86.set_reg8 cpu 0 default_drive
@@ -803,29 +834,7 @@ let rec service_immediate t =
     let h = Cpu86.reg16 cpu 3 in
     let want = Cpu86.reg16 cpu 1 in
     let dst = seg_off t 3 2 in
-    if h = 0 then begin
-      (* stdin: 키 링에서 CR 까지. 키가 없으면 굶주림을 올린다. *)
-      let n = ref 0 and stop = ref false in
-      while (not !stop) && !n < want do
-        match console_read t with
-        | None -> stop := true
-        | Some w ->
-          let c = ascii_of_key w in
-          if c = 0 then ()
-          else begin
-            wr8 t (dst + !n) c;
-            incr n;
-            if c = 0x0D && !n < want then begin
-              wr8 t (dst + !n) 0x0A; incr n; stop := true
-            end
-          end
-      done;
-      Cpu86.set_reg16 cpu 0 !n;
-      ok t
-    end
-    else if is_console h then begin Cpu86.set_reg16 cpu 0 0; ok t end
-    else
-      (match Hashtbl.find_opt t.handles h with
+    (match Hashtbl.find_opt t.handles h with
        | None -> fail t 6
        | Some hd ->
          let take = min want (max 0 (Bytes.length !(hd.data) - hd.pos)) in
@@ -978,8 +987,27 @@ let rec service_immediate t =
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
-let service t ~return_to =
+let rec service t ~return_to =
   match Cpu86.reg8 t.cpu 4 with
+  | (0x01 | 0x07 | 0x08) as ah -> resume_input t (Read_character { echo = ah = 0x01 })
+  | 0x0A ->
+    let base = seg_off t 3 2 in
+    let capacity = rd8 t base in
+    if capacity = 0 then Completed
+    else resume_input t (Read_buffered_line { base; capacity; line = { text = ""; echo_widths = [] } })
+  | 0x0C ->
+    let sub_fn = Cpu86.reg8 t.cpu 0 in
+    while key_pending t do ignore (pop_key t) done;
+    t.ext_scan_pending <- 0;
+    (match sub_fn with
+     | 0x01 | 0x06 | 0x07 | 0x08 | 0x0A ->
+       Cpu86.set_reg8 t.cpu 4 sub_fn;
+       service t ~return_to
+     | _ -> Cpu86.set_reg8 t.cpu 0 0; Completed)
+  | 0x3F when is_console (Cpu86.reg16 t.cpu 3) ->
+    let destination = seg_off t 3 2 and length = Cpu86.reg16 t.cpu 1 in
+    if length = 0 || t.console_pending <> "" then return_console_bytes t ~destination ~length
+    else resume_input t (Read_console_line { destination; length; line = { text = ""; echo_widths = [] } })
   | 0x4B -> exec_program t ~return_to
   | 0x00 -> terminate t; Control_transferred
   | 0x4C -> child_exit t ~code:(Cpu86.reg8 t.cpu 0) ~keep:None; Control_transferred
