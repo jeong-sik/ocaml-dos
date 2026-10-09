@@ -83,7 +83,19 @@ type exec_frame = {
 (* A suspended host service is plain data, including its exact return
    boundary. IRQ handlers can run above that boundary, and may themselves
    suspend, without letting the original caller execute its next opcode. *)
-type input_request = Bios_key
+type line_input = { text : string; echo_widths : int list }
+
+(* CON's cooked line buffer includes the terminal CR. The DOS-compatible
+   LINEBUFSIZECON contract is 128 bytes:
+   https://github.com/FDOS/kernel/blob/master/hdr/kbd.h *)
+let console_line_capacity = 128
+
+type dos_input_request =
+  | Read_character of { echo : bool }
+  | Read_buffered_line of { base : int; capacity : int; line : line_input }
+  | Read_console_line of { destination : int; length : int; line : line_input }
+
+type input_request = Bios_key | Dos_input of dos_input_request
 
 type service_result = Completed | Control_transferred | Awaiting_input of input_request
 
@@ -117,6 +129,7 @@ type t = {
   mutable kbd_wait : bool;                    (** 키를 기다리다 굶었다 *)
   mutable ext_scan_pending : int;             (** INT 21h 바이트 읽기용 확장키 스캔 대기 *)
   mutable input_continuations : input_continuation list;
+  mutable console_pending : string;  (* cooked AH=3F line bytes not yet returned *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
   mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable pending_irq0 : bool;                (** IF 가 꺼져 못 넣은 틱 *)

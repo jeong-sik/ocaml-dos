@@ -12,6 +12,11 @@ val service : Dos_state.t -> return_to:Dos_state.service_return -> Dos_state.ser
     child returns; terminating or starting a process transfers control
     instead of completing the current interrupt frame. *)
 
+val resume_input : Dos_state.t -> Dos_state.dos_input_request -> Dos_state.service_result
+(** Resume the captured request without rereading the function selector or
+    repeating its initial flush. Partial line contents and prior echo are
+    retained in the request. *)
+
 val terminate : Dos_state.t -> unit
 (** INT 20h — RET 로 돌아온 프로그램의 종료. *)
 
