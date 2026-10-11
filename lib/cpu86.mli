@@ -50,6 +50,11 @@ val step : t -> int
     포함). M0 은 기본 사이클표의 근삿값을 쓴다. HLT 상태면 아무
     것도 하지 않고 2 를 반환한다. *)
 
+val idle : t -> int
+(** Advance the clock by one two-cycle idle quantum without fetching an
+    instruction or changing HLT. A machine uses this while a host service
+    is suspended; hardware interrupts can still run guest handlers. *)
+
 (** {1 레지스터 접근 — 하네스 판정·시드용}
 
     레지스터 번호는 8086 인코딩 그대로: 16비트 0..7 = AX CX DX BX SP

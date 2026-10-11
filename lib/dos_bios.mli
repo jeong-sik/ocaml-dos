@@ -13,6 +13,14 @@ val install : Dos_state.t -> unit
 val ivt_is_own_stub : Dos_state.t -> int -> bool
 (** 그 벡터가 아직 우리 스텁을 가리키는가 — 게스트가 가로챘으면 false. *)
 
-val service : Dos_state.t -> int -> unit
+val private_service_vector : Dos_state.t -> int -> int option
+(** The real vector only when the private INT was issued by its ROM stub.
+    This entry invokes the host service without consulting a hooked IVT. *)
+
+val read_key : Dos_state.t -> Dos_state.service_result
+(** Complete a blocking BIOS key read, or retain the request without
+    changing AX when the ring is empty. *)
+
+val service : Dos_state.t -> int -> Dos_state.service_result
 (** 벡터 번호에 맞는 BIOS 서비스를 실행한다. 모르는 벡터는 아무 일도
     하지 않는다(실기의 IRET 스텁과 같다). *)

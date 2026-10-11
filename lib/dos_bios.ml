@@ -140,6 +140,14 @@ let ivt_is_own_stub t v =
       && rd16 t ((v * 4) + 2) = rom_seg)
     t.stubs
 
+let private_service_vector t raw =
+  List.find_map
+    (fun (v, off) ->
+      if raw = private_vector v && Cpu86.seg t.cpu 1 = rom_seg
+         && Cpu86.dump_ip t.cpu = off + 2
+      then Some v else None)
+    t.stubs
+
 let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
@@ -304,21 +312,20 @@ let video t =
 
 (* ---------- INT 16h 키보드 ---------- *)
 
+let read_key t =
+  if key_pending t then begin
+    t.kbd_wait <- false;
+    Cpu86.set_reg16 t.cpu 0 (pop_key t);
+    Completed
+  end
+  else begin
+    starve t;
+    Awaiting_input Bios_key
+  end
+
 let keyboard t =
   let cpu = t.cpu in
   match Cpu86.reg8 cpu 4 with
-  | 0x00 | 0x10 ->
-    (* 실기는 키가 올 때까지 블록한다. 빈 링은 하네스가 볼 수 있는
-       '굶주림' 으로 알린다 — Turbo Pascal 의 ReadKey 는 AX=0 을 Break
-       신호로 읽어 무한 재시도에 빠진다(실측). *)
-    if key_pending t then begin
-      t.kbd_wait <- false;
-      Cpu86.set_reg16 cpu 0 (pop_key t)
-    end
-    else begin
-      starve t;
-      Cpu86.set_reg16 cpu 0 0
-    end
   | 0x01 | 0x11 ->
     if key_pending t then begin
       t.kbd_wait <- false;
@@ -411,11 +418,16 @@ let mouse t =
 (* ---------- 묶음 ---------- *)
 
 let service t vec =
-  match vec with
+  if vec = 0x16 && (Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10)
+  then read_key t
+  else begin
+  (match vec with
   | 0x10 -> video t
   | 0x11 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410)
   | 0x12 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413)
   | 0x16 -> keyboard t
   | 0x1A -> clock t
   | 0x33 -> mouse t
-  | _ -> ()
+  | _ -> ());
+  Completed
+  end

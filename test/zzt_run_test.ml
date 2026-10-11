@@ -118,7 +118,7 @@ let press_and_settle m word ~budget =
       Dos_machine.run_until m ~max_steps:(min chunk_steps (budget - !ran))
         ~stop:(fun _ -> false)
     in
-    ran := !ran + n;
+    ran := !ran + n.machine_steps;
     let asked = Dos_machine.input_requests m > before in
     let now = Dos_machine.screen_digest m in
     if asked && now = !prev then settled := true;
@@ -145,7 +145,7 @@ let test_lane_rhythm dir =
       ~stop:(fun mm -> Dos_machine.kbd_waiting mm)
   in
   check_true "부팅이 예산을 다 쓰지 않고 키를 묻는다"
-    (booted < budget && Dos_machine.kbd_waiting m);
+    (booted.machine_steps < budget && Dos_machine.kbd_waiting m);
   List.iter
     (fun w -> ignore (press_and_settle m w ~budget : int))
     (intro_keys @ [ key_right ]);

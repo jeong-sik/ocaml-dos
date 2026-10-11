@@ -1,7 +1,9 @@
 (** Whole-machine snapshot: the CPU, 1MB of RAM, the video planes and
     registers, the device ports, the DOS process and file state (mounted
     files, open handles with their positions, EXEC frames, memory blocks),
-    EMS pages and the mouse — as bytes a fresh process can resume from.
+    EMS pages, the mouse, and suspended input services (including their
+    return boundaries beneath IRQ handlers) — as bytes a fresh process can
+    resume from.
 
     The format is explicit, not [Marshal]: the machine holds closures (the
     CPU's memory and port callbacks, the interrupt hook), and those are
