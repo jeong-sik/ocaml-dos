@@ -41,7 +41,9 @@ let host_service t ~return_to v =
   | _ -> Completed
 
 let service_status_mask t v =
-  match v, Cpu86.reg8 t.cpu 4 with
+  let ah = Cpu86.reg8 t.cpu 4 in
+  let fn = if v = 0x21 && ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
+  match v, fn with
   | 0x16, (0x01 | 0x11) -> Cpu86.f_zero
   | 0x21, 0x06 -> Cpu86.f_zero
   | 0x21, _ -> Cpu86.f_carry
@@ -93,7 +95,7 @@ let create () =
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
       kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
-      ext_scan_pending = 0; input_continuations = [];
+      ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
@@ -137,11 +139,13 @@ let create () =
 
 let load_com t image =
   t.input_continuations <- [];
+  t.console_pending <- "";
   Dos_dos.load_com t image
 
 let load_exe t image =
   Dos_dos.load_exe t image;
-  t.input_continuations <- []
+  t.input_continuations <- [];
+  t.console_pending <- ""
 
 (* ---------- 파일 마운트 ---------- *)
 
@@ -189,7 +193,10 @@ let step_result t =
     | wait :: rest
       when Cpu86.seg t.cpu 1 = wait.return_cs && Cpu86.dump_ip t.cpu = wait.return_ip
            && Cpu86.seg t.cpu 2 = wait.return_ss && Cpu86.reg16 t.cpu 4 = wait.return_sp ->
-      let result = match wait.request with Bios_key -> Dos_bios.read_key t in
+      let result = match wait.request with
+        | Bios_key -> Dos_bios.read_key t
+        | Dos_input request -> Dos_dos.resume_input t request
+      in
       (match result with
        | Completed ->
          t.input_continuations <- rest;
