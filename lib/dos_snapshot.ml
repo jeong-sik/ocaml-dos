@@ -19,8 +19,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    the guest registered. Snapshots of format 3 are refused; only the
    current format is read.
    5: suspended BIOS input services carry their return boundary, and both
-   input and EXEC carry their owned ROM service return frame. *)
-let format_version = 5
+   input and EXEC carry their owned ROM service return frame.
+   6: DOS byte/line continuations, partial echo widths, and remaining cooked
+   console bytes are carried explicitly. *)
+let format_version = 6
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -84,8 +86,19 @@ let check_consistency t =
       status_mask land lnot (Cpu86.f_carry lor Cpu86.f_zero) = 0
   in
   let input_ok wait =
+    let line_ok capacity line =
+      String.length line.text < capacity
+      && List.length line.echo_widths = String.length line.text
+      && List.for_all (fun width -> width >= 1 && width <= 8) line.echo_widths
+    in
+    let request_ok = match wait.request with
+      | Bios_key | Dos_input (Read_character _) -> true
+      | Dos_input (Read_buffered_line { capacity; line; _ }) -> line_ok capacity line
+      | Dos_input (Read_console_line { line; _ }) -> line_ok console_line_capacity line
+    in
     wait.return_control_flags land lnot (Cpu86.f_interrupt lor Cpu86.f_trap) = 0
     && return_ok wait.service_return
+    && request_ok
   in
   match bad_page with
   | Some h -> Error (Printf.sprintf "EMS handle %d has a page that is not 0 or %d bytes" h
@@ -95,9 +108,11 @@ let check_consistency t =
     else if not (Array.for_all mapped_ok t.ems_mapped) then
       Error "an EMS frame page maps a page that does not exist"
     else if not (List.for_all input_ok t.input_continuations) then
-      Error "an input continuation has invalid flag masks"
+      Error "an input continuation has inconsistent state"
     else if not (List.for_all (fun frame -> return_ok frame.parent_service_return) t.exec_frames) then
       Error "an EXEC return has an invalid flag mask"
+    else if String.length t.console_pending > console_line_capacity + 1 then
+      Error "pending console bytes exceed the cooked line buffer"
     else Ok ()
 
 (* ---------- writing ---------- *)
@@ -119,10 +134,31 @@ let put_service_return w = function
     C.put_bool w true;
     List.iter (C.put w ~what:"service return frame" C.word) [frame_ss; frame_sp; status_mask]
 
+let put_line_input w { text; echo_widths } =
+  C.put_string w text;
+  put_list w ~what:"input echo widths"
+    (C.put w ~what:"input echo width" (C.range 1 8)) echo_widths
+
+let put_input_request w request =
+  let tag n = C.put w ~what:"input request" (C.range 0 3) n in
+  match request with
+  | Bios_key -> tag 0
+  | Dos_input (Read_character { echo }) -> tag 1; C.put_bool w echo
+  | Dos_input (Read_buffered_line { base; capacity; line }) ->
+    tag 2;
+    C.put w ~what:"input buffer address" C.physical base;
+    C.put w ~what:"input buffer capacity" (C.range 1 255) capacity;
+    put_line_input w line
+  | Dos_input (Read_console_line { destination; length; line }) ->
+    tag 3;
+    C.put w ~what:"input buffer address" C.physical destination;
+    C.put w ~what:"console read length" (C.range 1 65535) length;
+    put_line_input w line
+
 let put_input_continuation w wait =
-  let { request = Bios_key; return_cs; return_ip; return_ss; return_sp;
+  let { request; return_cs; return_ip; return_ss; return_sp;
         return_control_flags; service_return } = wait in
-  C.put w ~what:"input request" (C.range 0 0) 0;
+  put_input_request w request;
   List.iter (C.put w ~what:"input return boundary" C.word)
     [return_cs; return_ip; return_ss; return_sp];
   C.put w ~what:"input return control flags" C.word return_control_flags;
@@ -204,7 +240,7 @@ let put_frame w f handles =
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; kbd_requests; last_tick; pending_irq0; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; pending_irq0; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
@@ -243,6 +279,7 @@ let write_payload w t =
   C.put_bool w kbd_wait;
   put "pending extended scan" C.byte ext_scan_pending;
   put_list w ~what:"input continuation" (put_input_continuation w) input_continuations;
+  C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
   put "last tick" C.count last_tick;
   C.put_bool w pending_irq0;
@@ -326,6 +363,28 @@ let get_service_return r =
     let status_mask = get () in
     Interrupt_return { frame_ss; frame_sp; status_mask }
 
+let get_line_input r =
+  let text = C.get_string r in
+  let echo_widths = get_list r ~what:"input echo widths"
+      (fun () -> C.get r ~what:"input echo width" (C.range 1 8)) in
+  { text; echo_widths }
+
+let get_input_request r =
+  match C.get r ~what:"input request" (C.range 0 3) with
+  | 0 -> Bios_key
+  | 1 -> Dos_input (Read_character { echo = C.get_bool r })
+  | 2 ->
+    let base = C.get r ~what:"input buffer address" C.physical in
+    let capacity = C.get r ~what:"input buffer capacity" (C.range 1 255) in
+    let line = get_line_input r in
+    Dos_input (Read_buffered_line { base; capacity; line })
+  | 3 ->
+    let destination = C.get r ~what:"input buffer address" C.physical in
+    let length = C.get r ~what:"console read length" (C.range 1 65535) in
+    let line = get_line_input r in
+    Dos_input (Read_console_line { destination; length; line })
+  | _ -> C.fail "invalid input request"
+
 let read_payload r =
   (* A fresh machine brings the closures (memory, ports, the interrupt hook)
      and the containers; everything else is overwritten from the bytes. *)
@@ -384,15 +443,16 @@ let read_payload r =
   t.ext_scan_pending <- get "pending extended scan" C.byte;
   t.input_continuations <-
     get_list r ~what:"input continuation" (fun () ->
-        ignore (get "input request" (C.range 0 0));
+        let request = get_input_request r in
         let return_cs = get "input return boundary" C.word in
         let return_ip = get "input return boundary" C.word in
         let return_ss = get "input return boundary" C.word in
         let return_sp = get "input return boundary" C.word in
         let return_control_flags = get "input return control flags" C.word in
         let service_return = get_service_return r in
-        { request = Bios_key; return_cs; return_ip; return_ss; return_sp;
+        { request; return_cs; return_ip; return_ss; return_sp;
           return_control_flags; service_return });
+  t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
   t.last_tick <- get "last tick" C.count;
   t.pending_irq0 <- C.get_bool r;

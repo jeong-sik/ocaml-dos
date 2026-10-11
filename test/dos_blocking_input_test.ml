@@ -186,6 +186,23 @@ let test_deferred_trap () =
   check "caller TF restored" (Cpu86.flags cpu land Cpu86.f_trap <> 0);
   check "debugger handled the completed INT once" (Dos_state.rd8 m 0x10300 = 1)
 
+let test_idle_clock_reaches_irq () =
+  let m = machine (bios_read 0 ^ store 0x200 ^ marker ^ exit) in
+  let tick_cycles = Dos_ports.cycles_per_tick m.Dos_state.ports in
+  (* Two-cycle idle quanta reach the PIT deadline within this machine-step
+     budget, with the remaining half available for the real ROM IRQ code. *)
+  let report = Dos_machine.run_until m ~max_steps:tick_cycles
+      ~stop:(fun current -> Dos_machine.tick_count current > 0) in
+  check "idle clock lets ROM IRQ0 update the timer" (report.stop_reason = Dos_machine.Stop_requested);
+  check "IRQ instructions count as actual guest work" (report.instructions > 2);
+  check "idle time remains distinct from instructions" (report.machine_steps > report.instructions);
+  check "elapsed cycles reached the PIT deadline" (report.elapsed_cycles >= tick_cycles);
+  check "timer IRQ did not unblock the caller" (not (Dos_machine.exited m) && read_word m 0x200 = 0);
+  let resumed = restore (save m) in
+  Dos_machine.push_key resumed 0x1051;
+  ignore (run resumed 100);
+  check "timer IRQ returns to restored wait" (Dos_machine.exited resumed && read_word resumed 0x200 = 0x1051)
+
 let () =
   List.iter test_bios_blocking [0x00; 0x10];
   test_polling ();
@@ -193,4 +210,5 @@ let () =
   test_old_vector_chain ();
   test_exec_return_frame ();
   test_deferred_trap ();
+  test_idle_clock_reaches_irq ();
   print_endline "blocking input: all passed"
