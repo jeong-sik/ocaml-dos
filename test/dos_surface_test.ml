@@ -212,10 +212,12 @@ let test_flush_then_input () =
        (fun _ -> mov_ax 0x0C08 ^ int_ 0x21 ^ store_ax scratch ^ quit) "");
   Dos_machine.type_string m "ab";
   Dos_machine.run m ~max_steps:100_000;
-  (* 버퍼를 비웠으니 뒤이은 읽기는 굶는다 — AL=0. 비우기만 했다면 AL 에
-     기능 번호 8 이 그대로 남는다. *)
-  check "AH=0C 가 하위 기능을 부른다" (peek m scratch) 0;
-  check_true "버퍼가 비었다" (Dos_machine.kbd_waiting m)
+  check_true "AH=0C 하위 읽기가 호출자를 막는다" (not (Dos_machine.exited m));
+  check_true "버퍼가 비었다" (Dos_machine.kbd_waiting m);
+  Dos_machine.type_string m "z";
+  Dos_machine.run m ~max_steps:100;
+  check "대기 재개는 새 키를 다시 비우지 않는다" (peek m scratch) (Char.code 'z');
+  check_true "키를 받은 호출자가 종료한다" (Dos_machine.exited m)
 
 (* dup 은 같은 열린 파일을 가리킨다 — 두 핸들이 위치를 나눠 쓴다. *)
 let test_dup_shares_position () =
