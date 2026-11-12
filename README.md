@@ -42,6 +42,19 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
 
 데이터셋이 없으면 이 스위트는 건너뛴다(CI 가 그렇다).
 
+`I80286` 은 Harris N80C286-12 에서 뽑은
+[SingleStepTests/80286](https://github.com/SingleStepTests/80286) 실모드
+327 파일, 147만 8천 케이스로 잰다. 형식은 JSON 이 아니라
+[MOO](https://github.com/dbalsom/moo) 라 `test/moo.ml` 이 읽는다. fail 은
+6 이고 사유는 `test/sst80286-baseline.txt` 에 있다: IVT 바이트가 빠진
+테스트 하나, SP=BP=FFFF 인 ENTER 하나, IDIV 바이트 몫 넘침 넷이다.
+
+```sh
+# 데이터셋을 /tmp/sst80286/v1_real_mode 에 받아 두고(약 310MB)
+ALL=$(ls /tmp/sst80286/v1_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.MOO\.gz$//' | paste -sd, -)
+SST_FILES="$ALL" dune exec --root . test/cpu86_sst286.exe
+```
+
 ### 어느 칩을 흉내내는가
 
 8086 과 80186 은 같은 opcode 자리에 다른 명령을 놓았다. `Cpu86.create`
@@ -62,18 +75,32 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
 | FLAGS bit12-15 를 읽으면 | 1 | 0 |
 | PUSH SP 가 미는 값 | 줄어든 SP | 줄기 전 SP |
 | 0x0F | POP CS | 두 바이트 명령의 머리 — SMSW(0F 01 /4)만 있고 0xFFF0 을 준다 |
+| 주소선 | 20개, FFFF:FFFF 는 0FFEFh | 24개, FFFF:FFFF 는 10FFEFh(1MB 에서 감는 일은 기계의 A20 몫) |
+| AAA·AAS | AL 과 AH 를 따로 고친다 | AX 에 106h 를 더하고 뺀다 |
+| DAS | AL-6 의 빌림은 CF 에 남지 않는다 | 남는다 |
+| 오프셋 FFFF 의 워드 | 오프셋 0 으로 감는다 | INT 13 |
+| 10 바이트를 넘는 명령(접두 포함) | 그대로 돈다 | INT 13 |
+| LEA·LES·LDS·BOUND·CALL/JMP FAR 의 레지스터 피연산자, MOV CS, 8C·8E 의 reg 4-7, 8F·C6·C7 의 reg≠0 | 별칭으로 돌거나 Unsupported | INT 6 |
+| BOUND 범위 밖 | INT 5 가 다음 명령으로 돌아간다 | BOUND 자신으로 돌아간다 |
 
 기계(`Dos_machine`)는 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
 요구하고 위 자리로 확인한다. 루카스아츠의 Monkey Island 2 와 Day of the
 Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으로 돈다.
 
-나눗셈 오류(DIV·IDIV·AAM 0)는 286 에서 결함이라 INT 0 이 그 나눗셈
+286 의 결함은 명령을 일어나지 않은 것으로 돌린다. IP 는 첫 접두
+바이트로, 레지스터는 명령 시작 때 값으로 돌아간다. 실칩이 먼저 고쳐 둔
+레지스터는 그대로 둔다. POP r/m 은 쓰기에서 넘쳐도 SP 를 올린 채고, 문자열
+명령은 넘친 접근의 포인터를 이미 옮겼다. REP 의 CX 도 그 반복에서 읽기면
+1, 쓰기면 2 줄어 있다.
+
+나눗셈 오류(DIV·IDIV·AAM 0)도 286 에서 결함이라 INT 0 이 그 나눗셈
 자신으로 돌아간다. 그래서 INT 0 은 DOS 가 받는다. MS-DOS 2.0 의 DIVOV
 (`CTRLC.ASM`)처럼 콘솔에 "Divide overflow" 를 쓰고 프로그램을 종료 코드
 0 으로 끝낸다. DOS 는 이 종료의 사유를 Ctrl-C 로 남기지만(AH=4Dh 의
 AH=1), 이 기계는 사유를 따로 두지 않아 0 으로 답한다.
 
-8087 코프로세서는 없다. ESC(0xD8-0xDF)는 피연산자만 읽고 지나가며,
+8087 코프로세서는 없다. ESC(0xD8-0xDF)는 피연산자만 읽고(286 은 워드로)
+지나가며,
 INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프트웨어
 부동소수 경로를 고른다.
 

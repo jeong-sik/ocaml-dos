@@ -77,3 +77,9 @@
 (test
  (name dos_mouse_callback_test)
  (libraries dosmachine))
+
+(test
+ (name cpu86_sst286)
+ (modules cpu86_sst286 moo)
+ (deps sst80286-baseline.txt)
+ (libraries cpu86core unix))
