@@ -378,8 +378,8 @@ let test_snapshot_refuses_bcd_overflow () =
   in
   check_b "BCD 카운트 60000 은 거부" refused true
 
-(* 기계에서: SeaBIOS 의 지연 루프가 끝나야 한다. 이 PR 전에는 bit 5 가
-   쓴 값을 돌려줘 영원히 돌았다. *)
+(* 기계에서: SeaBIOS 의 지연 루프가 끝나야 한다. 0x61 bit 5 가 쓴 값을
+   돌려주면 이 루프는 영원히 돈다. *)
 let test_delay_loop_on_machine () =
   let prog =
     "\xe4\x61\x24\xfc\x0c\x01\xe6\x61"  (* in al,61h; and al,FCh; or al,1; out 61h,al *)
