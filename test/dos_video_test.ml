@@ -279,6 +279,55 @@ let test_cga_mode_4 () =
     (rgb_at m ~x:9 ~y:1 = (0xFF, 0x55, 0xFF));
   check "이웃은 바탕색" (Dos_machine.pixel m ~x:8 ~y:1) 0
 
+(* INT 10h AH=0Bh: BH=0 은 바탕색과 밝기, BH=1 은 팔레트. 모드 4 의 기본값
+   30h(팔레트 1, 어두움, 검은 바탕)에서 시작한다. *)
+let test_cga_bios_palette () =
+  let palette bh bl = mov_ah 0x0B ^ mov_bx ((bh lsl 8) lor bl) ^ int_ 0x10 in
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 0 0x11 (* 파란 바탕 + 밝기 *)
+           ^ palette 1 0x00 (* 팔레트 0: 초록·빨강·갈색 *)
+           ^ palette 2 0x01 (* 다른 BH 는 아무것도 바꾸지 않는다 *)
+           ^ quit)
+         "")
+  in
+  check_true "밝은 팔레트 0 에서 색 번호 2 는 밝은 빨강"
+    (rgb_at m ~x:9 ~y:1 = (0xFF, 0x55, 0x55));
+  check_true "바탕은 BL 의 하위 니블(파랑)" (rgb_at m ~x:8 ~y:1 = (0x00, 0x00, 0xAA));
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 1 0x01 ^ palette 1 0xFE (* BL 은 비트 0 만 본다: 팔레트 0 *)
+           ^ palette 0 0xE1 (* 하위 5 비트만: 파란 바탕, 어두움, 팔레트 그대로 *)
+           ^ quit)
+         "")
+  in
+  check_true "BL 의 다른 비트는 팔레트를 바꾸지 않는다: 색 번호 2 는 빨강"
+    (rgb_at m ~x:9 ~y:1 = (0xAA, 0x00, 0x00));
+  check_true "바탕은 파랑" (rgb_at m ~x:8 ~y:1 = (0x00, 0x00, 0xAA));
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 0 0x01
+           ^ quit)
+         "")
+  in
+  check_true "BH=0 은 기본 팔레트 1 을 지킨다: 색 번호 2 는 자홍"
+    (rgb_at m ~x:9 ~y:1 = (0xAA, 0x00, 0xAA))
+
 let test_cga_mode_6 () =
   let m =
     run_com
@@ -324,6 +373,7 @@ let () =
   test_mode_set_keeps_dac_when_inhibited ();
   test_text_glyph_not_mirrored ();
   test_cga_mode_4 ();
+  test_cga_bios_palette ();
   test_cga_mode_6 ();
   test_forty_column_text ();
   if !failed = 0 then print_endline "dos 그래픽: all passed"
