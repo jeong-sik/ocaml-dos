@@ -162,6 +162,26 @@ dune exec --root . bin/dosboot.exe -- \
 특정 상태가 된 다음에 들어가야 하는 키는 `@` 로 묶는다. 글자만 칠
 때는 `--type`.
 
+스텝 수 대신 화면을 보고 키를 넣으려면 `--wait` 와 `--press` 를 쓴다.
+적은 순서대로 돌고, 코어의 타이밍이 바뀌어도 같은 화면을 거쳐 간다.
+
+```sh
+dune exec --root . bin/dosboot.exe -- --com KOEI.COM --mount ... --steps 0 \
+  --wait 220,130,200,120=418c2ef28ff2c7fb299ad234fe7bf09b --press enter \
+  --wait 104,18,64,20=3e0a63288c39ede1bda328640a6579da --press 1,0,1,8,3,enter \
+  --digest 200,165,240,75
+```
+
+| 인자 | 하는 일 |
+|---|---|
+| `--wait X,Y,W,H=MD5` | 프레임의 그 영역이 그 digest 가 될 때까지 돌린다 |
+| `--press KEY,..` | 키 이름을 하나씩 넣고, 게임이 다시 키를 묻고 화면이 멈출 때까지 기다린다 |
+| `--digest X,Y,W,H` | 끝난 뒤 그 영역의 digest 를 `--wait` 인자 모양으로 찍는다. 다음에 기다릴 화면을 정할 때 쓴다 |
+
+이 단계들이 먼저 돌고, `--steps` 는 그 뒤에 `--keys`·`--feed` 와 함께
+돈다. 한 단계가 5천만 스텝 안에 끝나지 않거나 프로그램이 먼저 끝나면
+그 단계를 찍고, 멈춘 자리의 화면을 쓴 뒤 종료 코드 1 로 끝난다.
+
 진단은 `--trace N`(N 스텝마다 CS:IP), `--int-trace`(INT 명령),
 `--dump ADDR,LEN`(메모리), `--save NAME=PATH`(게스트가 쓴 파일 꺼내기).
 
