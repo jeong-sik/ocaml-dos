@@ -395,15 +395,75 @@ let child_exit t ~code ~keep =
     set_cf t false;
     finish_service_return t f.parent_service_return
 
-(* INT 21h AH=4Bh AL=00 — 불러 실행하기. AL 01·03(불러만·오버레이) 은
-   아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
+(* INT 21h AX=4B03h — 오버레이 싣기(RBIL INT 21/4B, Table 01591). ES:BX 의
+   파라미터 블록은 [싣는 세그먼트; 재배치 인수] 두 워드다. 호출자가 마련한
+   메모리에 싣기만 하고 실행하지 않는다. PSP·블록 표·핸들은 그대로다.
+
+   MZ 는 헤더 뒤 적재 모듈만 싣는다. 모듈 끝은 헤더의 페이지 수와 마지막
+   페이지 바이트(0x04, 0x02)가 정한다 — 오버레이 파일 뒤에 붙은 다른
+   데이터를 호출자의 메모리 너머로 쓰지 않는다. RBIL 은 MS-DOS 가 이때 최대
+   512 바이트를 더 싣는다고 적는다(BUGS). 이 기계는 그 결함을 따르지 않는다.
+   재배치 항목마다 그 워드에 재배치 인수를 더한다(16비트에서 돈다 — wr16 이
+   하위 16비트만 쓴다). MZ 가 아니면 파일 전체를
+   싣는다. 주소는 20비트에서 돈다(wr8). *)
+let mz_fixed_header = 0x1C
+let mz_page = 512
+let mz_reloc_entry = 4
+
+let load_overlay t image =
+  let cpu = t.cpu in
+  let block = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
+  let load_base = rd16 t block lsl 4 in
+  let reloc_factor = rd16 t (block + 2) in
+  let put_bytes from upto =
+    for i = from to upto - 1 do
+      wr8 t (load_base + i - from) (Char.code image.[i])
+    done
+  in
+  let is_mz = String.length image >= 2 && image.[0] = 'M' && image.[1] = 'Z' in
+  if not is_mz then begin put_bytes 0 (String.length image); set_cf t false end
+  else if String.length image < mz_fixed_header then fail t 11
+  else begin
+    let u8 i = Char.code image.[i] in
+    let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
+    let last_page_bytes = u16 0x02 and pages = u16 0x04 in
+    let reloc_count = u16 0x06 and header_bytes = u16 0x08 * 16 in
+    let reloc_table = u16 0x18 in
+    let module_end =
+      if last_page_bytes = 0 then pages * mz_page
+      else ((pages - 1) * mz_page) + last_page_bytes
+    in
+    let table_end = reloc_table + (reloc_count * mz_reloc_entry) in
+    if module_end < header_bytes || module_end > String.length image
+       || table_end > String.length image
+    then fail t 11
+    else begin
+      put_bytes header_bytes module_end;
+      for i = 0 to reloc_count - 1 do
+        let e = reloc_table + (i * mz_reloc_entry) in
+        let addr = load_base + (u16 (e + 2) lsl 4) + u16 e in
+        wr16 t addr (rd16 t addr + reloc_factor)
+      done;
+      set_cf t false
+    end
+  end
+
+let exec_load_and_run = 0x00
+let exec_load_overlay = 0x03
+
+(* INT 21h AH=4Bh — AL=00 불러 실행하기, AL=03 오버레이 싣기. AL=01(불러만)
+   은 아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
 let exec_program t ~return_to =
   let cpu = t.cpu in
   let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-  if Cpu86.reg8 cpu 0 <> 0x00 then begin fail t 1; Completed end
+  let al = Cpu86.reg8 cpu 0 in
+  if al <> exec_load_and_run && al <> exec_load_overlay then begin fail t 1; Completed end
   else
     match Hashtbl.find_opt t.host_files name with
     | None -> fail t 2; Completed              (* 파일이 없다 *)
+    | Some img_bytes when al = exec_load_overlay ->
+      load_overlay t (Bytes.to_string img_bytes);
+      Completed
     | Some img_bytes ->
       let image = Bytes.to_string img_bytes in
       let is_mz =

@@ -275,6 +275,117 @@ let () =
   check "parent survives a truncated MZ child and reads DOS error 11"
     (Dos_machine.exit_code m) 11
 
+(* 7) AX=4B03h — 오버레이 싣기. 모듈만 싣고(뒤에 붙은 데이터는 안 싣는다),
+   재배치 항목에 재배치 인수를 더하고, 실행하지 않고 돌아온다. *)
+
+(* 헤더 크기를 재배치 표에 맞춰 문단으로 올리고, 페이지 수와 마지막 페이지
+   바이트를 모듈 끝에 맞춘 MZ. [trailer] 는 모듈 뒤의 다른 데이터다. *)
+let overlay_exe ~modul ~relocs ~trailer =
+  let reloc_table = 0x1C in
+  let header_bytes = (reloc_table + (4 * List.length relocs) + 15) / 16 * 16 in
+  let module_end = header_bytes + String.length modul in
+  let b = Buffer.create (module_end + String.length trailer) in
+  Buffer.add_string b "MZ";
+  w16 b (module_end mod 512);
+  w16 b ((module_end + 511) / 512);
+  w16 b (List.length relocs);
+  w16 b (header_bytes / 16);
+  w16 b 0; w16 b 0xFFFF;                    (* minalloc/maxalloc *)
+  w16 b 0; w16 b 0;                         (* ss/sp *)
+  w16 b 0;                                  (* checksum *)
+  w16 b 0; w16 b 0;                         (* ip/cs *)
+  w16 b reloc_table; w16 b 0;
+  List.iter (fun (o, sg) -> w16 b o; w16 b sg) relocs;
+  Buffer.add_string b (String.make (header_bytes - Buffer.length b) '\x00');
+  Buffer.add_string b modul;
+  Buffer.add_string b trailer;
+  Buffer.contents b
+
+let overlay_seg = 0x3000
+let reloc_factor = 0x1234
+
+(* COM: AX=[al]4Bh 로 OVL.EXE 를 [overlay_seg] 에 싣는다. 성공하면 0, 실패면
+   AL(오류 코드)로 끝난다. *)
+let overlay_caller ~al =
+  let code_len = 22 in
+  let name_off = 0x100 + code_len in
+  let block_off = name_off + 8 in
+  let b = Buffer.create 64 in
+  Buffer.add_string b "\xb8"; w16 b ((0x4B lsl 8) lor al);
+  Buffer.add_string b "\xba"; w16 b name_off;
+  Buffer.add_string b "\xbb"; w16 b block_off;
+  Buffer.add_string b "\x0e\x07";        (* push cs; pop es *)
+  Buffer.add_string b "\xf9";            (* stc — 성공은 CF 를 지워야 한다 *)
+  Buffer.add_string b "\xcd\x21";
+  Buffer.add_string b "\x72\x02";        (* jc done *)
+  Buffer.add_string b "\xb0\x00";        (* mov al,0 *)
+  Buffer.add_string b "\xb4\x4c\xcd\x21"; (* done: exit al *)
+  assert (Buffer.length b = code_len);
+  Buffer.add_string b "OVL.EXE\x00";
+  w16 b overlay_seg; w16 b reloc_factor;
+  Buffer.contents b
+
+let run_overlay ~al file =
+  let m = Dos_machine.create () in
+  Option.iter (Dos_machine.mount_file m "OVL.EXE") file;
+  Dos_machine.load_com m (overlay_caller ~al);
+  Dos_machine.run m ~max_steps:5000;
+  check "overlay caller exits" (if Dos_machine.exited m then 1 else 0) 1;
+  m
+
+let peek16 m a = Dos_machine.mem_read m a lor (Dos_machine.mem_read m (a + 1) lsl 8)
+
+let () =
+  let modul =
+    String.init 24 (fun i -> Char.chr (0x40 + i))
+    |> fun s -> Bytes.of_string s
+    |> fun b -> Bytes.set_uint16_le b 4 0x0010; Bytes.set_uint16_le b 18 0xFFF0;
+                Bytes.to_string b
+  in
+  let file = overlay_exe ~modul ~relocs:[ (4, 0); (2, 1) ] ~trailer:"TRAILER!" in
+  let m = run_overlay ~al:0x03 (Some file) in
+  let base = overlay_seg * 16 in
+  check "4B03h succeeds" (Dos_machine.exit_code m) 0;
+  check "module byte 0" (Dos_machine.mem_read m base) 0x40;
+  check "module last byte" (Dos_machine.mem_read m (base + 23)) (0x40 + 23);
+  check "relocation 0000:0004 gets the factor" (peek16 m (base + 4)) (0x0010 + reloc_factor);
+  check "relocation 0001:0002 wraps at 16 bits" (peek16 m (base + 18))
+    ((0xFFF0 + reloc_factor) land 0xffff);
+  check "unrelocated word stays" (peek16 m (base + 6)) 0x4746;
+  check "data after the module is not loaded" (Dos_machine.mem_read m (base + 24)) 0;
+  (* 모듈 끝이 페이지 경계면 마지막 페이지 바이트가 0 이다 *)
+  let whole_page = String.make (512 - 32) '\x5A' in
+  let m = run_overlay ~al:0x03 (Some (overlay_exe ~modul:whole_page ~relocs:[] ~trailer:"T")) in
+  check "full last page: succeeds" (Dos_machine.exit_code m) 0;
+  check "full last page: last module byte" (Dos_machine.mem_read m (base + 479)) 0x5A;
+  check "full last page: trailer not loaded" (Dos_machine.mem_read m (base + 480)) 0;
+  (* MZ 가 아니면 파일 전체를 재배치 없이 싣는다 *)
+  let m = run_overlay ~al:0x03 (Some "\x10\x00COMOVL") in
+  check "COM overlay succeeds" (Dos_machine.exit_code m) 0;
+  check "COM overlay is loaded as is" (peek16 m base) 0x0010;
+  check "COM overlay last byte" (Dos_machine.mem_read m (base + 7)) (Char.code 'L');
+  (* 실패 *)
+  let m = run_overlay ~al:0x03 None in
+  check "missing overlay: error 2" (Dos_machine.exit_code m) 2;
+  let m = run_overlay ~al:0x03 (Some ("MZ" ^ String.make 8 '\x00')) in
+  check "truncated header: error 11" (Dos_machine.exit_code m) 11;
+  let lying = Bytes.of_string file in
+  Bytes.set_uint16_le lying 4 9;            (* 페이지 수가 파일보다 길다 *)
+  let m = run_overlay ~al:0x03 (Some (Bytes.to_string lying)) in
+  check "module past the file: error 11" (Dos_machine.exit_code m) 11;
+  let lying = Bytes.of_string file in
+  Bytes.set_uint16_le lying 6 200;          (* 재배치 표가 파일 밖으로 *)
+  let m = run_overlay ~al:0x03 (Some (Bytes.to_string lying)) in
+  check "relocation table past the file: error 11" (Dos_machine.exit_code m) 11;
+  let lying = Bytes.of_string file in
+  Bytes.set_uint16_le lying 2 1; Bytes.set_uint16_le lying 4 1;
+  Bytes.set_uint16_le lying 8 2;            (* 모듈 끝(1)이 헤더(32) 앞 *)
+  let m = run_overlay ~al:0x03 (Some (Bytes.to_string lying)) in
+  check "module ends inside the header: error 11" (Dos_machine.exit_code m) 11;
+  let m = run_overlay ~al:0x01 (Some file) in
+  check "4B01h is still refused: error 1" (Dos_machine.exit_code m) 1;
+  check "4B01h loads nothing" (Dos_machine.mem_read m base) 0
+
 let () =
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;
