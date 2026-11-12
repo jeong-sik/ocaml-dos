@@ -395,50 +395,54 @@ let child_exit t ~code ~keep =
     set_cf t false;
     finish_service_return t f.parent_service_return
 
-(* INT 21h AX=4B03h — 오버레이 싣기(RBIL INT 21/4B, Table 01591). ES:BX 의
-   파라미터 블록은 [싣는 세그먼트; 재배치 인수] 두 워드다. 호출자가 마련한
-   메모리에 싣기만 하고 실행하지 않는다. PSP·블록 표·핸들은 그대로다.
+(* INT 21h AX=4B03h — 오버레이 싣기. RBIL INT 21/4B(Table 01591)와 MS-DOS 4.0
+   src/DOS/EXEC.ASM 을 따른다. ES:BX 의 파라미터 블록은 [싣는 세그먼트;
+   재배치 인수] 두 워드다. 호출자가 마련한 메모리에 싣기만 하고 실행하지
+   않는다. PSP·블록 표·핸들은 그대로다. 주소는 20비트에서 돈다(wr8).
 
-   MZ 는 헤더 뒤 적재 모듈만 싣는다. 모듈 끝은 헤더의 페이지 수와 마지막
-   페이지 바이트(0x04, 0x02)가 정한다 — 오버레이 파일 뒤에 붙은 다른
-   데이터를 호출자의 메모리 너머로 쓰지 않는다. RBIL 은 MS-DOS 가 이때 최대
-   512 바이트를 더 싣는다고 적는다(BUGS). 이 기계는 그 결함을 따르지 않는다.
-   재배치 항목마다 그 워드에 재배치 인수를 더한다(16비트에서 돈다 — wr16 이
-   하위 16비트만 쓴다). MZ 가 아니면 파일 전체를
-   싣는다. 주소는 20비트에서 돈다(wr8). *)
+   MZ: 싣는 길이는 페이지 수 × 512 − 헤더다. 마지막 페이지 바이트(02h)는
+   보지 않는다(EXEC.ASM exec_save_start). RBIL BUGS 의 "최대 512 바이트를 더
+   싣는다"가 이것이다. 파일이 그보다 짧으면 있는 만큼 싣고, 512 바이트 이상
+   모자라면 오류 11 이다(exec_read_ok). 재배치 항목마다 그 워드에 재배치
+   인수를 더한다(16비트에서 돈다 — wr16 이 하위 16비트만 쓴다).
+   EXEC.ASM 과 다르게 이 기계가 거절하는 것: 헤더보다 짧은 MZ(EXEC.ASM 은
+   COM 으로 싣는다 — AX=4B00h 와 같게 11 로 둔다), 헤더가 페이지보다 긴
+   것, 파일 밖으로 나간 재배치 표(EXEC.ASM 은 버퍼에 남은 값을 읽는다).
+
+   MZ 가 아니면 파일 전체를 재배치 없이 싣는다. EXEC.ASM 은 0FFFFh 바이트를
+   읽으라 하고, 그만큼 다 읽히면 메모리 부족(8)으로 답한다(exec_com_file). *)
 let mz_fixed_header = 0x1C
 let mz_page = 512
 let mz_reloc_entry = 4
+let com_overlay_read = 0xFFFF
 
 let load_overlay t image =
   let cpu = t.cpu in
   let block = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
   let load_base = rd16 t block lsl 4 in
   let reloc_factor = rd16 t (block + 2) in
+  let len = String.length image in
   let put_bytes from upto =
     for i = from to upto - 1 do
       wr8 t (load_base + i - from) (Char.code image.[i])
     done
   in
-  let is_mz = String.length image >= 2 && image.[0] = 'M' && image.[1] = 'Z' in
-  if not is_mz then begin put_bytes 0 (String.length image); set_cf t false end
-  else if String.length image < mz_fixed_header then fail t 11
+  let is_mz = len >= 2 && image.[0] = 'M' && image.[1] = 'Z' in
+  if not is_mz then
+    if len >= com_overlay_read then fail t 8
+    else begin put_bytes 0 len; set_cf t false end
+  else if len < mz_fixed_header then fail t 11
   else begin
     let u8 i = Char.code image.[i] in
     let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
-    let last_page_bytes = u16 0x02 and pages = u16 0x04 in
+    let module_end = u16 0x04 * mz_page in
     let reloc_count = u16 0x06 and header_bytes = u16 0x08 * 16 in
     let reloc_table = u16 0x18 in
-    let module_end =
-      if last_page_bytes = 0 then pages * mz_page
-      else ((pages - 1) * mz_page) + last_page_bytes
-    in
     let table_end = reloc_table + (reloc_count * mz_reloc_entry) in
-    if module_end < header_bytes || module_end > String.length image
-       || table_end > String.length image
+    if module_end < header_bytes || module_end - len >= mz_page || table_end > len
     then fail t 11
     else begin
-      put_bytes header_bytes module_end;
+      put_bytes header_bytes (min module_end len);
       for i = 0 to reloc_count - 1 do
         let e = reloc_table + (i * mz_reloc_entry) in
         let addr = load_base + (u16 (e + 2) lsl 4) + u16 e in

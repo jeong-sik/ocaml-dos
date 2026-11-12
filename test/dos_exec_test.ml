@@ -275,8 +275,8 @@ let () =
   check "parent survives a truncated MZ child and reads DOS error 11"
     (Dos_machine.exit_code m) 11
 
-(* 7) AX=4B03h — 오버레이 싣기. 모듈만 싣고(뒤에 붙은 데이터는 안 싣는다),
-   재배치 항목에 재배치 인수를 더하고, 실행하지 않고 돌아온다. *)
+(* 7) AX=4B03h — 오버레이 싣기. MS-DOS 4.0 EXEC.ASM 처럼 페이지 수 × 512 까지
+   싣고, 재배치 항목에 재배치 인수를 더하고, 실행하지 않고 돌아온다. *)
 
 (* 헤더 크기를 재배치 표에 맞춰 문단으로 올리고, 페이지 수와 마지막 페이지
    바이트를 모듈 끝에 맞춘 MZ. [trailer] 는 모듈 뒤의 다른 데이터다. *)
@@ -352,18 +352,43 @@ let () =
   check "relocation 0001:0002 wraps at 16 bits" (peek16 m (base + 18))
     ((0xFFF0 + reloc_factor) land 0xffff);
   check "unrelocated word stays" (peek16 m (base + 6)) 0x4746;
-  check "data after the module is not loaded" (Dos_machine.mem_read m (base + 24)) 0;
-  (* 모듈 끝이 페이지 경계면 마지막 페이지 바이트가 0 이다 *)
+  (* 마지막 페이지 바이트(02h)는 보지 않는다 — 같은 페이지 안의 뒤 데이터도
+     실린다(RBIL BUGS) *)
+  check "the rest of the last page is loaded too" (Dos_machine.mem_read m (base + 24))
+    (Char.code 'T');
+  check "the rest of the last page: last byte" (Dos_machine.mem_read m (base + 31))
+    (Char.code '!');
+  (* 페이지 수 너머의 데이터는 안 싣는다 *)
   let whole_page = String.make (512 - 32) '\x5A' in
   let m = run_overlay ~al:0x03 (Some (overlay_exe ~modul:whole_page ~relocs:[] ~trailer:"T")) in
   check "full last page: succeeds" (Dos_machine.exit_code m) 0;
   check "full last page: last module byte" (Dos_machine.mem_read m (base + 479)) 0x5A;
-  check "full last page: trailer not loaded" (Dos_machine.mem_read m (base + 480)) 0;
+  check "data past the pages is not loaded" (Dos_machine.mem_read m (base + 480)) 0;
+  (* 파일이 페이지 수보다 짧으면: 511 바이트 모자라면 있는 만큼, 512 면 11 *)
+  let two_pages file =
+    let b = Bytes.of_string file in
+    Bytes.set_uint16_le b 4 2;
+    Bytes.to_string b
+  in
+  let file513 = two_pages (overlay_exe ~modul:whole_page ~relocs:[] ~trailer:"T") in
+  let m = run_overlay ~al:0x03 (Some file513) in
+  check "511 bytes short: loads what is there" (Dos_machine.exit_code m) 0;
+  check "511 bytes short: the last byte" (Dos_machine.mem_read m (base + 480)) (Char.code 'T');
+  let file512 = two_pages (overlay_exe ~modul:whole_page ~relocs:[] ~trailer:"") in
+  let m = run_overlay ~al:0x03 (Some file512) in
+  check "512 bytes short: error 11" (Dos_machine.exit_code m) 11;
   (* MZ 가 아니면 파일 전체를 재배치 없이 싣는다 *)
   let m = run_overlay ~al:0x03 (Some "\x10\x00COMOVL") in
   check "COM overlay succeeds" (Dos_machine.exit_code m) 0;
   check "COM overlay is loaded as is" (peek16 m base) 0x0010;
   check "COM overlay last byte" (Dos_machine.mem_read m (base + 7)) (Char.code 'L');
+  (* EXEC.ASM 은 0FFFFh 바이트를 읽으라 하고, 다 읽히면 메모리 부족이다 *)
+  let m = run_overlay ~al:0x03 (Some (String.make 0xFFFE 'A')) in
+  check "COM overlay of FFFEh bytes loads" (Dos_machine.exit_code m) 0;
+  check "COM overlay of FFFEh bytes: last byte" (Dos_machine.mem_read m (base + 0xFFFD))
+    (Char.code 'A');
+  let m = run_overlay ~al:0x03 (Some (String.make 0xFFFF 'A')) in
+  check "COM overlay of FFFFh bytes: error 8" (Dos_machine.exit_code m) 8;
   (* 실패 *)
   let m = run_overlay ~al:0x03 None in
   check "missing overlay: error 2" (Dos_machine.exit_code m) 2;
@@ -378,10 +403,9 @@ let () =
   let m = run_overlay ~al:0x03 (Some (Bytes.to_string lying)) in
   check "relocation table past the file: error 11" (Dos_machine.exit_code m) 11;
   let lying = Bytes.of_string file in
-  Bytes.set_uint16_le lying 2 1; Bytes.set_uint16_le lying 4 1;
-  Bytes.set_uint16_le lying 8 2;            (* 모듈 끝(1)이 헤더(32) 앞 *)
+  Bytes.set_uint16_le lying 4 0;            (* 페이지 0 — 모듈 끝이 헤더(32) 앞 *)
   let m = run_overlay ~al:0x03 (Some (Bytes.to_string lying)) in
-  check "module ends inside the header: error 11" (Dos_machine.exit_code m) 11;
+  check "pages end inside the header: error 11" (Dos_machine.exit_code m) 11;
   let m = run_overlay ~al:0x01 (Some file) in
   check "4B01h is still refused: error 1" (Dos_machine.exit_code m) 1;
   check "4B01h loads nothing" (Dos_machine.mem_read m base) 0
