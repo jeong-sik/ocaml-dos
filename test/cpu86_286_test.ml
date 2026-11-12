@@ -126,7 +126,87 @@ let test_bcd () =
       ("aas 04 with AF", "\x3f", 0x1D04, true, (0x1C0E, 1), (0x1B0E, 1));
       ("das 00 with AF", "\x2f", 0x0000, true, (0x00FA, 0), (0x00FA, 1)) ]
 
+(* One step that may fault. [setup] runs before it; the result is the
+   first interrupt the step took and the IP it was taken from, or None. *)
+let fault_of model code setup =
+  let t = cpu model code in
+  setup t;
+  let taken = ref None in
+  Cpu86.set_int_hook t (fun n -> if !taken = None then taken := Some (n, Cpu86.dump_ip t));
+  ignore (Cpu86.step t);
+  (t, !taken)
+
+let check_taken name got want =
+  let show = function None -> "none" | Some (n, ip) -> Printf.sprintf "INT %d from %04x" n ip in
+  if got <> want then begin
+    incr failed;
+    Printf.eprintf "FAIL %s: got %s want %s\n%!" name (show got) (show want)
+  end
+
+(* The faults a 286 takes where an 8086 or 186 carries on (SingleStepTests
+   80286): a word at offset FFFF (INT 13), an instruction past 10 bytes
+   (INT 13), an encoding the 286 leaves undefined (INT 6), and BOUND, which
+   returns to itself (INT 5). A fault comes back to the first prefix with
+   the registers as the instruction found them. *)
+let test_faults () =
+  let si_ffff t = Cpu86.set_reg16 t 6 0xFFFF in
+  let nothing _ = () in
+  (* cs: add [si],ax with SI=FFFF *)
+  let t, got = fault_of Cpu86.I80286 "\x2e\x01\x04" si_ffff in
+  check_taken "286 word at FFFF" got (Some (13, 0));
+  check "286 word at FFFF leaves SI" (Cpu86.reg16 t 6) 0xFFFF;
+  let _, got = fault_of Cpu86.I80186 "\x2e\x01\x04" si_ffff in
+  check_taken "186 word at FFFF wraps" got None;
+  (* leave with BP=FFFF: SP comes back from BP's value *)
+  let t, got = fault_of Cpu86.I80286 "\xc9" (fun t -> Cpu86.set_reg16 t 5 0xFFFF) in
+  check_taken "286 leave at FFFF" got (Some (13, 0));
+  check "286 leave puts SP back" (Cpu86.reg16 t 4) 0x0100;
+  (* pop [si] with SI=FFFF: the pop already moved SP *)
+  let t, got = fault_of Cpu86.I80286 "\x8f\x04" si_ffff in
+  check_taken "286 pop to FFFF" got (Some (13, 0));
+  check "286 pop to FFFF keeps SP moved" (Cpu86.reg16 t 4) 0x0102;
+  (* rep stosw from DI=FFFF, CX=3: DI moved once, CX taken twice *)
+  let t, got =
+    fault_of Cpu86.I80286 "\xf3\xab" (fun t -> Cpu86.set_reg16 t 7 0xFFFF; Cpu86.set_reg16 t 1 3)
+  in
+  check_taken "286 rep stosw at FFFF" got (Some (13, 0));
+  check "286 rep stosw DI" (Cpu86.reg16 t 7) 0x0001;
+  check "286 rep stosw CX" (Cpu86.reg16 t 1) 1;
+  (* cmpsw reads ES:[DI] first: a fault there leaves SI where it was *)
+  let t, got = fault_of Cpu86.I80286 "\xa7" (fun t -> Cpu86.set_reg16 t 7 0xFFFF) in
+  check_taken "286 cmpsw at DI=FFFF" got (Some (13, 0));
+  check "286 cmpsw leaves SI" (Cpu86.reg16 t 6) 0;
+  check "286 cmpsw moved DI" (Cpu86.reg16 t 7) 0x0001;
+  (* rol word [si],80h shifts by 0 but still reads; esc [si] reads a word *)
+  let _, got = fault_of Cpu86.I80286 "\xc1\x04\x80" si_ffff in
+  check_taken "286 rol by 0 at FFFF" got (Some (13, 0));
+  let _, got = fault_of Cpu86.I80286 "\xd8\x04" si_ffff in
+  check_taken "286 esc at FFFF" got (Some (13, 0));
+  (* six prefixes and a five-byte far call: eleven bytes *)
+  let long = "\x2e\x26\x2e\x36\x26\x3e\x9a\x00\x00\x00\x20" in
+  let t, got = fault_of Cpu86.I80286 long nothing in
+  check_taken "286 eleven bytes" got (Some (13, 0));
+  check "286 eleven bytes push nothing" (Cpu86.reg16 t 4) 0x0100;
+  let t, _ = fault_of Cpu86.I80186 long nothing in
+  check "186 eleven bytes call" (Cpu86.seg t 1) 0x2000;
+  (* lea ax,cx and mov cs,ax *)
+  let _, got = fault_of Cpu86.I80286 "\x8d\xc1" nothing in
+  check_taken "286 lea on a register" got (Some (6, 0));
+  let _, got = fault_of Cpu86.I80286 "\x8e\xc8" nothing in
+  check_taken "286 mov cs" got (Some (6, 0));
+  let t, got = fault_of Cpu86.I80186 "\x8e\xc8" (fun t -> Cpu86.set_reg16 t 0 0x1234) in
+  check_taken "186 mov cs" got None;
+  check "186 mov cs loads CS" (Cpu86.seg t 1) 0x1234;
+  (* bound ax,[0010h] with AX=5 above the upper bound 0 *)
+  let bound = "\x62\x06\x10\x00" in
+  let above t = Cpu86.set_reg16 t 0 5 in
+  let _, got = fault_of Cpu86.I80286 bound above in
+  check_taken "286 bound" got (Some (5, 0));
+  let _, got = fault_of Cpu86.I80186 bound above in
+  check_taken "186 bound" got (Some (5, 4))
+
 let () =
+  test_faults ();
   test_bcd ();
   test_divide_fault ();
   test_flags ();

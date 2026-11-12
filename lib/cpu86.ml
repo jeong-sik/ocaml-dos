@@ -38,6 +38,12 @@ let f_overflow = 0x800
    A20 게이트가 할 일이다(Dos_machine 의 메모리가 감는다). *)
 let address_mask = function I8086 | I80186 -> 0xfffff | I80286 -> 0xffffff
 
+(* 명령 하나의 최대 길이. 286 은 접두 바이트까지 10 바이트를 넘으면 INT 13
+   이다(SingleStepTests/80286 9A·EA: 접두 6 개 + 5 바이트). 8086·186 은
+   접두 바이트를 몇 개든 받는다. *)
+let max_length = function I8086 | I80186 -> max_int | I80286 -> 10
+let no_fetch_end = -1
+
 type t = {
   model : model;
   addr_mask : int;  (** [address_mask model] — 메모리 접근마다 쓰는 파생값 *)
@@ -56,6 +62,12 @@ type t = {
   mutable halted : bool;
   mutable cycles : int;
   mutable int_hook : (int -> unit) option;
+  fetch_limit : int;  (** [max_length model] — 명령 하나가 넘을 수 없는 바이트 수 *)
+  mutable fetch_end : int;
+      (** 이 IP 에서 바이트를 가져오면 명령이 [fetch_limit] 를 넘는다. 286 은
+          명령마다 정하고, 길이 제한이 없는 8086·186 은 IP 가 될 수 없는 -1 *)
+  undo_regs : int array;  (** [atomic] 이 결함 때 되돌릴 범용 레지스터 *)
+  undo_segs : int array;  (** 그때의 세그먼트 레지스터 *)
   read : int -> int;
   write : int -> int -> unit;
   port_in : int -> int;
@@ -76,6 +88,10 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     halted = false;
     cycles = 0;
     int_hook = None;
+    fetch_limit = max_length model;
+    fetch_end = no_fetch_end;
+    undo_regs = Array.make 8 0;
+    undo_segs = Array.make 4 0;
     read; write; port_in; port_out;
   }
 
@@ -180,9 +196,57 @@ let alu_result t op a b width =
   t.pf <- parity_even r;
   r
 
+(* ---------- 286 결함 ---------- *)
+
+(* 286 의 결함(fault). IP 는 그 명령의 첫 접두 바이트로 돌아가고 인터럽트
+   [vector] 를 받는다. 레지스터는 던질 때의 값 그대로다: 접근은 바이트가
+   오가기 전에 따지고, 여러 번 접근하는 스택 명령은 [atomic] 이 되돌린다.
+   실칩이 먼저 고쳐 두는 레지스터(POP r/m 의 SP, 문자열 명령의 SI·DI·CX)는
+   그대로 남는다. step 밖으로 나가지 않는다. *)
+exception Fault of int
+
+let vector_divide = 0
+let vector_bound = 5
+let vector_invalid_opcode = 6
+let vector_segment_overrun = 13
+
+let fault vector = raise (Fault vector)
+
+(* 결함을 받는 비용. INT 3 과 같은 값을 쓴다. *)
+let fault_cycles = 25
+
+(* 286 이 정의하지 않은 인코딩은 INT 6 결함이다. [cond] 가 그 인코딩인지
+   말한다. 8086·186 에서는 그냥 돌아온다 — 그 자리를 별칭으로 실행하거나
+   (MOV sreg 의 reg 필드 상위 비트, POP/MOV r/m 의 남는 reg 필드) 호출한
+   쪽이 Unsupported 로 알린다(SingleStepTests/80286 8C 8D 8E 8F C4 C5 C6 C7
+   62 FF). step 안의 지역 함수로 두면 명령마다 클로저를 만든다. *)
+let undefined_on_286 t cond =
+  match t.model with
+  | I80286 -> if cond then fault vector_invalid_opcode
+  | I8086 | I80186 -> ()
+
+(* 스택을 여러 번 건드리는 명령(PUSHA·POPA·ENTER·LEAVE·far CALL·RETF·
+   IRET)은 286 에서 도중에 넘치면 시작 때의 범용·세그먼트 레지스터로
+   돌아간다(SingleStepTests/80286 60 61 C8 C9). 다른 명령은 접근 전에
+   따지고 쓰기 전에 읽으므로 넘칠 때 바뀐 것이 없다. 모든 명령의 레지스터를
+   미리 떠 두면 삼국지3 30M 스텝이 1.7 초에서 2.0 초가 되어, 이 명령들만
+   뜬다. [f] 는 그 명령의 몸이고 사이클 수를 돌려준다. *)
+let atomic t f =
+  match t.model with
+  | I8086 | I80186 -> f ()
+  | I80286 ->
+    Array.blit t.regs 0 t.undo_regs 0 8;
+    Array.blit t.segs 0 t.undo_segs 0 4;
+    (try f () with
+     | Fault _ as e ->
+       Array.blit t.undo_regs 0 t.regs 0 8;
+       Array.blit t.undo_segs 0 t.segs 0 4;
+       raise e)
+
 (* ---------- 명령 페치와 피연산자 ---------- *)
 
 let fetch8 t =
+  if t.ip = t.fetch_end then fault vector_segment_overrun;
   let phys = physical t ~seg:t.segs.(1) ~off:t.ip in
   t.ip <- (t.ip + 1) land 0xffff;
   t.read phys
@@ -248,21 +312,34 @@ let decode_modrm t ~ovr =
 (* 세그먼트 베이스 + 오프셋 → 물리 주소. 오프셋은 16비트에서 감긴다. *)
 let at t base off = (base + (off land 0xffff)) land t.addr_mask
 
+(* 286 실모드에서 오프셋 FFFF 의 워드는 세그먼트 끝을 넘는다. 8086 처럼
+   오프셋 0 으로 감지 않고 INT 13 이며, 바이트는 하나도 오가지 않는다
+   (SingleStepTests/80286: 워드 피연산자 파일마다 30-50 건). 두 바이트
+   메모리 접근은 모두 이 둘을 지난다. *)
+let overruns t off =
+  match t.model with
+  | I80286 -> off land 0xffff = 0xffff
+  | I8086 | I80186 -> false
+
+let check_word t off = if overruns t off then fault vector_segment_overrun
+
+let read16 t b o =
+  check_word t o;
+  t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8)
+
+let write16 t b o v =
+  check_word t o;
+  t.write (at t b o) (v land 0xff);
+  t.write (at t b (o + 1)) (v lsr 8)
+
 let op_read t width = function
   | Reg n -> if width = 8 then reg8 t n else reg16 t n
-  | Mem (b, o) ->
-    if width = 8 then t.read (at t b o)
-    else t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8)
+  | Mem (b, o) -> if width = 8 then t.read (at t b o) else read16 t b o
 
 let op_write t width opd v =
   match opd with
   | Reg n -> if width = 8 then set_reg8 t n v else set_reg16 t n v
-  | Mem (b, o) ->
-    if width = 8 then t.write (at t b o) v
-    else begin
-      t.write (at t b o) (v land 0xff);
-      t.write (at t b (o + 1)) (v lsr 8)
-    end
+  | Mem (b, o) -> if width = 8 then t.write (at t b o) v else write16 t b o v
 
 (* 포트는 바이트 폭이다. 워드 접근은 p 와 p+1 두 번 — 한 번으로
    줄이면 상위 바이트가 늘 0 이 되고, 장치 쪽에서도 두 번째 포트의
@@ -275,15 +352,14 @@ let port_out16 t p v =
   t.port_out p (v land 0xff);
   t.port_out ((p + 1) land 0xffff) ((v lsr 8) land 0xff)
 
+(* SP 는 쓰기가 끝난 뒤에 내린다 — 넘치면 SP 도 그대로다. *)
 let push16 t v =
-  t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
-  let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
-  t.write (at t b o) (v land 0xff);
-  t.write (at t b (o + 1)) (v lsr 8)
+  let sp = (t.regs.(4) - 2) land 0xffff in
+  write16 t (t.segs.(2) lsl 4) sp v;
+  t.regs.(4) <- sp
 
 let pop16 t =
-  let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
-  let v = t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8) in
+  let v = read16 t (t.segs.(2) lsl 4) t.regs.(4) in
   t.regs.(4) <- (t.regs.(4) + 2) land 0xffff;
   v
 
@@ -332,7 +408,11 @@ let step t =
     (* 트랩 플래그는 명령 진입 시점 값으로 판정한다 — 그 명령이 TF 를
        켰다면(popf/iret) 다음 명령부터 걸리는 게 실기 동작이다. *)
     let entry_tf = t.tf in
+    (match t.model with
+     | I80286 -> t.fetch_end <- (base_ip + t.fetch_limit) land 0xffff
+     | I8086 | I80186 -> ());
     let used_cycles =
+      try begin
       (* prefix: 세그먼트 override 와 rep. [rep] 은 Some true(rep)/false(repnz)
          — string 명령만 소비하고 다른 명령에 붙으면 무시한다(8086 문서 동작). *)
       let ovr = ref None in
@@ -397,6 +477,11 @@ let step t =
       let shift_group regf width rm_op count =
         (* 186 부터 횟수는 아래 5비트만 쓴다. 8086 은 자르지 않고 전부 돈다. *)
         let count = match t.model with I8086 -> count | I80186 | I80286 -> count land 0x1f in
+        (* 286 은 횟수가 0 이어도 피연산자를 읽는다 — 오프셋 FFFF 의 워드면
+           INT 13 이다(SingleStepTests/80286 C1·D3, 횟수 80h·E0h). *)
+        (match t.model with
+         | I80286 -> if count = 0 then ignore (op_read t width rm_op)
+         | I8086 | I80186 -> ());
         if count > 0 && t.model = I8086 && regf = 6 then begin
           (* SETMO/SETMOC — 8086·8088 의 문서 외 명령. 피연산자를 전부 1
              로 만들고 논리 연산처럼 플래그를 세운다. 186 부터 이 자리는
@@ -469,8 +554,9 @@ let step t =
       (* 8086·186 의 나눗셈 오류는 다음 명령으로 돌아가는 트랩이고, 286 부터는
          나눗셈 자신(접두 바이트 포함)으로 돌아가는 결함이다. *)
       let divide_error () =
-        if t.model = I80286 then t.ip <- base_ip;
-        do_int 0
+        match t.model with
+        | I80286 -> fault vector_divide
+        | I8086 | I80186 -> do_int vector_divide
       in
       (* string ops: DS:[SI] → ES:[DI], DF 가 방향. rep 은 CX 카운터 —
          cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. *)
@@ -480,53 +566,82 @@ let step t =
           Mem (t.segs.(s) lsl 4, t.regs.(6))
         in
         let seg_di () = Mem (t.segs.(0) lsl 4, t.regs.(7)) in
-        (* 8086 계약: 포인터는 그 명령이 쓰는 것만 전진한다 —
-           movs/cmps=SI·DI 둘 다, stos/scas=DI 만, lods=SI 만.
-           (둘 다 전진시키면 lodsb+stosw 조합이 반복당 DI+3 — ZZT 화면
-           stride-3 오염의 뿌리, 실측.) *)
-        let step_regs () =
-          let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
-          let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
-          match unit_kind with
-          | Movs | Cmps -> adv 6; adv 7   (* 원본·대상 둘 다 *)
-          | Lods | Outs -> adv 6          (* SI 만 *)
-          | Stos | Scas | Ins -> adv 7    (* DI 만 *)
+        let width = if word then 16 else 8 in
+        let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
+        let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
+        (* 포인터는 그 명령이 쓰는 것만 전진한다 — movs/cmps=SI·DI 둘 다,
+           stos/scas=DI 만, lods=SI 만. (둘 다 전진시키면 lodsb+stosw 조합이
+           반복당 DI+3 — ZZT 화면 stride-3 오염의 뿌리, 실측.)
+           [guard r] 는 레지스터 r 이 짚는 접근 바로 앞에 선다. 286 이 그
+           접근에서 세그먼트 끝을 넘으면 그 포인터는 이미 움직였고 뒤 접근은
+           일어나지 않는다. REP 이면 CX 는 이 반복에서 [cx_taken] 번 줄어
+           있다: 읽기는 1, 쓰기는 다음 반복 몫까지 2, CMPS 의 첫 읽기는 0
+           이다(SingleStepTests/80286 A5 A7 AB AD AF 6D 6F 의 INT 13 사례
+           전부). 레지스터를 되돌리지 않는 결함으로 던진다. 접근마다 예외
+           처리기를 세우지 않으려고 접근 전에 따진다. *)
+        let guard r ~cx_taken =
+          if word && overruns t t.regs.(r) then begin
+            adv r;
+            (match !rep with
+             | Some _ -> t.regs.(1) <- (t.regs.(1) - cx_taken) land 0xffff
+             | None -> ());
+            fault vector_segment_overrun
+          end
+        in
+        let read_si ~cx_taken =
+          guard 6 ~cx_taken;
+          let v = op_read t width (seg_si ()) in
+          adv 6; v
+        in
+        let read_di ~cx_taken =
+          guard 7 ~cx_taken;
+          let v = op_read t width (seg_di ()) in
+          adv 7; v
+        in
+        let write_di v =
+          guard 7 ~cx_taken:2;
+          op_write t width (seg_di ()) v;
+          adv 7
         in
         let run_once () =
-          let width = if word then 16 else 8 in
           match unit_kind with
-          | Movs ->
-            let v = op_read t width (seg_si ()) in
-            op_write t width (seg_di ()) v
+          | Movs -> write_di (read_si ~cx_taken:1)
           | Cmps ->
-            let a = alu_result t 7 (op_read t width (seg_si ()))
-                        (op_read t width (seg_di ())) width in
-            ignore a
-          | Stos ->
-            op_write t width (seg_di ()) (if word then reg16 t 0 else reg8 t 0)
+            (* 286 은 ES:[DI] 를 먼저 읽는다 — DI 에서 넘친 결함은 SI 를 그대로
+               두고, SI 에서 넘친 결함은 DI 도 옮겨 둔다. 8086·186 은 SI 부터
+               읽는 순서를 그대로 둔다. *)
+            let src, dst =
+              match t.model with
+              | I80286 ->
+                let dst = read_di ~cx_taken:0 in
+                (read_si ~cx_taken:1, dst)
+              | I8086 | I80186 ->
+                let src = read_si ~cx_taken:1 in
+                (src, read_di ~cx_taken:1)
+            in
+            ignore (alu_result t 7 src dst width)
+          | Stos -> write_di (if word then reg16 t 0 else reg8 t 0)
           | Lods ->
-            let v = op_read t width (seg_si ()) in
+            let v = read_si ~cx_taken:1 in
             (if word then set_reg16 t 0 v else set_reg8 t 0 v)
           | Scas ->
-            let al = if word then reg16 t 0 else reg8 t 0 in
-            let d = op_read t width (seg_di ()) in
-            ignore (alu_result t 7 al d width)
+            let acc = if word then reg16 t 0 else reg8 t 0 in
+            ignore (alu_result t 7 acc (read_di ~cx_taken:1) width)
           | Ins (* 186: ES:[DI] <- 포트 DX *) ->
             let p = reg16 t 2 in
-            op_write t width (seg_di ()) (if word then port_in16 t p else t.port_in p)
+            write_di (if word then port_in16 t p else t.port_in p)
           | Outs (* 186: 포트 DX <- DS:[SI] *) ->
-            let p = reg16 t 2 and v = op_read t width (seg_si ()) in
+            let p = reg16 t 2 and v = read_si ~cx_taken:1 in
             if word then port_out16 t p v else t.port_out p v
         in
         match !rep with
-        | None -> run_once (); step_regs ()
+        | None -> run_once ()
         | Some want_zf ->
           if t.regs.(1) = 0 then ()  (* CX=0: 실행 없음 *)
           else begin
             let continue_ = ref true in
             while !continue_ && t.regs.(1) <> 0 do
               run_once ();
-              step_regs ();
               t.regs.(1) <- t.regs.(1) - 1;
               (* 비교 계열만 ZF 로 조기 종료한다 *)
               (match unit_kind with
@@ -733,24 +848,26 @@ let step t =
         push16 t (if d >= 0x80 then d lor 0xff00 else d);
         9
       | 0x60 (* pusha *) ->
-        let sp0 = t.regs.(4) in
-        push16 t (reg16 t 0); push16 t (reg16 t 1);
-        push16 t (reg16 t 2); push16 t (reg16 t 3);
-        push16 t sp0; push16 t (reg16 t 5);
-        push16 t (reg16 t 6); push16 t (reg16 t 7);
-        36
+        atomic t (fun () ->
+            let sp0 = t.regs.(4) in
+            push16 t (reg16 t 0); push16 t (reg16 t 1);
+            push16 t (reg16 t 2); push16 t (reg16 t 3);
+            push16 t sp0; push16 t (reg16 t 5);
+            push16 t (reg16 t 6); push16 t (reg16 t 7);
+            36)
       | 0x61 (* popa. pusha 가 AX CX DX BX SP BP SI DI 순으로 밀었으니
                  되꺼내는 순서는 그 역순이고, SP 자리는 버린다(186 계약 —
                  SP 는 8 워드 pop 으로 저절로 제자리). *) ->
-        set_reg16 t 7 (pop16 t);   (* DI *)
-        set_reg16 t 6 (pop16 t);   (* SI *)
-        set_reg16 t 5 (pop16 t);   (* BP *)
-        ignore (pop16 t);          (* pusha 가 민 SP — 버린다 *)
-        set_reg16 t 3 (pop16 t);   (* BX *)
-        set_reg16 t 2 (pop16 t);   (* DX *)
-        set_reg16 t 1 (pop16 t);   (* CX *)
-        set_reg16 t 0 (pop16 t);   (* AX *)
-        25
+        atomic t (fun () ->
+            set_reg16 t 7 (pop16 t);   (* DI *)
+            set_reg16 t 6 (pop16 t);   (* SI *)
+            set_reg16 t 5 (pop16 t);   (* BP *)
+            ignore (pop16 t);          (* pusha 가 민 SP — 버린다 *)
+            set_reg16 t 3 (pop16 t);   (* BX *)
+            set_reg16 t 2 (pop16 t);   (* DX *)
+            set_reg16 t 1 (pop16 t);   (* CX *)
+            set_reg16 t 0 (pop16 t);   (* AX *)
+            25)
       | 0x69 | 0x6b (* imul r16, rm16, imm *) ->
         let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         let a = op_read t 16 rm in
@@ -776,26 +893,28 @@ let step t =
                포인터 체인) 복사 — TP 런타임이 중첩 프레임으로 사용(실측). *) ->
         let size = fetch16 t in
         let nesting = fetch8 t land 0x1f in
-        push16 t (reg16 t 5);
-        let frame = t.regs.(4) in
-        if nesting > 0 then begin
-          for _ = 1 to nesting - 1 do
-            t.regs.(5) <- (t.regs.(5) - 2) land 0xffff;
-            let b = t.segs.(2) lsl 4 and o = t.regs.(5) in
-            push16 t (t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8))
-          done;
-          push16 t frame
-        end;
-        (* BP 는 프레임 바닥, SP 는 디스플레이를 민 뒤의 SP 에서 size 만큼
-           아래 — size 가 지역변수 자리다(Intel: SP <- SP - Size). 프레임에서
-           빼면 nesting>0 일 때 지역변수가 방금 민 디스플레이를 덮는다. *)
-        set_reg16 t 5 frame;
-        set_reg16 t 4 ((t.regs.(4) - size) land 0xffff);
-        19
+        atomic t (fun () ->
+            push16 t (reg16 t 5);
+            let frame = t.regs.(4) in
+            if nesting > 0 then begin
+              for _ = 1 to nesting - 1 do
+                t.regs.(5) <- (t.regs.(5) - 2) land 0xffff;
+                let b = t.segs.(2) lsl 4 and o = t.regs.(5) in
+                push16 t (read16 t b o)
+              done;
+              push16 t frame
+            end;
+            (* BP 는 프레임 바닥, SP 는 디스플레이를 민 뒤의 SP 에서 size 만큼
+               아래 — size 가 지역변수 자리다(Intel: SP <- SP - Size). 프레임에서
+               빼면 nesting>0 일 때 지역변수가 방금 민 디스플레이를 덮는다. *)
+            set_reg16 t 5 frame;
+            set_reg16 t 4 ((t.regs.(4) - size) land 0xffff);
+            19)
       | 0xc9 (* leave *) ->
-        set_reg16 t 4 (reg16 t 5);
-        set_reg16 t 5 (pop16 t);
-        8
+        atomic t (fun () ->
+            set_reg16 t 4 (reg16 t 5);
+            set_reg16 t 5 (pop16 t);
+            8)
       (* --- hlt --- *)
       | 0xf4 -> t.halted <- true; 2
       (* --- push/pop 세그먼트 (0x0F pop cs 는 8086 에만 유효) --- *)
@@ -871,21 +990,26 @@ let step t =
         let _, regf, _, ea = decode_modrm t ~ovr:!ovr in
         (match ea with
          | Some off -> set_reg16 t regf off
-         | None -> bad "lea on register");
+         | None -> (undefined_on_286 t true; bad "lea on register"));
         2
       (* mov 의 sreg 필드는 2비트다 — modrm 의 reg 필드 상위 비트는 무시
          된다(실칩 관측). land 3 을 빼면 regf>=4 인 인코딩에서 세그먼트
          배열 밖을 짚어 에뮬레이터가 죽는다. *)
       | 0x8c ->
         let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        undefined_on_286 t (regf >= 4);
         op_write t 16 rm (seg t (regf land 3));
         2
       | 0x8e ->
         let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        undefined_on_286 t (regf = 1 (* CS *) || regf >= 4);
         set_seg t (regf land 3) (op_read t 16 rm);
         2
       | 0x8f ->
-        let _, _, rm, _ = decode_modrm t ~ovr:!ovr in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+        undefined_on_286 t (regf <> 0);
+        (* 286 은 SP 를 올려 둔 뒤에 쓴다 — 쓰기가 세그먼트 끝을 넘어도 SP 는
+           올라간 채로 INT 13 을 받는다(SingleStepTests/80286 8F). *)
         op_write t 16 rm (pop16 t);
         8
       (* --- cbw / cwd --- *)
@@ -901,11 +1025,12 @@ let step t =
       | 0x9a ->
         let off = fetch16 t in
         let s = fetch16 t in
-        push16 t (seg t 1);
-        push16 t t.ip;
-        set_seg t 1 s;
-        t.ip <- off;
-        13
+        atomic t (fun () ->
+            push16 t (seg t 1);
+            push16 t t.ip;
+            set_seg t 1 s;
+            t.ip <- off;
+            13)
       | 0x9c -> push16 t (flags t); 10
       | 0x9d -> set_flags t (pop16 t); 8
       | 0x9e ->
@@ -925,11 +1050,11 @@ let step t =
         let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         (match rm with
          | Mem (b, o) ->
-           set_reg16 t regf (t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8));
-           let segv =
-             t.read (at t b (o + 2)) lor (t.read (at t b (o + 3)) lsl 8) in
+           let off = read16 t b o in
+           let segv = read16 t b (o + 2) in
+           set_reg16 t regf off;
            if opcode = 0xc4 then set_seg t 0 segv else set_seg t 3 segv
-         | Reg _ -> bad "les/lds reg");
+         | Reg _ -> (undefined_on_286 t true; bad "les/lds reg"));
         2
       (* --- accumulator 직접주소 mov (A0-A3) — TP 런타임 실측 요구. --- *)
       | 0xa0 | 0xa1 | 0xa2 | 0xa3 ->
@@ -960,20 +1085,25 @@ let step t =
       (* RETF — 서드파티 첫 요구(ZZT @1b21:002a). far call/인터럽트 스타일
          프레임에서 CS:IP 를 스택에서 되돌린다. *)
       | 0xcb ->
-        t.ip <- pop16 t;
-        set_seg t 1 (pop16 t);
-        17
+        atomic t (fun () ->
+            t.ip <- pop16 t;
+            set_seg t 1 (pop16 t);
+            17)
       | 0xca ->
         let n = fetch16 t in
-        t.ip <- pop16 t;
-        set_seg t 1 (pop16 t);
-        t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
-        18
+        atomic t (fun () ->
+            t.ip <- pop16 t;
+            set_seg t 1 (pop16 t);
+            t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+            18)
       | 0xc3 -> t.ip <- pop16 t; 8
       | 0xc6 | 0xc7 ->
         let width = if opcode = 0xc6 then 8 else 16 in
-        let _, _, rm, _ = decode_modrm t ~ovr:!ovr in
+        let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         let v = if width = 8 then fetch8 t else fetch16 t in
+        (* 286 은 즉치값까지 읽어 명령 길이를 정한 뒤에 INT 6 을 낸다 — 10
+           바이트를 넘으면 INT 13 이 먼저다(SingleStepTests/80286 C7). *)
+        undefined_on_286 t (regf <> 0);
         op_write t width rm v;
         4
       (* --- int / iret --- *)
@@ -984,10 +1114,11 @@ let step t =
         25
       | 0xce -> if t.of_ then do_int 4 else (); 4
       | 0xcf ->
-        t.ip <- pop16 t;
-        set_seg t 1 (pop16 t);
-        set_flags t (pop16 t);
-        8
+        atomic t (fun () ->
+            t.ip <- pop16 t;
+            set_seg t 1 (pop16 t);
+            set_flags t (pop16 t);
+            8)
       (* --- 그룹2: shift/rotate (count 1 또는 CL) --- *)
       | 0xd0 | 0xd1 | 0xd2 | 0xd3 ->
         let width = if opcode land 1 = 0 then 8 else 16 in
@@ -1189,21 +1320,24 @@ let step t =
          | 3, 0xff ->
            (match rm with
             | Mem (b, o) ->
-              let off = t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8) in
-              let sg = t.read (at t b (o + 2)) lor (t.read (at t b (o + 3)) lsl 8) in
-              push16 t (seg t 1);
-              push16 t t.ip;
-              set_seg t 1 sg;
-              t.ip <- off
-            | Reg _ -> bad "call far reg")
+              let off = read16 t b o in
+              let sg = read16 t b (o + 2) in
+              ignore
+                (atomic t (fun () ->
+                     push16 t (seg t 1);
+                     push16 t t.ip;
+                     set_seg t 1 sg;
+                     t.ip <- off;
+                     0))
+            | Reg _ -> (undefined_on_286 t true; bad "call far reg"))
          | 4, 0xff -> set_ip t (op_read t 16 rm)
          | 5, 0xff ->
            (match rm with
             | Mem (b, o) ->
-              let off = t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8) in
-              set_seg t 1 (t.read (at t b (o + 2)) lor (t.read (at t b (o + 3)) lsl 8));
+              let off = read16 t b o in
+              set_seg t 1 (read16 t b (o + 2));
               t.ip <- off
-            | Reg _ -> bad "jmp far reg")
+            | Reg _ -> (undefined_on_286 t true; bad "jmp far reg"))
          (* /7 은 문서에 없지만 실칩은 /6 과 같은 push 로 응답한다.
             피연산자가 SP 면 8086 은 이미 감소된 SP 를 민다 — 0x54 의
             PUSH SP 와 같은 규칙이다. *)
@@ -1211,9 +1345,7 @@ let step t =
            (match rm with
             | Reg 4 when t.model <> I80286 ->
               t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
-              let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
-              t.write (at t b o) (t.regs.(4) land 0xff);
-              t.write (at t b (o + 1)) (t.regs.(4) lsr 8)
+              write16 t (t.segs.(2) lsl 4) t.regs.(4) t.regs.(4)
             | _ -> push16 t (op_read t 16 rm))
          | _ -> bad "group FE/FF");
         15
@@ -1229,10 +1361,14 @@ let step t =
         (match rm with
          | Mem (b, o) ->
            let sx v = if v >= 0x8000 then v - 0x10000 else v in
-           let rd k = t.read (at t b k) lor (t.read (at t b (k + 1)) lsl 8) in
            let idx = sx (reg16 t regf) in
-           if idx < sx (rd o) || idx > sx (rd (o + 2)) then do_int 5
-         | Reg _ -> bad "bound on register");
+           if idx < sx (read16 t b o) || idx > sx (read16 t b (o + 2)) then
+             (* 186 은 다음 명령으로 돌아가는 트랩으로 둔다. 286 은 BOUND
+                자신을 가리키는 결함이다(SingleStepTests/80286 62). *)
+             (match t.model with
+              | I80286 -> fault vector_bound
+              | I8086 | I80186 -> do_int vector_bound)
+         | Reg _ -> (undefined_on_286 t true; bad "bound on register"));
         13
       (* --- wait: 코프로세서 대기. 8087 이 없으니 즉시 통과한다. --- *)
       | 0x9b -> 4
@@ -1244,12 +1380,28 @@ let step t =
              8086 은 피연산자만 읽고 아무 일도 하지 않는다. --- *)
       | b when b >= 0xd8 && b <= 0xdf ->
         let _, _, rm, _ = decode_modrm t ~ovr:!ovr in
-        (match rm with Mem (b, o) -> ignore (t.read (at t b o)) | Reg _ -> ());
+        (* 286 은 워드로 읽는다 — 오프셋 FFFF 면 INT 13(SingleStepTests/80286
+           D8). *)
+        (match rm with
+         | Mem (b, o) ->
+           (match t.model with
+            | I80286 -> ignore (read16 t b o)
+            | I8086 | I80186 -> ignore (t.read (at t b o)))
+         | Reg _ -> ());
         2
       (* --- 나머지는 예외로 알린다 — 조용한 오동작 대신 하네스가
              다음에 구현할 명령을 읽는다. --- *)
       | _ ->
         bad (Printf.sprintf "opcode %02x" opcode)
+      end
+      with Fault vector ->
+        t.ip <- base_ip;
+        (match t.int_hook with
+         | Some f -> f vector
+         | None ->
+           raise (Unsupported (Printf.sprintf "fault %d (no hook) @%04x:%04x"
+                                 vector (seg t 1) base_ip)));
+        fault_cycles
     in
     t.cycles <- t.cycles + used_cycles;
     (* 단일 스텝 트랩: TF 가 켜진 채 명령이 끝나면 INT 1. 훅이 IVT 로
@@ -1279,6 +1431,9 @@ let save_state t =
         cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
         of_ = _ (* the nine flags travel as one word, [flags t] *);
         halted; cycles;
+        fetch_limit = _ (* derived from the model *);
+        fetch_end = _; undo_regs = _; undo_segs = _
+        (* scratch for the step in progress; a snapshot falls between steps *);
         int_hook = _; read = _; write = _; port_in = _; port_out = _
         (* closures: the machine that owns this CPU wires them *) } = t
   in
