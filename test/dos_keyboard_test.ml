@@ -96,6 +96,41 @@ let test_upper_case_is_shifted () =
   run m tap_steps;
   check "shift down, A down, A up, shift up" (seen m = [ 0x2A; 0x1E; 0x9E; 0xAA ])
 
+(* The bytes a hook sees for each word: the key the BIOS table names,
+   wrapped in the modifier that gives the word. *)
+let test_modifiers_from_the_table () =
+  List.iter
+    (fun (name, word, want) ->
+      let m = machine recorder in
+      installed m;
+      Dos_machine.push_key m word;
+      run m tap_steps;
+      check name (seen m = want))
+    [ ("! is shift-1", 0x0221, [ 0x2A; 0x02; 0x82; 0xAA ]);
+      ("alt-X", 0x2D00, [ 0x38; 0x2D; 0xAD; 0xB8 ]);
+      ("ctrl-C", 0x2E03, [ 0x1D; 0x2E; 0xAE; 0x9D ]);
+      ("alt-1 is the 1 key, not 78h", 0x7800, [ 0x38; 0x02; 0x82; 0xB8 ]);
+      ("shift-F1 is the F1 key", 0x5400, [ 0x2A; 0x3B; 0xBB; 0xAA ]);
+      ("back-tab is shift-tab", 0x0F00, [ 0x2A; 0x0F; 0x8F; 0xAA ]);
+      ("space is the same word every way: alone", 0x3920, [ 0x39; 0xB9 ]);
+      ("Enter alone", 0x1C0D, [ 0x1C; 0x9C ]);
+      ("a word no key gives: its high byte", 0x48E0, [ 0x48; 0xC8 ]) ]
+
+let test_keymap () =
+  let is word scan held =
+    Dos_keymap.of_word word = Some { Dos_keymap.scan; held }
+  in
+  check "keymap: a" (is 0x1E61 0x1E None);
+  check "keymap: A" (is 0x1E41 0x1E (Some Dos_keymap.Shift));
+  check "keymap: ctrl-2 is 0300h" (is 0x0300 0x03 (Some Dos_keymap.Ctrl));
+  check "keymap: Esc alone" (is 0x011B 0x01 None);
+  check "keymap: gray up is not in the table" (Dos_keymap.of_word 0x48E0 = None);
+  check "keymap: 2Ah is shift down"
+    (Dos_keymap.modifier_of_code 0x2A = Some (Dos_keymap.Shift, Dos_keymap.Down));
+  check "keymap: B8h is alt up"
+    (Dos_keymap.modifier_of_code 0xB8 = Some (Dos_keymap.Alt, Dos_keymap.Up));
+  check "keymap: 1Eh is no modifier" (Dos_keymap.modifier_of_code 0x1E = None)
+
 (* B: the same hook, but it chains to the vector it found, as most do; the
    program then reads the key with INT 16h AH=00 and exits. *)
 let chained_result_off = 0x13f
@@ -154,6 +189,22 @@ let test_bios_shift_state () =
   run m tap_steps;
   check "shift is up after" (Dos_state.rd8 m bda_shift land left_shift = 0);
   check "the key is still in the ring for the program" (Dos_state.peek_key m = 0x1E41)
+
+(* The BIOS keeps ctrl and alt too: 0040:0017 bit2/bit3 and the left-key
+   bits 0040:0018 bit0/bit1. *)
+let test_bios_ctrl_alt_state () =
+  List.iter
+    (fun (name, word, flags, left) ->
+      let m = machine spin in
+      Dos_machine.push_key m word;
+      ignore (run_to m tap_steps (fun m -> Dos_state.key_pending m));
+      check (name ^ ": the ring holds the word") (Dos_state.peek_key m = word);
+      check (name ^ ": 0417h while held") (Dos_state.rd8 m bda_shift land flags = flags);
+      check (name ^ ": 0418h while held") (Dos_state.rd8 m 0x418 land left = left);
+      run m tap_steps;
+      check (name ^ ": 0417h after") (Dos_state.rd8 m bda_shift land flags = 0);
+      check (name ^ ": 0418h after") (Dos_state.rd8 m 0x418 land left = 0))
+    [ ("alt-X", 0x2D00, 0x08, 0x02); ("ctrl-C", 0x2E03, 0x04, 0x01) ]
 
 (* D: IRQ1 masked; the program polls port 0x64 bit 0, then reads 0x60. *)
 let polled_off = 0x116
@@ -231,6 +282,9 @@ let () =
   test_hook_sees_make_then_break ();
   test_rollover ();
   test_upper_case_is_shifted ();
+  test_modifiers_from_the_table ();
+  test_keymap ();
+  test_bios_ctrl_alt_state ();
   test_hook_chains_to_bios ();
   test_bios_shift_state ();
   test_polling_with_irq1_masked ();

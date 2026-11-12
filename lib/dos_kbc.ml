@@ -6,9 +6,6 @@ let byte_gap = Dos_clock.cpu_hz / 1000
 let key_hold = Dos_clock.cpu_hz / 10
 
 let break_bit = 0x80
-let left_shift_make = 0x2A
-let left_shift_break = left_shift_make lor break_bit
-let back_tab = 0x0F00
 
 (* Bit 2 is the system flag a POST sets; bit 4 says the keyboard is not
    inhibited. Bit 0 is the output buffer. *)
@@ -48,10 +45,6 @@ let update_ready t =
 let create () =
   { queue = []; data = 0; word = None; full = false; last_read = None; ready_at = never }
 
-let shifted word =
-  let ascii = word land 0xff in
-  (ascii >= Char.code 'A' && ascii <= Char.code 'Z') || word = back_tab
-
 (* Insert after every byte due no later: two keys pressed together keep
    their order, and a key pressed while another is held sends its make
    before the held key's break, as a keyboard with rollover does. *)
@@ -59,15 +52,23 @@ let rec insert b = function
   | x :: rest when x.due <= b.due -> x :: insert b rest
   | rest -> b :: rest
 
+(* The key the word stands for, and the modifier held around it. A word
+   no key gives keeps the old contract: its high byte is the make code. *)
 let press t ~now word =
-  let scan = (word lsr 8) land 0xff in
+  let scan, held =
+    match Dos_keymap.of_word word with
+    | Some { Dos_keymap.scan; held } -> (scan, held)
+    | None -> ((word lsr 8) land 0xff, None)
+  in
   let down = { code = scan; word = Some word; due = now }
   and up = { code = scan lor break_bit; word = None; due = now + key_hold } in
   let bytes =
-    if shifted word then
-      [ { code = left_shift_make; word = None; due = now }; down; up;
-        { code = left_shift_break; word = None; due = now + key_hold } ]
-    else [ down; up ]
+    match held with
+    | None -> [ down; up ]
+    | Some m ->
+      let make = Dos_keymap.make_code m in
+      [ { code = make; word = None; due = now }; down; up;
+        { code = make lor break_bit; word = None; due = now + key_hold } ]
   in
   t.queue <- List.fold_left (fun q b -> insert b q) t.queue bytes;
   update_ready t

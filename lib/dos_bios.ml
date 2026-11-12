@@ -353,7 +353,15 @@ let keyboard t =
 
 let keyboard_data_port = 0x60
 let bda_shift_flags = 0x417
-let left_shift_down = 0x02
+let bda_shift_flags_left = 0x418
+
+(* 수식키가 0040:0017 과 0040:0018 에서 세우는 비트. SeaBIOS src/std/bda.h
+   의 KF0_* 와 같다: 0x417 은 bit1 왼쪽 shift, bit2 ctrl, bit3 alt 이고,
+   0x418 은 bit0 왼쪽 ctrl, bit1 왼쪽 alt 다. *)
+let modifier_bits = function
+  | Dos_keymap.Shift -> (0x02, 0x00)
+  | Dos_keymap.Ctrl -> (0x04, 0x01)
+  | Dos_keymap.Alt -> (0x08, 0x02)
 
 (* 실기 BIOS 의 INT 9 처럼 포트 0x60 을 읽어 시프트 상태나 링을 고치고
    EOI 를 보낸다. 스캔 코드를 글자로 옮기는 표 대신 make 바이트가 지닌
@@ -362,12 +370,16 @@ let left_shift_down = 0x02
    (Dos_kbc.read_data). *)
 let keyboard_irq t =
   let code = Dos_ports.port_in t.ports keyboard_data_port in
-  let shift = rd8 t bda_shift_flags in
-  if code = Dos_kbc.left_shift_make then
-    wr8 t bda_shift_flags (shift lor left_shift_down)
-  else if code = Dos_kbc.left_shift_break then
-    wr8 t bda_shift_flags (shift land lnot left_shift_down)
-  else Option.iter (ring_push t) (Dos_kbc.data_word (Dos_ports.kbc t.ports));
+  (match Dos_keymap.modifier_of_code code with
+   | Some (m, edge) ->
+     let flags, left = modifier_bits m in
+     let apply a bits =
+       let v = rd8 t a in
+       wr8 t a (match edge with Dos_keymap.Down -> v lor bits | Dos_keymap.Up -> v land lnot bits)
+     in
+     apply bda_shift_flags flags;
+     apply bda_shift_flags_left left
+   | None -> Option.iter (ring_push t) (Dos_kbc.data_word (Dos_ports.kbc t.ports)));
   Dos_pic.end_of_interrupt (Dos_ports.pic t.ports)
 
 (* ---------- INT 1Ah 시각 ---------- *)
