@@ -1,5 +1,10 @@
 (* M2b: MZ EXE 로더(재배치), INT 21h 파일 표면, VGA Mode 13h. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let checkb name got want =
   if got <> want then begin
@@ -91,7 +96,7 @@ let () =
   in
   let exe = make_exe ~image:code ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [] in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "TEST.DAT" "ABCD123456";
+  mount m "TEST.DAT" "ABCD123456";
   Dos_machine.load_exe m exe;
   Dos_machine.run m ~max_steps:2000;
   checkb "int21 open+read exited" (Dos_machine.exited m) true;

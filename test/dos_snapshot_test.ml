@@ -9,6 +9,11 @@
    The game round trip runs only when SAMGUK3_DIR names a 삼국지3 directory
    (KOEI.COM and its files); the game is not in the repository. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 
 let check name cond =
@@ -143,7 +148,7 @@ let separate_opens_com =
 
 let boot_separate_opens () =
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "F.DAT" "";
+  mount t "F.DAT" "";
   Dos_machine.load_com t separate_opens_com;
   t
 
@@ -226,11 +231,11 @@ let rich_child2 =
 
 let boot_rich () =
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "C1.COM" rich_child1;
-  Dos_machine.mount_file t "C2.COM" rich_child2;
-  Dos_machine.mount_file t "F1.DAT" (String.init 200 (fun i -> Char.chr (i land 0xff)));
-  Dos_machine.mount_file t "F2.DAT" "second";
-  Dos_machine.mount_file t "F3.DAT" "third";
+  mount t "C1.COM" rich_child1;
+  mount t "C2.COM" rich_child2;
+  mount t "F1.DAT" (String.init 200 (fun i -> Char.chr (i land 0xff)));
+  mount t "F2.DAT" "second";
+  mount t "F3.DAT" "third";
   Dos_machine.attach_mouse t;
   Dos_machine.set_mouse t ~x:123 ~y:45 ~buttons:1;
   Dos_machine.load_com t rich_parent;
@@ -339,7 +344,7 @@ let () =
   in
   let com = code ^ String.make (0x200 - String.length code) '\000' ^ "F.DAT\000" in
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "F.DAT" "x";
+  mount t "F.DAT" "x";
   Dos_machine.load_com t com;
   run t 2_000;
   let word i = Dos_machine.mem_read t (0x10200 + (2 * i))
@@ -425,7 +430,7 @@ let () =
     let n = steps "SNAPSHOT_N" 30_000_000 and m = steps "SNAPSHOT_M" 20_000_000 in
     let boot () =
       let t = Dos_machine.create () in
-      List.iter (fun (f, d) -> Dos_machine.mount_file t f d) files;
+      List.iter (fun (f, d) -> mount t f d) files;
       Dos_machine.load_com t (List.assoc "KOEI.COM" files);
       t
     in

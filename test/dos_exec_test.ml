@@ -4,6 +4,11 @@
    KOEI.COM 로더가 정확히 이 순서를 쓴다). 자식의 종료 코드는 AH=4Dh
    로, EXEC 에서 돌아온 직후의 AX 로도 읽힌다. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let check name got want =
   if got <> want then begin
@@ -75,7 +80,7 @@ let () =
       ~fin:"\xb4\x4d\xcd\x21\xb4\x4c\xcd\x21"
   in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "CHILD.COM" child;
+  mount m "CHILD.COM" child;
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:5000;
   check "com child code" (Dos_machine.exit_code m) 42;
@@ -100,8 +105,8 @@ let () =
       ~fin:"\xb4\x4d\xcd\x21\xb4\x4c\xcd\x21"
   in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "TSR.COM" tsr;
-  Dos_machine.mount_file m "CHILD2.COM" child2;
+  mount m "TSR.COM" tsr;
+  mount m "CHILD2.COM" child2;
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:8000;
   check "tsr parent exits" (if Dos_machine.exited m then 1 else 0) 1;
@@ -121,7 +126,7 @@ let () =
       ~fin:"\xb4\x4d\xcd\x21\xb4\x4c\xcd\x21"
   in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "CHILD.EXE" exe;
+  mount m "CHILD.EXE" exe;
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:8000;
   check "exe child code" (Dos_machine.exit_code m) 33
@@ -154,8 +159,8 @@ let () =
       ~fin:"\xb4\x4c\xcd\x21"
   in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "F.DAT" "";
-  Dos_machine.mount_file m "CHILD.COM" child;
+  mount m "F.DAT" "";
+  mount m "CHILD.COM" child;
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:5000;
   check "later handle's write wins"
@@ -188,7 +193,7 @@ let () =
   assert (String.index child 'B' = 0x03);
   assert (String.index child 'F' = 0x04);
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "F.DAT" "";
+  mount m "F.DAT" "";
   Dos_machine.load_com m child;
   Dos_machine.run m ~max_steps:2000;
   check "both handles' writes survive, at their own offsets"
@@ -209,11 +214,11 @@ let () =
   in
   assert (String.index opener 'F' = 0x02);
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "F.DAT" "old";
+  mount m "F.DAT" "old";
   Dos_machine.load_com m opener;
   Dos_machine.run m ~max_steps:1000;
   check "the opener exits" (if Dos_machine.exited m then 1 else 0) 1;
-  Dos_machine.mount_file m "F.DAT" "NEW";
+  mount m "F.DAT" "NEW";
   let reader =
     "\xeb\x06" ^ "F.DAT\x00"
     ^ "\xb8\x02\x3d\xba\x02\x01\xcd\x21"        (* open -> ax *)
@@ -251,9 +256,9 @@ let () =
   in
   assert (String.index parent 'F' = 0x2c);
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "F.DAT" "f";
-  Dos_machine.mount_file m "G.DAT" "g";
-  Dos_machine.mount_file m "CHILD.COM" child;
+  mount m "F.DAT" "f";
+  mount m "G.DAT" "g";
+  mount m "CHILD.COM" child;
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:5000;
   check "parent exits" (if Dos_machine.exited m then 1 else 0) 1;
@@ -269,7 +274,7 @@ let () =
     build_parent ~shrink:0x20 ~child1:"BAD.EXE" ~child2:"" ~fin:"\xb4\x4c\xcd\x21"
   in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "BAD.EXE" short_mz;
+  mount m "BAD.EXE" short_mz;
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:5000;
   check "parent survives a truncated MZ child and reads DOS error 11"

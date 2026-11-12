@@ -195,7 +195,10 @@ let () =
   List.iter
     (fun spec ->
       match parse_pair spec "mount" with
-      | Some (name, path) -> Dos_machine.mount_file m name (read_file path)
+      | Some (name, path) ->
+        (match Dos_machine.mount_file m name (read_file path) with
+         | Ok () -> ()
+         | Error e -> prerr_endline ("bad --mount " ^ e); exit 2)
       | None -> ())
     (List.rev !mounts);
   if !demo = "hello" then Dos_machine.load_com m (hello_com ())

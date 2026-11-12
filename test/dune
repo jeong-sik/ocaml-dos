@@ -23,6 +23,10 @@
  (libraries dosmachine))
 
 (test
+ (name dos_directory_test)
+ (libraries dosmachine))
+
+(test
  (name dos_exe_test)
  (libraries dosmachine))
 

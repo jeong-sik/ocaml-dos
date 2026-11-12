@@ -88,7 +88,7 @@ let create () =
     {
       mem; cpu; ports;
       exited = false; exit_code = 0; video;
-      host_files = Hashtbl.create 8;
+      host_files = Hashtbl.create 8; dirs = Hashtbl.create 8; cwd = Dos_path.root;
       handles = Hashtbl.create 4;
       open_files = Hashtbl.create 4;
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
@@ -149,13 +149,37 @@ let load_exe t image =
 
 (* ---------- 파일 마운트 ---------- *)
 
+let path_error = function
+  | Dos_path.Bad_drive -> "only drive C: exists"
+  | Dos_path.Bad_name -> "not a DOS name"
+  | Dos_path.Above_root -> ".. goes above the root"
+
+(* Every directory above a mounted file exists, as it would on the disk the
+   file was copied from. *)
+let rec add_parents t p =
+  match Dos_path.parent p with
+  | None -> ()
+  | Some dir ->
+    if dir <> Dos_path.root then begin
+      Hashtbl.replace t.dirs (Dos_path.key dir) ();
+      add_parents t dir
+    end
+
 let mount_file t name data =
-  Hashtbl.replace t.host_files (String.uppercase_ascii name)
-    (Bytes.of_string data)
+  match Dos_path.parse ~cwd:Dos_path.root name with
+  | Error e -> Error (Printf.sprintf "%S: %s" name (path_error e))
+  | Ok p when p = Dos_path.root -> Error (Printf.sprintf "%S: the root is not a file" name)
+  | Ok p when Hashtbl.mem t.dirs (Dos_path.key p) ->
+    Error (Printf.sprintf "%S: a directory has that name" name)
+  | Ok p ->
+    add_parents t p;
+    Hashtbl.replace t.host_files (Dos_path.key p) (Bytes.of_string data);
+    Ok ()
 
 let read_mounted t name =
-  Option.map Bytes.to_string
-    (Hashtbl.find_opt t.host_files (String.uppercase_ascii name))
+  match Dos_path.parse ~cwd:Dos_path.root name with
+  | Error _ -> None
+  | Ok p -> Option.map Bytes.to_string (Hashtbl.find_opt t.host_files (Dos_path.key p))
 
 let mounted_names t =
   List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [])

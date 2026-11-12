@@ -1,6 +1,11 @@
 (* DOS/BIOS 표면 회귀 — 실제 COM 프로그램을 기계에 태워 결과를 읽는다.
    게스트가 보는 것만 증거로 쓴다: 화면, 게스트 메모리, 마운트 표. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 
 let check name got want =
@@ -59,7 +64,7 @@ let peek16 m off = peek m off lor (peek m (off + 1) lsl 8)
 
 let run_com ?(steps = 500_000) ?(mounts = []) code =
   let m = Dos_machine.create () in
-  List.iter (fun (n, d) -> Dos_machine.mount_file m n d) mounts;
+  List.iter (fun (n, d) -> mount m n d) mounts;
   Dos_machine.load_com m code;
   Dos_machine.run m ~max_steps:steps;
   m

@@ -75,6 +75,52 @@ let free_handle t =
 
 let too_many_open_files = 4
 let invalid_handle = 6
+let file_not_found = 2
+let path_not_found = 3
+let access_denied = 5
+let invalid_drive = 15
+let removing_current_directory = 16
+let no_more_files = 18
+
+(* ---------- 경로 ----------
+
+   게스트가 넘긴 이름은 여기서 한 번 {!Dos_path} 로 읽고, 그 뒤로는 경로
+   키만 쓴다. 이름을 못 읽거나 위 디렉터리가 없으면 DOS 처럼 "경로 없음"
+   이다. *)
+
+let attr_directory = 0x10
+let attr_archive = 0x20
+
+let dir_exists t p = p = Dos_path.root || Hashtbl.mem t.dirs (Dos_path.key p)
+let file_exists t p = Hashtbl.mem t.host_files (Dos_path.key p)
+
+let guest_path t addr =
+  Result.map_error (fun (_ : Dos_path.error) -> path_not_found)
+    (Dos_path.parse ~cwd:t.cwd (asciiz_at t addr))
+
+(* A name for a file: its directory exists, and it is not the root. *)
+let guest_file t addr =
+  match guest_path t addr with
+  | Error e -> Error e
+  | Ok p ->
+    (match Dos_path.parent p with
+     | Some dir when dir_exists t dir -> Ok p
+     | Some _ | None -> Error path_not_found)
+
+(* What a directory directly holds, by the name each shows. *)
+let entries_of t dir =
+  let under tbl hit =
+    Hashtbl.fold
+      (fun k _ acc ->
+        match Dos_path.of_key k with
+        | Some p when Dos_path.parent p = Some dir ->
+          (match Dos_path.base p with Some name -> (name, hit k name) :: acc | None -> acc)
+        | Some _ | None -> acc)
+      tbl []
+  in
+  under t.host_files (fun k _ -> File_hit k) @ under t.dirs (fun _ name -> Dir_hit name)
+
+let is_empty_dir t dir = entries_of t dir = []
 
 (* [name]을 아직 물고 있는 핸들이 있는지 — 살아있는 [t.handles] 뿐 아니라
    EXEC 로 잠든 부모 핸들(자식이 실행되는 동안은 [t.handles] 밖에 있다)도
@@ -399,11 +445,13 @@ let child_exit t ~code ~keep =
    아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
 let exec_program t ~return_to =
   let cpu = t.cpu in
-  let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
   if Cpu86.reg8 cpu 0 <> 0x00 then begin fail t 1; Completed end
   else
-    match Hashtbl.find_opt t.host_files name with
-    | None -> fail t 2; Completed              (* 파일이 없다 *)
+    match guest_file t (seg_off t 3 2) with
+    | Error e -> fail t e; Completed
+    | Ok p ->
+    match Hashtbl.find_opt t.host_files (Dos_path.key p) with
+    | None -> fail t file_not_found; Completed
     | Some img_bytes ->
       let image = Bytes.to_string img_bytes in
       let is_mz =
@@ -484,14 +532,16 @@ let int27 t =
 
 (* ---------- findfirst / findnext ---------- *)
 
-let fill_find_block t name =
-  let data =
-    match Hashtbl.find_opt t.host_files name with
-    | Some d -> d
-    | None -> Bytes.empty
+let fill_find_block t hit =
+  let name, attr, size =
+    match hit with
+    | File_hit k ->
+      let size = match Hashtbl.find_opt t.host_files k with Some d -> Bytes.length d | None -> 0 in
+      let name = match Option.bind (Dos_path.of_key k) Dos_path.base with Some n -> n | None -> k in
+      (name, attr_archive, size)
+    | Dir_hit name -> (name, attr_directory, 0)
   in
-  let size = Bytes.length data in
-  wr8 t (t.dta + 0x15) 0x20;                 (* 속성: 보관 *)
+  wr8 t (t.dta + 0x15) attr;
   wr16 t (t.dta + 0x16) 0;                   (* 시각 *)
   (* DOS 날짜 워드: 상위 7비트 연도-1980, 다음 4비트 월, 하위 5비트 일.
      0x2821 은 2000-01-01 이다. 마운트 표에는 시각이 없어 고정값을 준다. *)
@@ -520,8 +570,14 @@ let fcb_service t ah =
   let fcb = seg_off t 3 2 in
   match ah with
   | 0x0F ->
-    let name = String.uppercase_ascii (fcb_name t fcb) in
-    (match Hashtbl.find_opt t.host_files name with
+    (* An FCB names a file in the current directory. A name that is not
+       one opens nothing, as a missing file does. *)
+    let data =
+      match Dos_path.parse ~cwd:t.cwd (fcb_name t fcb) with
+      | Ok p -> Hashtbl.find_opt t.host_files (Dos_path.key p)
+      | Error _ -> None
+    in
+    (match data with
      | Some data ->
        Hashtbl.replace t.fcbs fcb (data, 0);
        wr16 t (fcb + 0x0E) 128;
@@ -780,12 +836,31 @@ let service_immediate t =
     Cpu86.set_reg16 cpu 3 0x1000;
     Cpu86.set_reg16 cpu 1 512;
     Cpu86.set_reg16 cpu 2 0x2000
-  | 0x39 | 0x3A | 0x3B ->
-    (* 디렉터리가 없는 모델이다. 조용한 성공 대신 '경로 없음' 으로
-       답한다 — 성공으로 속이면 게스트가 그 뒤를 헛돈다. *)
-    fail t 3
+  | 0x39 ->
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       if file_exists t p || dir_exists t p then fail t access_denied
+       else begin Hashtbl.replace t.dirs (Dos_path.key p) (); ok t end)
+  | 0x3A ->
+    (match guest_path t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       if p = Dos_path.root || not (dir_exists t p) then fail t path_not_found
+       else if Dos_path.is_within ~dir:p t.cwd then fail t removing_current_directory
+       else if not (is_empty_dir t p) then fail t access_denied
+       else begin Hashtbl.remove t.dirs (Dos_path.key p); ok t end)
+  | 0x3B ->
+    (match guest_path t (seg_off t 3 2) with
+     | Ok p when dir_exists t p -> t.cwd <- p; ok t
+     | Ok _ -> fail t path_not_found
+     | Error e -> fail t e)
   | 0x3C | 0x5B ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p when dir_exists t p -> fail t access_denied
+     | Ok p ->
+    let name = Dos_path.key p in
     if ah = 0x5B && Hashtbl.mem t.host_files name then fail t 0x50
     else begin
       match open_handle t name Bytes.empty with
@@ -801,15 +876,18 @@ let service_immediate t =
          | None -> ());
         Cpu86.set_reg16 cpu 0 h;
         ok t
-    end
+    end)
   | 0x3D ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    (match Hashtbl.find_opt t.host_files name with
-     | Some data ->
-       (match open_handle t name data with
-        | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
-        | None -> fail t too_many_open_files)
-     | None -> fail t 2)
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       let name = Dos_path.key p in
+       (match Hashtbl.find_opt t.host_files name with
+        | Some data ->
+          (match open_handle t name data with
+           | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
+           | None -> fail t too_many_open_files)
+        | None -> fail t (if dir_exists t p then access_denied else file_not_found)))
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
   (* dup/dup2 는 같은 열린 파일을 가리킨다 — 위치와 내용을 나눠 쓴다.
      사본을 주면 한쪽에 쓴 것이 다른 쪽에 안 보인다. *)
@@ -882,12 +960,10 @@ let service_immediate t =
          Cpu86.set_reg16 cpu 0 n;
          ok t)
   | 0x41 ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    if Hashtbl.mem t.host_files name then begin
-      Hashtbl.remove t.host_files name;
-      ok t
-    end
-    else fail t 2
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p when file_exists t p -> Hashtbl.remove t.host_files (Dos_path.key p); ok t
+     | Ok p -> fail t (if dir_exists t p then access_denied else file_not_found))
   | 0x42 ->
     let h = Cpu86.reg16 cpu 3 in
     let off32 = (Cpu86.reg16 cpu 1 lsl 16) lor Cpu86.reg16 cpu 2 in
@@ -911,12 +987,17 @@ let service_immediate t =
          ok t
        end)
   | 0x43 ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    if Hashtbl.mem t.host_files name then begin
-      if Cpu86.reg8 cpu 0 = 0 then Cpu86.set_reg16 cpu 1 0x20;
-      ok t
-    end
-    else fail t 2
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       let attr =
+         if file_exists t p then Some attr_archive
+         else if dir_exists t p then Some attr_directory
+         else None
+       in
+       (match attr with
+        | Some a -> if Cpu86.reg8 cpu 0 = 0 then Cpu86.set_reg16 cpu 1 a; ok t
+        | None -> fail t file_not_found))
   | 0x44 ->
     (* IOCTL. 전부 실패시키면 런타임이 핸들을 무효로 보고 죽는다(실측).
        콘솔은 문자 장치 비트, 파일은 읽기·쓰기 가능. *)
@@ -931,10 +1012,17 @@ let service_immediate t =
      | 0x06 | 0x07 -> Cpu86.set_reg8 cpu 0 0xFF; ok t
      | _ -> fail t 1)
   | 0x47 ->
-    (* 현재 디렉터리는 늘 루트다 — 빈 문자열이 루트를 뜻한다. *)
-    wr8 t (seg_off t 3 6) 0;
-    Cpu86.set_reg16 cpu 0 0x0100;
-    ok t
+    (* DL 0 은 기본 드라이브, 3 은 C:. 앞의 [\] 없이 쓰고, 루트는 빈
+       문자열이다. *)
+    let dl = Cpu86.reg8 cpu 2 in
+    if dl <> 0 && dl <> default_drive + 1 then fail t invalid_drive
+    else begin
+      let dst = seg_off t 3 6 and cwd = Dos_path.key t.cwd in
+      String.iteri (fun i c -> wr8 t (dst + i) (Char.code c)) cwd;
+      wr8 t (dst + String.length cwd) 0;
+      Cpu86.set_reg16 cpu 0 0x0100;
+      ok t
+    end
   | 0x48 ->
     (match allocate t (Cpu86.reg16 cpu 3) with
      | Some seg -> Cpu86.set_reg16 cpu 0 seg; ok t
@@ -948,29 +1036,46 @@ let service_immediate t =
      | Error 9 -> fail t 9
      | Error avail -> Cpu86.set_reg16 cpu 3 (max 0 avail); fail t 8)
   | 0x4E ->
-    let pattern = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    let all = Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [] in
-    let hits =
-      List.sort compare
-        (List.filter (fun n -> matches_pattern ~pattern ~name:n) all)
-    in
-    (match hits with
-     | [] -> t.find_queue <- []; fail t 2
-     | first :: rest -> t.find_queue <- rest; fill_find_block t first; ok t)
+    (* CX bit4 가 서야 디렉터리도 찾는다. 하위 디렉터리는 [.] 과 [..] 을
+       먼저 보인다 — 실기 디렉터리의 첫 두 항목이다. *)
+    (match Dos_path.parse_pattern ~cwd:t.cwd (asciiz_at t (seg_off t 3 2)) with
+     | Error _ -> t.find_queue <- []; fail t path_not_found
+     | Ok (dir, _) when not (dir_exists t dir) -> t.find_queue <- []; fail t path_not_found
+     | Ok (dir, pattern) ->
+       let dirs_too = Cpu86.reg16 cpu 1 land attr_directory <> 0 in
+       let dots =
+         if dirs_too && dir <> Dos_path.root then [ (".", Dir_hit "."); ("..", Dir_hit "..") ]
+         else []
+       in
+       let named =
+         List.sort (fun (a, _) (b, _) -> compare a b)
+           (List.filter
+              (fun (_, hit) -> match hit with File_hit _ -> true | Dir_hit _ -> dirs_too)
+              (entries_of t dir))
+       in
+       let hits =
+         List.filter_map
+           (fun (name, hit) -> if matches_pattern ~pattern ~name then Some hit else None)
+           (dots @ named)
+       in
+       (match hits with
+        | [] -> t.find_queue <- []; fail t file_not_found
+        | first :: rest -> t.find_queue <- rest; fill_find_block t first; ok t))
   | 0x4F ->
     (match t.find_queue with
-     | [] -> fail t 18                      (* 더 이상 없음 *)
+     | [] -> fail t no_more_files
      | next :: rest -> t.find_queue <- rest; fill_find_block t next; ok t)
   | 0x56 ->
-    let src = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    let dst = String.uppercase_ascii (asciiz_at t ((Cpu86.seg cpu 0 lsl 4)
-                                                   + Cpu86.reg16 cpu 7)) in
-    (match Hashtbl.find_opt t.host_files src with
-     | Some d ->
-       Hashtbl.remove t.host_files src;
-       Hashtbl.replace t.host_files dst d;
-       ok t
-     | None -> fail t 2)
+    (match guest_file t (seg_off t 3 2), guest_file t ((Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 7) with
+     | Error e, _ | _, Error e -> fail t e
+     | Ok src, Ok dst ->
+       (match Hashtbl.find_opt t.host_files (Dos_path.key src) with
+        | None -> fail t file_not_found
+        | Some _ when file_exists t dst || dir_exists t dst -> fail t access_denied
+        | Some d ->
+          Hashtbl.remove t.host_files (Dos_path.key src);
+          Hashtbl.replace t.host_files (Dos_path.key dst) d;
+          ok t))
   | 0x57 ->
     if Hashtbl.mem t.handles (Cpu86.reg16 cpu 3) then begin
       if Cpu86.reg8 cpu 0 = 0 then begin

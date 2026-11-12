@@ -1,6 +1,11 @@
 (* FCB 파일 표면: INT 21h AH=0Fh(open) + AH=14h(순차 읽기) → DTA.
    구식 API 를 쓰는 80년대~90년대 초 게임(코에이 계열)을 위한 층. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let check name got want =
   if got <> want then begin
@@ -37,7 +42,7 @@ let prog () =
 let () =
   let exe = make_exe ~image:(prog ()) ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [] in
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "TEST.DAT"
+  mount m "TEST.DAT"
     ("ABCDEFGHIJKLMNOPQRSTUVWXYZ" ^ String.make 200 'z');
   Dos_machine.load_exe m exe;
   Dos_machine.run m ~max_steps:500;
