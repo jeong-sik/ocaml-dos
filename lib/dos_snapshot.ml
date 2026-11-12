@@ -25,8 +25,12 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    7: the interrupt controller (mask, requests, in service, OCW3 read
    choice) and the keyboard controller (queued bytes, port 0x60, its full
    flag, the last read) replace the PIC mask, the last scan code and the
-   machine's pending-tick flag. *)
-let format_version = 7
+   machine's pending-tick flag.
+   8: directories — the table of directories and the current one after the
+   host files, and each find result says whether it is a file (by path key)
+   or a directory entry (by name). Host file keys are read back only in
+   their canonical Dos_path form. *)
+let format_version = 8
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -242,7 +246,7 @@ let put_frame w f handles =
    build here until the snapshot carries it or says why not. [read_payload]
    reads in exactly this order with the same ranges. *)
 let write_payload w t =
-  let { mem; cpu; ports; exited; exit_code; video; host_files;
+  let { mem; cpu; ports; exited; exit_code; video; host_files; dirs; cwd;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
         ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; free_base;
         free_top; blocks; find_queue; stubs;
@@ -270,6 +274,8 @@ let write_payload w t =
   put "exit code" C.byte exit_code;
   put_list w ~what:"host file" (fun (k, v) -> C.put_string w k; C.put_bytes w v)
     (sorted_bindings host_files);
+  put_list w ~what:"directory" (fun (k, ()) -> C.put_string w k) (sorted_bindings dirs);
+  C.put_string w (Dos_path.key cwd);
   let pool, buffers, live, frames = handle_pool t in
   put_list w ~what:"handle buffer" (put_buffer w) buffers;
   put_list w ~what:"handle record" (put_handle w) pool;
@@ -289,7 +295,11 @@ let write_payload w t =
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
-  put_list w ~what:"find queue" (C.put_string w) find_queue;
+  put_list w ~what:"find queue"
+    (function
+      | File_hit k -> C.put_bool w true; C.put_string w k
+      | Dir_hit name -> C.put_bool w false; C.put_string w name)
+    find_queue;
   put_pairs w ~what:"stub" ~a:vector ~b:C.word stubs;
   put "EXEC frame count" C.count (List.length frames);
   List.iter2 (put_frame w) t.exec_frames frames;
@@ -343,6 +353,14 @@ let get_list r ~what get =
 
 let get_pairs r ~what ~a ~b =
   get_list r ~what (fun () -> let x = C.get r ~what a in let y = C.get r ~what b in (x, y))
+
+(* A path key, refused unless it is one Dos_path.key gives. *)
+let get_path r =
+  match Dos_path.of_key (C.get_string r) with
+  | Some p -> p
+  | None -> C.fail "a path key that is not a DOS path"
+
+let get_key r = Dos_path.key (get_path r)
 
 let fill_table tbl bindings =
   Hashtbl.reset tbl;
@@ -407,7 +425,9 @@ let read_payload r =
   t.exited <- C.get_bool r;
   t.exit_code <- get "exit code" C.byte;
   fill_table t.host_files
-    (get_list r ~what:"host file" (fun () -> let k = C.get_string r in (k, C.get_bytes r)));
+    (get_list r ~what:"host file" (fun () -> let k = get_key r in (k, C.get_bytes r)));
+  fill_table t.dirs (get_list r ~what:"directory" (fun () -> (get_key r, ())));
+  t.cwd <- get_path r;
   let buffers =
     Array.of_list (get_list r ~what:"handle buffer" (fun () -> ref (C.get_bytes r)))
   in
@@ -461,7 +481,9 @@ let read_payload r =
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
-  t.find_queue <- get_list r ~what:"find queue" (fun () -> C.get_string r);
+  t.find_queue <-
+    get_list r ~what:"find queue" (fun () ->
+        if C.get_bool r then File_hit (get_key r) else Dir_hit (C.get_string r));
   t.stubs <- get_pairs r ~what:"stub" ~a:vector ~b:C.word;
   let frame_count = get "EXEC frame count" (C.range 0 (C.remaining r)) in
   t.exec_frames <-

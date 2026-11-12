@@ -7,6 +7,11 @@
    실행 파일은 ZZT_EXE 로 따로 준다 — 원본은 LZEXE 로 눌려 있어서
    푼 것을 쓰는 게 보통이다. 기본값은 ZZT_DIR/ZZT.EXE. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 
 let check name got want =
@@ -69,7 +74,7 @@ let boot dir ~extra_keys ~steps =
   List.iter
     (fun n ->
       let p = Filename.concat dir n in
-      if Sys.file_exists p then Dos_machine.mount_file m n (read_file p))
+      if Sys.file_exists p then mount m n (read_file p))
     [ "ZZT.DAT"; "ZZT.CFG"; "TOWN.ZZT" ];
   let exe =
     match Sys.getenv_opt "ZZT_EXE" with
@@ -131,7 +136,7 @@ let test_lane_rhythm dir =
   List.iter
     (fun n ->
       let p = Filename.concat dir n in
-      if Sys.file_exists p then Dos_machine.mount_file m n (read_file p))
+      if Sys.file_exists p then mount m n (read_file p))
     [ "ZZT.DAT"; "ZZT.CFG"; "TOWN.ZZT" ];
   let exe =
     match Sys.getenv_opt "ZZT_EXE" with

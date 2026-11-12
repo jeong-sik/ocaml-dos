@@ -106,6 +106,10 @@ type input_continuation = {
   service_return : service_return;
 }
 
+(* What AH=4Eh found and AH=4Fh still has to give: a file by its path key,
+   or a directory entry by the name it shows ([.], [..] or its name). *)
+type find_hit = File_hit of string | Dir_hit of string
+
 type t = {
   mem : Bytes.t;                              (** 1MB *)
   cpu : Cpu86.t;
@@ -113,7 +117,12 @@ type t = {
   mutable exited : bool;
   mutable exit_code : int;
   video : Dos_video.t;
-  host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
+  host_files : (string, Bytes.t) Hashtbl.t;
+        (** 하네스가 마운트한 파일 — 키는 {!Dos_path.key} *)
+  dirs : (string, unit) Hashtbl.t;
+        (** 루트 밖의 디렉터리 — 키는 {!Dos_path.key}. 마운트한 파일의 위
+            디렉터리와 게스트가 AH=39h 로 만든 것 *)
+  mutable cwd : Dos_path.t;                   (** C: 의 현재 디렉터리 *)
   handles : (int, handle) Hashtbl.t;
         (** 핸들 번호 [first_file_handle] .. [max_handles - 1] 만 쓴다 *)
   open_files : (string, Bytes.t ref) Hashtbl.t;
@@ -132,7 +141,7 @@ type t = {
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
-  mutable find_queue : string list;           (** findnext 가 남긴 이름 *)
+  mutable find_queue : find_hit list;         (** findnext 가 남긴 것 *)
   mutable stubs : (int * int) list;           (** (벡터, ROM 스텁 오프셋) *)
   mutable exec_frames : exec_frame list;      (** EXEC 로 띄운 자식의 부모 프레임 *)
   mutable last_child_code : int;              (** AH=4Dh 가 돌려줄 마지막 자식 코드 *)

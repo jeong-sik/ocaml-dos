@@ -29,11 +29,16 @@ val load_exe : t -> string -> unit
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
     MZ 서명이 아니면 [Invalid_argument]. *)
 
-val mount_file : t -> string -> string -> unit
-(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)
+val mount_file : t -> string -> string -> (unit, string) result
+(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 루트에서 시작하는 DOS
+    경로다 — [DATA\X.DAT] 나 [DATA/X.DAT] 처럼 쓰고, DOS 가 읽듯
+    대문자로 바꾸고 8.3 으로 자른다({!Dos_path}). 위 디렉터리는 함께
+    생긴다. DOS 이름이 될 수 없는 이름이나 디렉터리와 같은 이름은
+    [Error] 다. *)
 
 val read_mounted : t -> string -> string option
-(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다. *)
+(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다.
+    이름은 [mount_file] 과 같이 읽는다. *)
 
 val mounted_names : t -> string list
 

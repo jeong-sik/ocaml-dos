@@ -69,7 +69,8 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
   최상위 비트가 왼쪽 점인 IBM 순서다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
+  seek/close/dup), FCB, findfirst/findnext, 디렉터리(39h 만들기·3Ah
+  지우기·3Bh 옮기기·47h 현재 위치), 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
@@ -150,6 +151,12 @@ dune exec --root . bin/dosboot.exe -- \
   --keys 256b,2e63,1c0d,1970,1c0d,3920,1c0d,1970,1c0d,1c0d,4d00@5000000
 ```
 
+`--mount` 의 이름은 DOS 경로다. `--mount DATA/LEVEL1.DAT=...` 는 `DATA`
+디렉터리 안에 파일을 두고, 디렉터리는 함께 생긴다. 게스트는
+`C:\DATA\LEVEL1.DAT`, `DATA\LEVEL1.DAT`, `CD DATA` 뒤의 `LEVEL1.DAT`
+어느 쪽으로도 연다. 드라이브는 C: 하나다. 이름은 DOS 가 읽듯 대문자로
+바꾸고 8.3 으로 자른다.
+
 `--keys` 의 한 항목은 `(스캔 코드 lsl 8) lor ASCII` 를 16진수로 쓴 것이고,
 `@STEP` 은 그 스텝 전에는 넣지 않는다는 예약이다. 키를 미리 다 밀어
 넣으면 앞선 메뉴의 "아무 키나" 루프가 전부 먹어 치우기 때문에, 게임이
@@ -216,8 +223,6 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
   프로그램은 이 둘이 늘 일치한다.
 - 8087 코프로세서가 없다. 소리도 내지 않는다 — 스피커 포트의 상태만
   `speaker_on` 으로 보인다.
-- 디렉터리가 없다. `mkdir`/`chdir` 은 성공한 척하지 않고 "경로 없음" 으로
-  답한다.
 - 스냅샷과 복원이 없다. 리플레이나 분기 실행이 필요해지면 그때 만든다.
 
 ## 구조
@@ -231,7 +236,8 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 09h/10h/11h/12h/16h/1Ah/33h |
-| `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
+| `Dos_dos` | INT 21h/20h — 파일, 디렉터리, 콘솔, 메모리, 날짜 |
+| `Dos_path` | 게스트가 넘긴 이름을 DOS 5 처럼 읽어 경로로 — 드라이브, `.`·`..`, 8.3 자르기 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
 | `Dos_snapshot` | 기계 전체를 바이트로 저장하고 새 기계로 되살린다. 형식 번호가 다르면 거절하고, 코어 digest 는 보여 주기만 한다 |
