@@ -384,19 +384,39 @@ let clock t =
 (* 마우스는 하네스가 움직인다. 기본은 장착 — KOEI 계열 게임은 부팅에서
    AX=0 으로 드라이버를 검사하고, 없으면 키보드 모드로 강제한다.
    AX=0x0C 로 건 핸들러는 Dos_machine.set_mouse 가 이벤트와 함께 부른다. *)
+let mouse_driver_installed = 0xFFFF
+let mouse_buttons_reported = 2
+
+(* 00h 와 21h 가 함께 되돌리는 드라이버 상태. HelpPC 2.10 INT 33,0: 커서를
+   숨기고, 사용자 핸들러 마스크를 0 으로 하고, 범위를 모드 최대로 한다.
+   마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이 건 핸들러가
+   그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로 옮기지는
+   않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
+let reset_mouse_driver m =
+  m.mouse_visible <- false;
+  m.mouse_handler_mask <- 0;
+  m.mouse_range_x <- None;
+  m.mouse_range_y <- None;
+  List.iter
+    (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
+    [ m.mouse_presses; m.mouse_releases ]
+
 let mouse t =
   let cpu = t.cpu in
   let m = t.mouse in
   match Cpu86.reg16 cpu 0 with
   | 0x00 ->
-    Cpu86.set_reg16 cpu 0 (if m.mouse_present then 0xFFFF else 0x0000);
-    Cpu86.set_reg16 cpu 3 (if m.mouse_present then 2 else 0);
-    m.mouse_visible <- false;
-    m.mouse_range_x <- None;
-    m.mouse_range_y <- None;
-    List.iter
-      (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
-      [ m.mouse_presses; m.mouse_releases ]
+    Cpu86.set_reg16 cpu 0 (if m.mouse_present then mouse_driver_installed else 0x0000);
+    Cpu86.set_reg16 cpu 3 (if m.mouse_present then mouse_buttons_reported else 0);
+    reset_mouse_driver m
+  | 0x21 ->
+    (* SOFTWARE RESET (RBIL INT 33/0021): 00h 와 같되 하드웨어는 건드리지
+       않는다. 드라이버가 없으면 AX 는 0021h 그대로다. *)
+    if m.mouse_present then begin
+      Cpu86.set_reg16 cpu 0 mouse_driver_installed;
+      Cpu86.set_reg16 cpu 3 mouse_buttons_reported;
+      reset_mouse_driver m
+    end
   | 0x01 -> m.mouse_visible <- true
   | 0x02 -> m.mouse_visible <- false
   | 0x03 ->
