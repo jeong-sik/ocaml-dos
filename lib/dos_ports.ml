@@ -14,6 +14,12 @@ let cpu_cycles_per_pit_tick = 4
    사이클로 약 158. 지연 루프가 이 비트를 세며 시간을 잰다. *)
 let refresh_toggle_cycles = 158
 
+(* 포트 0x61 의 비트. 읽을 때 bit4 는 리프레시, bit5 는 PIT 채널 2 의 OUT
+   이다. 나머지 비트는 쓴 값을 돌려준다. *)
+let gate2_bit = 0x01
+let refresh_bit = 0x10
+let out2_bit = 0x20
+
 (* YM3812(OPL2) 타이머 한 스텝 — T1 은 80µs, T2 는 320µs 를 CPU
    사이클(4.77MHz)로 환산한 값. *)
 let opl_t1_step = 382
@@ -26,6 +32,7 @@ type t = {
   mem : Bytes.t;
   video : Dos_video.t;          (** 비디오 어댑터의 포트는 여기로 넘긴다 *)
   mutable now : int;                    (** CPU 누적 사이클 *)
+  pit2 : Dos_pit.t;                     (** PIT 채널 2 — GATE 는 0x61 bit0 *)
   (* PIT 채널 0 *)
   mutable pit0_divisor : int;           (** 0 은 65536 을 뜻한다 *)
   mutable pit0_write_hi : bool;         (** lo/hi 두 바이트 쓰기의 순번 *)
@@ -90,6 +97,7 @@ let create ~mem ~video =
     mem;
     video;
     now = 0;
+    pit2 = Dos_pit.create ();
     pit0_divisor = 0;
     pit0_write_hi = false;
     pit0_read_hi = false;
@@ -137,6 +145,9 @@ let set_scancode t sc = t.scancode <- sc land 0xff
 let irq0_masked t = t.pic_mask land 1 <> 0
 let speaker_on t = t.port_b land 0x03 = 0x03
 
+let pit_tick t = t.now / cpu_cycles_per_pit_tick
+let gate2 t = t.port_b land gate2_bit <> 0
+
 let divisor t = if t.pit0_divisor = 0 then 0x10000 else t.pit0_divisor
 
 let cycles_per_tick t = divisor t * cpu_cycles_per_pit_tick
@@ -176,12 +187,16 @@ let port_in t p =
          t.pit0_read_hi <- true;
          v land 0xff
        end)
+  | 0x42 -> Dos_pit.read t.pit2 ~tick:(pit_tick t)
   | 0x60 -> t.scancode
   | 0x61 ->
     (* bit4 는 메모리 리프레시 — 실기에서 쉬지 않고 뒤집힌다. 고정값을
-       주면 이 비트를 세는 지연 루프가 안 끝난다. *)
-    let refresh = (t.now / refresh_toggle_cycles) land 1 in
-    (t.port_b land 0xEF) lor (refresh lsl 4)
+       주면 이 비트를 세는 지연 루프가 안 끝난다. bit5 는 채널 2 의 OUT
+       이다 — 채널 2 를 모드 0 으로 걸고 이 비트를 기다리는 지연 루프가
+       있다(SeaBIOS src/hw/timer.c tsctimer_setup). *)
+    let refresh = if (t.now / refresh_toggle_cycles) land 1 = 0 then 0 else refresh_bit in
+    let out2 = if Dos_pit.out t.pit2 ~tick:(pit_tick t) then out2_bit else 0 in
+    (t.port_b land lnot (refresh_bit lor out2_bit)) lor refresh lor out2
   | 0x64 -> 0x14                     (* 출력 버퍼 빔, 입력 버퍼 빔 *)
   | 0x70 -> t.cmos_index
   | 0x71 -> 0x00
@@ -253,20 +268,28 @@ let port_out t p v =
          t.pit0_divisor <- (t.pit0_divisor land 0xff00) lor v;
          t.pit0_write_hi <- true
        end)
+  | 0x42 -> Dos_pit.write t.pit2 ~tick:(pit_tick t) ~gate:(gate2 t) v
   | 0x43 ->
-    (* 제어 워드: bit7-6 채널, bit5-4 접근 모드(0=래치). 채널 0 만
-       센다 — 채널 1(리프레시)·2(스피커)는 소리를 안 내므로 무시한다. *)
-    if v lsr 6 = 0 then begin
-      let access = (v lsr 4) land 3 in
-      if access = 0 then t.pit0_latched <- Some (pit0_count t)
-      else begin
-        t.pit0_access <- access;
-        t.pit0_write_hi <- false;
-        t.pit0_read_hi <- false;
-        t.pit0_latched <- None
-      end
-    end
-  | 0x61 -> t.port_b <- v
+    (* 제어 워드: bit7-6 채널(3 은 읽기-되돌림 명령), bit5-4 접근
+       모드(0=래치). 채널 1 은 DRAM 리프레시라 게스트가 쓰지 않는다.
+       읽기-되돌림은 아직 없다. *)
+    (match v lsr 6 with
+     | 0 ->
+       let access = (v lsr 4) land 3 in
+       if access = 0 then t.pit0_latched <- Some (pit0_count t)
+       else begin
+         t.pit0_access <- access;
+         t.pit0_write_hi <- false;
+         t.pit0_read_hi <- false;
+         t.pit0_latched <- None
+       end
+     | 2 -> Dos_pit.control t.pit2 ~tick:(pit_tick t) v
+     | _ -> ())
+  | 0x61 ->
+    let was = gate2 t in
+    t.port_b <- v;
+    let now_high = gate2 t in
+    if was <> now_high then Dos_pit.gate_edge t.pit2 ~tick:(pit_tick t) ~high:now_high
   | 0x70 -> t.cmos_index <- v
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
@@ -339,10 +362,11 @@ let write_state w t =
         pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
-        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
+        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2 } = t
   in
   let put what r v = C.put w ~what r v in
   put "ports.now" cycle now;
+  Dos_pit.write_state w pit2;
   put "pit0_divisor" C.word pit0_divisor;
   C.put_bool w pit0_write_hi;
   C.put_bool w pit0_read_hi;
@@ -378,6 +402,7 @@ let write_state w t =
 let read_state r t =
   let get what rng = C.get r ~what rng in
   t.now <- get "ports.now" cycle;
+  Dos_pit.read_state r t.pit2;
   t.pit0_divisor <- get "pit0_divisor" C.word;
   t.pit0_write_hi <- C.get_bool r;
   t.pit0_read_hi <- C.get_bool r;
