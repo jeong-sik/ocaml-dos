@@ -251,6 +251,82 @@ let load_com ?(psp_seg = 0x1000) ?(child = false) t image =
   t.exited <- false;
   t.exit_code <- 0
 
+(* ---------- MZ 적재 모듈 ----------
+
+   MS-DOS 4.0 src/DOS/EXEC.ASM 대로 헤더를 읽는다.
+   - "MZ" 와 "ZM" 둘 다 EXE 서명이다(exe_valid_signature,
+     exe_valid_old_signature).
+   - 적재 모듈은 파일의 [헤더, 페이지 수 × 512) 다. 마지막 페이지
+     바이트(02h)는 보지 않는다(exec_save_start). 메모리도 이 길이로 센다.
+   - 파일이 그보다 짧으면 있는 만큼 싣고, 512 바이트 이상 모자라면 형식
+     오류다(exec_read_ok).
+   이 기계가 EXEC.ASM 과 다르게 거절하는 것: 고정 헤더(0x1C)보다 짧은
+   파일(EXEC.ASM 은 COM 으로 싣는다), 페이지 수가 헤더보다 짧은 것, 파일
+   밖으로 나간 재배치 표(EXEC.ASM 은 버퍼에 남은 값을 읽는다). *)
+let mz_fixed_header = 0x1C
+let mz_page = 512
+let mz_reloc_entry = 4
+
+let has_mz_signature image =
+  String.length image >= 2
+  && ((image.[0] = 'M' && image.[1] = 'Z') || (image.[0] = 'Z' && image.[1] = 'M'))
+
+type mz_module = {
+  header_bytes : int;
+  load_end : int;     (* 파일에서 실을 끝 — 페이지 끝과 파일 끝 가운데 앞쪽 *)
+  load_paras : int;   (* 적재 모듈이 차지하는 메모리 — 페이지 × 32 − 헤더 문단 *)
+  reloc_table : int;
+  reloc_count : int;
+}
+
+(* 헤더가 파일 안의 적재 모듈을 말하지 않는 까닭 *)
+type mz_error =
+  | Header_too_short          (* 고정 헤더(0x1C)보다 짧다 *)
+  | Pages_end_in_header       (* 페이지 수 × 512 가 헤더 크기보다 작다 *)
+  | File_short_by_a_page      (* 파일이 페이지 끝보다 512 바이트 이상 짧다 *)
+  | Relocations_past_file     (* 재배치 표가 파일 밖으로 나간다 *)
+
+let mz_error_message = function
+  | Header_too_short -> "MZ header too short"
+  | Pages_end_in_header -> "MZ pages end inside the header"
+  | File_short_by_a_page -> "MZ file is a page or more shorter than its header says"
+  | Relocations_past_file -> "MZ relocation table runs past the file"
+
+let header_u16 image i = Char.code image.[i] lor (Char.code image.[i + 1] lsl 8)
+
+let mz_module image =
+  let len = String.length image in
+  if len < mz_fixed_header then Error Header_too_short
+  else
+    let u16 = header_u16 image in
+    let module_end = u16 0x04 * mz_page and header_bytes = u16 0x08 * 16 in
+    let reloc_count = u16 0x06 and reloc_table = u16 0x18 in
+    if module_end < header_bytes then Error Pages_end_in_header
+    else if module_end - len >= mz_page then Error File_short_by_a_page
+    else if reloc_table + (reloc_count * mz_reloc_entry) > len then Error Relocations_past_file
+    else
+      Ok { header_bytes; load_end = min module_end len;
+           load_paras = (module_end - header_bytes) / 16; reloc_table; reloc_count }
+
+(* 모듈을 [base] 에 옮기고 재배치 항목마다 그 워드에 [factor] 를 더한다
+   (16비트에서 돈다 — wr16 이 하위 16비트만 쓴다). 주소는 20비트에서
+   돈다(wr8). *)
+let place_mz_module t image m ~base ~factor =
+  for i = m.header_bytes to m.load_end - 1 do
+    wr8 t (base + i - m.header_bytes) (Char.code image.[i])
+  done;
+  for i = 0 to m.reloc_count - 1 do
+    let e = m.reloc_table + (i * mz_reloc_entry) in
+    let addr = base + (header_u16 image (e + 2) lsl 4) + header_u16 image e in
+    wr16 t addr (rd16 t addr + factor)
+  done
+
+type loadable = Com_image | Exe_image of mz_module
+
+let loadable image =
+  if not (has_mz_signature image) then Ok Com_image
+  else Result.map (fun m -> Exe_image m) (mz_module image)
+
 (* MZ EXE — 실기 배치. 프로그램은 conventional RAM 위쪽에 실린다:
    LZEXE 같은 자기 압축 해제 스텁이 이 위치를 기준으로 원본 진입점을
    계산하기 때문에, 낮은 고정 세그먼트에 두면 엉뚱한 주소로 뛴다
@@ -260,33 +336,18 @@ let load_com ?(psp_seg = 0x1000) ?(child = false) t image =
    대로 memtop 아래에 블록 하나로 받는다. 자식 EXE 도 마찬가지로
    남은 메모리를 통째로 블록으로 받는다 — 실기와 같아서, 자식이 다시
    EXEC 하려면 먼저 AH=4Ah 로 줄여야 한다. *)
-let load_exe ?psp_seg ?(child = false) t image =
-  if String.length image < 2 || image.[0] <> 'M' || image.[1] <> 'Z' then
-    invalid_arg "not an MZ image";
-  if String.length image < 0x1C then invalid_arg "MZ header too short";
-  let u8 i = Char.code image.[i] in
-  let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
-  let reloc_count = u16 0x06 in
-  let header_bytes = u16 0x08 * 16 in
+let load_exe_module ?psp_seg ~child t image m =
+  let u16 = header_u16 image in
   let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
   let exe_sp = u16 0x10 and exe_ss = u16 0x0E in
-  let img_paras = (String.length image - header_bytes + 15) / 16 in
   let minalloc = u16 0x0A in
   let psp_seg =
     match psp_seg with
     | Some p -> p
-    | None -> max 0x1000 (0x9FF0 - img_paras - minalloc)
+    | None -> max 0x1000 (0x9FF0 - m.load_paras - minalloc)
   in
   let image_seg = psp_seg + 0x10 in
-  let image_base = image_seg * 16 in
-  Bytes.blit (Bytes.of_string image) header_bytes t.mem image_base
-    (String.length image - header_bytes);
-  for i = 0 to reloc_count - 1 do
-    let e = u16 0x18 + (i * 4) in
-    let off = u16 e and sg = u16 (e + 2) in
-    let addr = image_base + (sg * 16) + off in
-    wr16 t addr (rd16 t addr + image_seg)
-  done;
+  place_mz_module t image m ~base:(image_seg * 16) ~factor:image_seg;
   write_psp ~init:(not child) t psp_seg;
   if child then begin
     t.blocks <- t.blocks @ [ (psp_seg, t.free_top - psp_seg) ];
@@ -312,6 +373,12 @@ let load_exe ?psp_seg ?(child = false) t image =
   Cpu86.set_seg t.cpu 0 psp_seg;
   t.exited <- false;
   t.exit_code <- 0
+
+let load_exe t image =
+  match loadable image with
+  | Ok (Exe_image m) -> load_exe_module ~child:false t image m
+  | Ok Com_image -> invalid_arg "not an MZ image"
+  | Error e -> invalid_arg (mz_error_message e)
 
 (* ---------- EXEC (AH=4Bh) · 자식 종료 ----------
 
@@ -398,59 +465,28 @@ let child_exit t ~code ~keep =
 (* INT 21h AX=4B03h — 오버레이 싣기. RBIL INT 21/4B(Table 01591)와 MS-DOS 4.0
    src/DOS/EXEC.ASM 을 따른다. ES:BX 의 파라미터 블록은 [싣는 세그먼트;
    재배치 인수] 두 워드다. 호출자가 마련한 메모리에 싣기만 하고 실행하지
-   않는다. PSP·블록 표·핸들은 그대로다. 주소는 20비트에서 돈다(wr8).
-
-   MZ: 싣는 길이는 페이지 수 × 512 − 헤더다. 마지막 페이지 바이트(02h)는
-   보지 않는다(EXEC.ASM exec_save_start). RBIL BUGS 의 "최대 512 바이트를 더
-   싣는다"가 이것이다. 파일이 그보다 짧으면 있는 만큼 싣고, 512 바이트 이상
-   모자라면 오류 11 이다(exec_read_ok). 재배치 항목마다 그 워드에 재배치
-   인수를 더한다(16비트에서 돈다 — wr16 이 하위 16비트만 쓴다).
-   EXEC.ASM 과 다르게 이 기계가 거절하는 것: 헤더보다 짧은 MZ(EXEC.ASM 은
-   COM 으로 싣는다 — AX=4B00h 와 같게 11 로 둔다), 헤더가 페이지보다 긴
-   것, 파일 밖으로 나간 재배치 표(EXEC.ASM 은 버퍼에 남은 값을 읽는다).
-
-   MZ 가 아니면 파일 전체를 재배치 없이 싣는다. EXEC.ASM 은 0FFFFh 바이트를
-   읽으라 하고, 그만큼 다 읽히면 메모리 부족(8)으로 답한다(exec_com_file). *)
-let mz_fixed_header = 0x1C
-let mz_page = 512
-let mz_reloc_entry = 4
+   않는다. PSP·블록 표·핸들은 그대로다. MZ 는 위 [mz_module] 대로 싣고,
+   재배치 항목에 재배치 인수를 더한다. MZ 가 아니면 파일 전체를 재배치 없이
+   싣는다. EXEC.ASM 은 0FFFFh 바이트를 읽으라 하고, 그만큼 다 읽히면 메모리
+   부족(8)으로 답한다(exec_com_file). *)
 let com_overlay_read = 0xFFFF
 
 let load_overlay t image =
   let cpu = t.cpu in
   let block = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
-  let load_base = rd16 t block lsl 4 in
-  let reloc_factor = rd16 t (block + 2) in
-  let len = String.length image in
-  let put_bytes from upto =
-    for i = from to upto - 1 do
-      wr8 t (load_base + i - from) (Char.code image.[i])
-    done
-  in
-  let is_mz = len >= 2 && image.[0] = 'M' && image.[1] = 'Z' in
-  if not is_mz then
+  let base = rd16 t block lsl 4 in
+  let factor = rd16 t (block + 2) in
+  match loadable image with
+  | Ok Com_image ->
+    let len = String.length image in
     if len >= com_overlay_read then fail t 8
-    else begin put_bytes 0 len; set_cf t false end
-  else if len < mz_fixed_header then fail t 11
-  else begin
-    let u8 i = Char.code image.[i] in
-    let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
-    let module_end = u16 0x04 * mz_page in
-    let reloc_count = u16 0x06 and header_bytes = u16 0x08 * 16 in
-    let reloc_table = u16 0x18 in
-    let table_end = reloc_table + (reloc_count * mz_reloc_entry) in
-    if module_end < header_bytes || module_end - len >= mz_page || table_end > len
-    then fail t 11
     else begin
-      put_bytes header_bytes (min module_end len);
-      for i = 0 to reloc_count - 1 do
-        let e = reloc_table + (i * mz_reloc_entry) in
-        let addr = load_base + (u16 (e + 2) lsl 4) + u16 e in
-        wr16 t addr (rd16 t addr + reloc_factor)
-      done;
+      String.iteri (fun i c -> wr8 t (base + i) (Char.code c)) image;
       set_cf t false
     end
-  end
+  | Ok (Exe_image m) -> place_mz_module t image m ~base ~factor; set_cf t false
+  | Error (Header_too_short | Pages_end_in_header | File_short_by_a_page
+          | Relocations_past_file) -> fail t 11
 
 let exec_load_and_run = 0x00
 let exec_load_overlay = 0x03
@@ -470,27 +506,19 @@ let exec_program t ~return_to =
       Completed
     | Some img_bytes ->
       let image = Bytes.to_string img_bytes in
-      let is_mz =
-        String.length image >= 2 && image.[0] = 'M' && image.[1] = 'Z'
-      in
-      (* "MZ" 서명만 있고 나머지 고정 헤더(0x1C 바이트, e_lfarlc 까지)가
-         없으면 아래 [u16 0x08]/[u16 0x0A] 가 이미지 밖을 읽어
-         [Invalid_argument] 로 EXEC 호출 자체를 깨뜨린다. 그 앞에서
-         DOS 오류 11(잘못된 형식)로 답하고 멈춘다 — 이 호출만 실패하고
-         부모는 그대로 산다. *)
-      if is_mz && String.length image < 0x1C then begin fail t 11; Completed end
-      else
+      (* 헤더가 파일 안의 적재 모듈을 말하지 않으면(짧은 헤더, 모자란 파일,
+         파일 밖 재배치 표) DOS 오류 11(잘못된 형식)로 답한다 — 이 호출만
+         실패하고 부모는 그대로 산다. *)
+      match loadable image with
+      | Error (Header_too_short | Pages_end_in_header | File_short_by_a_page
+              | Relocations_past_file) -> fail t 11; Completed
+      | Ok kind ->
       (* 배치를 먼저 정한다 — 실패는 부모에게 즉시 돌아간다 *)
       let placement =
-        if is_mz then begin
-          let u8 i = Char.code image.[i] in
-          let u16 i = u8 i lor (u8 (i + 1) lsl 8) in
-          let img_paras =
-            (String.length image - (u16 0x08 * 16) + 15) / 16
-          in
-          exe_child_psp t ~img_paras ~minalloc:(u16 0x0A)
-        end
-        else find_free t 0x1000
+        match kind with
+        | Exe_image m ->
+          exe_child_psp t ~img_paras:m.load_paras ~minalloc:(header_u16 image 0x0A)
+        | Com_image -> find_free t 0x1000
       in
       (match placement with
        | None ->
@@ -517,8 +545,9 @@ let exec_program t ~return_to =
                  (Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles []);
            }
            :: t.exec_frames;
-         if is_mz then load_exe ~psp_seg:psp ~child:true t image
-         else load_com ~psp_seg:psp ~child:true t image;
+         (match kind with
+          | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true t image m
+          | Com_image -> load_com ~psp_seg:psp ~child:true t image);
          (* 커맨드라인·FCB·환경 세그먼트를 자식 PSP 에 옮긴다 *)
          let cpsp = t.psp_seg * 16 in
          if env_seg <> 0 then wr16 t (cpsp + 0x2C) env_seg;
