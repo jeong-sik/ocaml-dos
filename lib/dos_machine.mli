@@ -100,7 +100,19 @@ val halted : t -> bool
 (** {1 입력} *)
 
 val push_key : t -> int -> unit
-(** BIOS 키 링에 워드 하나. INT 16h 와 INT 21h 입력이 같은 링을 본다. *)
+(** 키 하나를 눌렀다 뗀다. 워드는 BIOS 가 INT 16h 로 돌려줄 (스캔 lsl 8)
+    lor ASCII 다. 키보드 컨트롤러({!Dos_kbc})가 make·break 바이트를 포트
+    0x60 에 차례로 올리고 바이트마다 IRQ1 을 낸다. BIOS INT 9 가 make
+    바이트의 워드를 링에 넣고, INT 16h 와 INT 21h 입력이 그 링을 본다.
+    INT 9 를 가로챈 게임은 포트 0x60 에서 스캔 코드를 직접 읽는다.
+
+    IRQ1 은 IF 가 켜지고 IMR bit1 이 풀려 있어야 들어간다. 그 전까지 키는
+    컨트롤러에 남아 있고 링에는 없다. *)
+
+val key_unread : t -> bool
+(** 넣은 키 가운데 프로그램이 아직 안 가져간 것이 있다 — 링에 있거나,
+    컨트롤러가 make 바이트를 아직 내주지 않았다. break 바이트만 남은 것은
+    키가 아니다. *)
 
 val named_keys : (string * int) list
 (** 이름으로 부를 수 있는 키와 그 BIOS 워드. *)

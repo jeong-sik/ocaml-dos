@@ -258,7 +258,6 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
                       && List.map fst fa.parent_handles = List.map fst fb.parent_handles))
     a.exec_frames b.exec_frames;
   c "last child code" (a.last_child_code = b.last_child_code);
-  c "pending IRQ0" (a.pending_irq0 = b.pending_irq0);
   c "last tick" (a.last_tick = b.last_tick);
   c "EMS mapping" (a.ems_mapped = b.ems_mapped);
   c "EMS pages" (sorted_bindings a.ems_pages = sorted_bindings b.ems_pages);
@@ -285,7 +284,7 @@ let () =
   let pre what cond = check ("rich machine has " ^ what) cond in
   pre "one open EXEC frame" (List.length a.exec_frames = 1);
   pre "last child code 42h" (a.last_child_code = 0x42);
-  pre "a pending timer tick" a.pending_irq0;
+  pre "a pending timer tick" (Dos_pic.requested (Dos_ports.pic a.ports) Dos_pic.Timer);
   pre "mode 12h" (Dos_video.mode a.video = 0x12);
   pre "a planar byte" (Bytes.get (Dos_video.planes a.video).(0) 0 = '\x5a');
   pre "DAC entry 5" ((Dos_ports.palette a.ports).(5) = (10, 20, 30));

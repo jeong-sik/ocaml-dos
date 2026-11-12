@@ -1,5 +1,5 @@
-(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC 마스크, VGA DAC,
-    CRTC, PC 스피커, CGA 상태 레지스터.
+(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), 키보드
+    컨트롤러({!Dos_kbc}), VGA DAC, CRTC, PC 스피커, CGA 상태 레지스터.
 
     이 포트들이 무엇을 돌려주는지가 게임의 진행 조건이 된다. 고정값을
     돌려주면 상태 변화를 기다리는 루프가 영원히 안 풀린다 — CGA 재주사
@@ -30,8 +30,11 @@ val cycles_per_tick : t -> int
 (** PIT 채널 0 의 분주비가 정하는 IRQ0 간격(CPU 사이클). 기본 분주비
     65536 = 18.2Hz. 게임이 음악·부드러운 이동을 위해 이 값을 바꾼다. *)
 
-val irq0_masked : t -> bool
-(** PIC IMR(포트 0x21) 의 bit0. 마스크된 IRQ 는 전달하지 않는다. *)
+val pic : t -> Dos_pic.t
+(** 포트 0x20·0x21 의 인터럽트 컨트롤러. 기계가 IRQ 를 올리고 고른다. *)
+
+val kbc : t -> Dos_kbc.t
+(** 포트 0x60·0x64 의 키보드 컨트롤러. *)
 
 val palette : t -> (int * int * int) array
 (** 256색 DAC — 채널당 6비트. 포트 0x3C8/0x3C9 와 INT 10h AH=10h 이
@@ -41,9 +44,6 @@ val reset_dac : t -> unit
 (** DAC 256 자리를 기본값으로, 쓰기·읽기 순번과 PEL 마스크(0x3C6)를
     처음 상태로. INT 10h AH=00h 가 모드를 세울 때 부른다 — 실기 BIOS 가
     그 순간 팔레트를 다시 싣는다. *)
-
-val set_scancode : t -> int -> unit
-(** 포트 0x60 이 돌려줄 마지막 스캔 코드. *)
 
 val speaker_on : t -> bool
 (** 포트 0x61 의 bit0·bit1 이 둘 다 켜졌다 — 게이트와 데이터가 열렸다.

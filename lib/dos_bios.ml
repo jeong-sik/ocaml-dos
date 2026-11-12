@@ -12,7 +12,7 @@ open Dos_state
 (* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
    전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
    삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
+let host_served = [ 0x09; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
@@ -344,10 +344,31 @@ let keyboard t =
   | 0x05 ->
     (* 키 밀어넣기: CX=(스캔<<8)|ASCII. 꽉 찼으면 AL=1 *)
     let before = ring_tail t in
-    push_key t (Cpu86.reg16 cpu 1);
+    ring_push t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
   | _ -> ()
+
+(* ---------- INT 9 키보드 IRQ ---------- *)
+
+let keyboard_data_port = 0x60
+let bda_shift_flags = 0x417
+let left_shift_down = 0x02
+
+(* 실기 BIOS 의 INT 9 처럼 포트 0x60 을 읽어 시프트 상태나 링을 고치고
+   EOI 를 보낸다. 스캔 코드를 글자로 옮기는 표 대신 make 바이트가 지닌
+   워드를 넣는다 — 호스트가 누른 워드가 INT 16h 의 답이다. INT 9 를
+   가로챈 게스트가 먼저 0x60 을 읽고 여기로 넘겨도 같은 바이트를 읽는다
+   (Dos_kbc.read_data). *)
+let keyboard_irq t =
+  let code = Dos_ports.port_in t.ports keyboard_data_port in
+  let shift = rd8 t bda_shift_flags in
+  if code = Dos_kbc.left_shift_make then
+    wr8 t bda_shift_flags (shift lor left_shift_down)
+  else if code = Dos_kbc.left_shift_break then
+    wr8 t bda_shift_flags (shift land lnot left_shift_down)
+  else Option.iter (ring_push t) (Dos_kbc.data_word (Dos_ports.kbc t.ports));
+  Dos_pic.end_of_interrupt (Dos_ports.pic t.ports)
 
 (* ---------- INT 1Ah 시각 ---------- *)
 
@@ -422,6 +443,7 @@ let service t vec =
   then read_key t
   else begin
   (match vec with
+  | 0x09 -> keyboard_irq t
   | 0x10 -> video t
   | 0x11 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410)
   | 0x12 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413)
