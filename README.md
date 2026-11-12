@@ -16,7 +16,7 @@
 | M1 | 명령 집합 완성 — call/ret, 그룹 80-83/FE/FF, string+rep, mul/div, shift | 완료 |
 | M2 | MZ EXE 로더, INT 21h 파일 표면, VGA Mode 13h | 완료 |
 | M3 | 실게임 — ZZT 보드 렌더, 방향키 이동, 메뉴 키, 세이브 파일 | 완료 |
-| M4 | 삼국지 III — KOEI.COM 사슬 완주, 카피프로텍션 통과(입력 코드 검증 해독), EMS 데이터 버퍼, 한글 메인 메뉴→시나리오·군주 선택→난이도 설정까지 지나 **게임 본편(184년 1월, 유비 전략 지도)** 진입까지 run.sh 한 방 재현(`--feed-sync`, 62키). 이후 **턴 진행(월 경과+AI 턴), 외교 이벤트(동맹), 전투 재생(관전: 교전 세력·장수 명판·일진 턴·날씨·전술)** 관측. 게임 시작 최종 확인("모두 좋겠습니까")이 (Y/N) 프롬프트임을 해독해(ds:0x204a = "(Y/N)? ", MAIN 0xfc66 확인 엔진·0xfc1d 입력) 'Y' 키로 1인 플레이 게임을 시작 — 도시 커맨드(휴양/군사/인사/외교/정보/개발/계략/상인/특별기능) → 군사(이동/수송/전쟁준비/전쟁/징병/모병/훈련/재편성/선박건조) → 이동(목적지 → 장수 선정)까지 키 주입으로 진행. 0인 관전 게임("몇 명"=0, AI 전 세력 턴 순환)도 구동. 남은 관문: 부대 편성 완료 → 플레이어 직접 전쟁 → 점령 자동저장 → 세이브/로드 왕복·통일 | 진행 |
+| M4 | 삼국지 III — 콜드 부팅에서 KOEI 로고 → 카피프로텍션 → 타이틀 메뉴 → 시나리오 1·유비 → 설정 → **첫 턴(189년 봄 1월, 평원 명령 대기)** 까지 `test/samguk3_scenario_test.ml` 이 화면 조건으로 재현한다. 남은 관문: 게임 안 저장·로드 왕복, 직접 전쟁, 통일 | 진행 |
 
 ## CPU 정확성
 
@@ -138,7 +138,14 @@ dune runtest --force
 
 ```sh
 ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_test.exe
+SAMGUK3_DIR=/path/to/samguk3 dune exec --root . test/samguk3_scenario_test.exe
 ```
+
+삼국지3 시나리오는 스텝 수를 적지 않는다. 단계마다 "화면의 이 영역이 이
+digest 가 될 때까지" 기다린 뒤 키를 하나씩 넣고, 게임이 다시 키를 묻고
+화면이 멈출 때까지 기다린다(`Dos_scenario`). 코어의 타이밍이 바뀌어도
+같은 화면을 거쳐 간다. 어느 단계에서 다른 화면이 나오면 그 단계 이름과
+마지막 프레임 경로를 남기고 실패한다.
 
 ## 게임 돌리기
 
@@ -226,6 +233,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_snapshot` | 기계 전체를 바이트로 저장하고 새 기계로 되살린다. 형식 번호가 다르면 거절하고, 코어 digest 는 보여 주기만 한다 |
 | `Dos_snap_codec` | 스냅숏의 정수·불·바이트 인코딩. 쓸 때와 읽을 때 같은 범위를 검사한다 — 되살릴 수 없는 스냅숏은 저장 단계에서 거절된다 |
 | `Dos_core_identity` | 이 빌드가 어떤 코어인지 — `lib/` 소스의 digest 를 빌드가 계산해 넣는다 (`ocaml-dos.core-identity`) |
+| `Dos_scenario` | 코어 밖 하네스(`harness/`, `ocaml-dos.harness`). 화면 영역 digest 를 기다리고 키를 하나씩 넣는 시나리오를 돌린다 |
 
 어떤 커밋의 digest 인지 알고 싶으면 그 커밋을 받아 `dune build` 하고
 `_build/default/lib/identity/dos_core_identity.ml` 을 보면 된다. 소스가
