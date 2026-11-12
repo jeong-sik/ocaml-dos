@@ -559,25 +559,36 @@ let step t =
         let r = reg8 t 0 in
         t.zf <- r = 0; t.sf <- r land 0x80 <> 0; t.pf <- parity_even r;
         4
+      (* 286 의 DAS 는 AL-6 의 빌림도 CF 에 남긴다. Intel 의 의사코드
+         "CF ← old_CF OR (Borrow from AL ← AL − 6)" 의 앞 절이다. 이
+         빌림은 AL 에서 60H 를 더 빼게 하지는 않는다
+         (SingleStepTests/80286 2F: AL=00, AF=1 → AL=FA, CF=1). *)
       | 0x2f (* DAS *) ->
         let al0 = reg8 t 0 in
         let old_cf = t.cf and old_af = t.af in
         let nib = al0 land 0x0F > 9 in
-        if nib || old_af then begin
-          set_reg8 t 0 (al0 - 6);
-          t.af <- true
-        end else t.af <- false;
+        let borrow =
+          if nib || old_af then begin
+            set_reg8 t 0 (al0 - 6);
+            t.af <- true;
+            al0 < 6
+          end else begin
+            t.af <- false;
+            false
+          end
+        in
         let threshold = bcd_threshold t ~old_af ~nib in
         if old_cf || al0 > threshold then begin
           set_reg8 t 0 (reg8 t 0 - 0x60);
           t.cf <- true
-        end else t.cf <- false;
+        end else
+          t.cf <- (match t.model with I8086 | I80186 -> false | I80286 -> borrow);
         let r = reg8 t 0 in
         t.zf <- r = 0; t.sf <- r land 0x80 <> 0; t.pf <- parity_even r;
         4
-      (* AAA/AAS 는 8086 에서 AL 과 AH 를 따로 고친다. 286 의 AAA 는 AX 에
-         0x106 을 한 번에 더해 AL+6 의 자리올림이 AH 로 샌다
-         (SingleStepTests/80286 37: DFFC → E102). *)
+      (* AAA/AAS 는 8086 에서 AL 과 AH 를 따로 고친다. 286 은 AX 에 0x106 을
+         한 번에 더하고 빼서 AL±6 의 자리올림과 빌림이 AH 로 샌다
+         (SingleStepTests/80286 37: DFFC → E102, 3F: 1D04 → 1B0E). *)
       | 0x37 (* AAA *) ->
         if reg8 t 0 land 0x0F > 9 || t.af then begin
           (match t.model with
@@ -593,8 +604,11 @@ let step t =
         8
       | 0x3f (* AAS *) ->
         if reg8 t 0 land 0x0F > 9 || t.af then begin
-          set_reg8 t 0 (reg8 t 0 - 6);
-          set_reg8 t 4 (reg8 t 4 - 1);
+          (match t.model with
+           | I8086 | I80186 ->
+             set_reg8 t 0 (reg8 t 0 - 6);
+             set_reg8 t 4 (reg8 t 4 - 1)
+           | I80286 -> set_reg16 t 0 (reg16 t 0 - 0x106));
           t.af <- true; t.cf <- true
         end else begin
           t.af <- false; t.cf <- false

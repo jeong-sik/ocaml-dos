@@ -105,7 +105,29 @@ let test_divide_fault () =
         [ (Cpu86.I80186, next); (Cpu86.I80286, 0) ])
     [ ("cs: div bl by 0", "\x2e\xf6\xf3", 3); ("aam 0", "\xd4\x00", 2) ]
 
+(* The ASCII and decimal adjusts where the two models part (SingleStepTests
+   80286 37, 3F, 2F): the 286 adds or takes 106h from AX in one go, so the
+   carry or borrow of AL±6 reaches AH, and its DAS keeps the borrow of
+   AL-6 in CF. Each case: code, AX, AF set, then AX and CF on 186 and 286. *)
+let test_bcd () =
+  List.iter
+    (fun (name, code, ax0, af, (ax186, cf186), (ax286, cf286)) ->
+      List.iter
+        (fun (model, label, want_ax, want_cf) ->
+          let t = cpu model code in
+          Cpu86.set_reg16 t 0 ax0;
+          if af then Cpu86.set_flags t (Cpu86.flags t lor Cpu86.f_aux);
+          run t 1;
+          check (Printf.sprintf "%s %s: AX" label name) (ax t) want_ax;
+          check (Printf.sprintf "%s %s: CF" label name)
+            (Bool.to_int (Cpu86.flags t land Cpu86.f_carry <> 0)) want_cf)
+        [ (Cpu86.I80186, "186", ax186, cf186); (Cpu86.I80286, "286", ax286, cf286) ])
+    [ ("aaa FC", "\x37", 0xDFFC, false, (0xE002, 1), (0xE102, 1));
+      ("aas 04 with AF", "\x3f", 0x1D04, true, (0x1C0E, 1), (0x1B0E, 1));
+      ("das 00 with AF", "\x2f", 0x0000, true, (0x00FA, 0), (0x00FA, 1)) ]
+
 let () =
+  test_bcd ();
   test_divide_fault ();
   test_flags ();
   test_push_sp ();
