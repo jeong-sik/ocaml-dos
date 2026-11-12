@@ -75,22 +75,19 @@ let parse_feed spec =
             None)
     (String.split_on_char ',' spec)
 
-(* --feed-sync: 스텝을 안 적는다 — 게임이 키를 기다리는 순간에 맞춰
-   하나씩 넣는다. INT 16h 폴링의 굶주림(kbd_waiting) 상승에 다음 키를
-   주고, INT 16h 없이 BDA 링을 직접 폴링하는 게임(삼국지3 프로텍션의
-   0x25a3)을 위해 링이 비어 있으면 주기적으로도 넣는다. 스텝 하드코딩
-   --feed 는 렌더 속도·플래그 수정에 따라 전부 어긋난다(실측). *)
-let parse_feed_sync spec =
-  List.filter_map
-    (fun h ->
-      if h = "" then None
-      else
-        match int_of_string_opt ("0x" ^ h) with
-        | Some w -> Some w
-        | None ->
-          prerr_endline ("bad feed-sync " ^ h ^ " (want hex like 1c0d)");
-          None)
-    (String.split_on_char ',' spec)
+(* --press / --wait: 화면을 보고 키를 넣는 시나리오 단계. 스텝 수를
+   적지 않으니 코어 타이밍이 바뀌어도 같은 화면을 거쳐 간다
+   (Dos_scenario). 한 단계(키 하나, 기다림 하나)의 상한이다. *)
+let scenario_budget = 50_000_000
+
+let parse_region spec =
+  match List.map int_of_string_opt (String.split_on_char ',' spec) with
+  | [ Some x; Some y; Some w; Some h ] -> Some { Dos_scenario.x; y; w; h }
+  | _ -> None
+
+let usage_exit what spec want =
+  Printf.eprintf "bad %s %s (want %s)\n%!" what spec want;
+  exit 2
 
 let parse_keys spec =
   List.filter_map
@@ -135,7 +132,7 @@ let () =
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
-  let feed_sync = ref "" in
+  let scenario = ref [] and digests = ref [] in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -149,8 +146,30 @@ let () =
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 machine step 수 (입력 대기·idle 포함)");
       ("--feed", Arg.Set_string feed,
        "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
-      ("--feed-sync", Arg.Set_string feed_sync,
-       "HEX,HEX,..  게스트가 키를 기다리는 순간에 하나씩 넣는다");
+      ("--press", Arg.String (fun spec ->
+         scenario := Dos_scenario.Press
+             { what = "--press " ^ spec; keys = String.split_on_char ',' spec;
+               budget = scenario_budget } :: !scenario),
+       "KEY,KEY,..  키 이름을 하나씩 넣고, 게임이 다시 키를 묻고 화면이 멈출 \
+        때까지 기다린다 (예: enter,1,0,1,8,3)");
+      ("--wait", Arg.String (fun spec ->
+         let want = "X,Y,W,H=MD5" in
+         match String.index_opt spec '=' with
+         | None -> usage_exit "--wait" spec want
+         | Some i ->
+           (match parse_region (String.sub spec 0 i) with
+            | None -> usage_exit "--wait" spec want
+            | Some region ->
+              let digest = String.sub spec (i + 1) (String.length spec - i - 1) in
+              scenario := Dos_scenario.Wait_for
+                  { what = "--wait " ^ spec; region; digest; budget = scenario_budget }
+                          :: !scenario)),
+       "X,Y,W,H=MD5  프레임의 그 영역이 그 digest 가 될 때까지 돌린다");
+      ("--digest", Arg.String (fun spec ->
+         match parse_region spec with
+         | Some r -> digests := r :: !digests
+         | None -> usage_exit "--digest" spec "X,Y,W,H"),
+       "X,Y,W,H  끝난 뒤 그 영역의 digest 를 --wait 인자 모양으로 찍는다");
       ("--keys", Arg.Set_string keys,
        "HEX[@STEP],..  키 워드 — (스캔 lsl 8) lor ASCII. @STEP 는 그 스텝 \
         전에는 넣지 않는다는 예약 (예: 4d00@5000000)");
@@ -209,32 +228,13 @@ let () =
   String.iter (fun c -> Dos_machine.push_ascii m c) !typed;
   let feeds = Queue.create () in
   List.iter (fun (w, at) -> Queue.push (w, at) feeds) (parse_feed !feed);
-  let sync_feeds = Queue.create () in
-  List.iter (fun w -> Queue.push w sync_feeds) (parse_feed_sync !feed_sync);
-  let feed_armed = ref true in
   let feed_at mm n =
     (match Queue.peek_opt feeds with
      | Some (w, at) when n >= at ->
        ignore (Queue.pop feeds);
        Dos_machine.push_key mm w;
        Printf.eprintf "FEED %04x @step %d\n%!" w n
-     | _ -> ());
-    (* 대기 동기화: 굶주림 상승에 한 개, 폴밋은 링이 빈 때만 *)
-    (match Queue.peek_opt sync_feeds with
-     | Some w when !feed_armed && Dos_machine.kbd_waiting mm ->
-       ignore (Queue.pop sync_feeds);
-       Dos_machine.push_key mm w;
-       feed_armed := false;
-       Printf.eprintf "FEED-SYNC %04x @step %d\n%!" w n
-     | _ -> ());
-    (match Queue.peek_opt sync_feeds with
-     | Some w when n > 0 && n mod 2_000_000 = 0
-                    && not (Dos_state.key_pending mm) ->
-       ignore (Queue.pop sync_feeds);
-       Dos_machine.push_key mm w;
-       Printf.eprintf "FEED-POLL %04x @step %d\n%!" w n
-     | _ -> ());
-    if not (Dos_machine.kbd_waiting mm) then feed_armed := true
+     | _ -> ())
   in
   let on_step mm n =
     feed_at mm n;
@@ -277,11 +277,31 @@ let () =
      end);
   in
   let on_key w n = Printf.eprintf "KEY %04x @step %d\n%!" w n in
-  (try
-     ignore
-       (Dos_machine.run_with_keys ~on_step ~on_key m ~max_steps:!steps
-          ~keys:(parse_keys !keys))
-   with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
+  (* 시나리오가 먼저 돌고, --steps 는 그 뒤에 --keys/--feed 와 함께 돈다.
+     시나리오만 볼 때는 --steps 0. 실패한 단계 뒤로는 더 돌리지 않는다 —
+     화면과 덤프는 멈춘 자리의 것이다. *)
+  let scenario_ok =
+    match List.rev !scenario with
+    | [] -> true
+    | steps ->
+      (try
+         match Dos_scenario.run m steps with
+         | Ok n ->
+           Printf.printf "scenario: %d steps in %d machine steps\n%!" (List.length steps) n;
+           true
+         | Error f ->
+           Printf.eprintf "SCENARIO FAIL: %s\n%!" (Dos_scenario.failure_to_string f);
+           false
+       with Cpu86.Unsupported msg ->
+         Printf.eprintf "UNSUPPORTED: %s\n%!" msg;
+         false)
+  in
+  (if scenario_ok then
+     try
+       ignore
+         (Dos_machine.run_with_keys ~on_step ~on_key m ~max_steps:!steps
+            ~keys:(parse_keys !keys))
+     with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
   let c = Dos_machine.cpu_of m in
   let fw, fh = Dos_machine.frame_dims m in
   Printf.printf "mode=%02xh frame=%dx%d\n%!" (Dos_machine.video_mode m) fw fh;
@@ -300,6 +320,11 @@ let () =
       then incr nonblack)
     rgb;
   Printf.printf "nonblack=%d\n" !nonblack;
+  List.iter
+    (fun (r : Dos_scenario.region) ->
+      Printf.printf "digest %d,%d,%d,%d=%s\n" r.x r.y r.w r.h
+        (Option.value (Dos_scenario.region_digest m r) ~default:"outside-the-frame"))
+    (List.rev !digests);
   (match String.split_on_char ',' !dump with
    | [ a; n ] when !dump <> "" ->
      let a0 = hex a and len = hex n in
@@ -329,4 +354,5 @@ let () =
   let oc = open_out_bin (!out ^ ".ppm") in
   output_string oc (Dos_machine.frame_ppm m);
   close_out oc;
-  Printf.printf "wrote %s.ppm\n" !out
+  Printf.printf "wrote %s.ppm\n" !out;
+  if not scenario_ok then exit 1
