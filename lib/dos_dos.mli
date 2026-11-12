@@ -28,9 +28,11 @@ val load_com : ?psp_seg:int -> ?child:bool -> Dos_state.t -> string -> unit
 (** COM 이미지를 기계에 싣는다. 루트는 세그 0x1000, EXEC 자식은
     [psp_seg] 자리에 64KB 블록 한 장을 얹는다. *)
 
-val load_exe : ?psp_seg:int -> ?child:bool -> Dos_state.t -> string -> unit
-(** MZ EXE 이미지를 싣는다. [psp_seg] 가 없으면 memtop 아래 루트
-    배치, 있으면(자식) 그 자리에 남은 메모리를 통째로 블록으로 받는다. *)
+val load_exe : Dos_state.t -> string -> unit
+(** MZ EXE 이미지를 memtop 아래 루트 자리에 싣는다. 적재 모듈은 헤더의
+    페이지 수가 정한다(MS-DOS 4.0 EXEC.ASM) — 파일 뒤에 붙은 데이터는
+    싣지 않는다. 헤더가 파일 안의 모듈을 말하지 않으면 [Invalid_argument].
+    EXEC 자식은 AH=4Bh 가 같은 규칙으로 싣는다. *)
 
 val int27 : Dos_state.t -> unit
 (** INT 27h — 옛 방식 상주 종료. DX 오프셋까지 자기 블록을 남긴다. *)
