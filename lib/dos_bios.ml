@@ -1,5 +1,5 @@
 (* BIOS 표면 — ROM 코드, 인터럽트 벡터표, BIOS 데이터 영역, 그리고
-   INT 10h(비디오)·11h(장비)·12h(메모리)·16h(키보드)·1Ah(시각)·
+   INT 10h(비디오)·11h(장비)·12h(메모리)·15h(시스템)·16h(키보드)·1Ah(시각)·
    33h(마우스) 서비스.
 
    부팅 관문의 대부분은 "실기 하드웨어 계약이 비어 있었다" 였다. 벡터가
@@ -14,13 +14,15 @@ open Dos_state
    나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
    조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
    12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type bios_service =
+  | Video | Equipment | Memory_size | System | Keyboard | Time_of_day | Mouse
 type host_vector = Bios of bios_service | Dos_terminate | Dos_call | Dos_keep | Ems
 
 let host_vector = function
   | 0x10 -> Some (Bios Video)
   | 0x11 -> Some (Bios Equipment)
   | 0x12 -> Some (Bios Memory_size)
+  | 0x15 -> Some (Bios System)
   | 0x16 -> Some (Bios Keyboard)
   | 0x1A -> Some (Bios Time_of_day)
   | 0x20 -> Some Dos_terminate
@@ -41,6 +43,12 @@ let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
+
+(* F000:FFFE 의 기계 모델 바이트. FCh 는 AT 다(SeaBIOS src/config.h
+   BUILD_MODEL_ID, 28aa46349b97). 게임은 이 바이트로 PCjr(FDh)·Tandy
+   (FFh)를 가린다. *)
+let model_byte_off = 0xFFFE
+let at_model_byte = 0xFC
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
@@ -83,6 +91,7 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
+  wr8 t ((rom_seg * 16) + model_byte_off) at_model_byte;
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
@@ -432,6 +441,23 @@ let mouse t =
 
 (* ---------- 묶음 ---------- *)
 
+(* ---------- INT 15h 시스템 ---------- *)
+
+(* SeaBIOS src/system.c(28aa46349b97)를 따른다. 이 기계에는 1MB 위
+   메모리가 없고(A20 이 늘 꺼져 있다) 보호 모드도 없다. 그래서 87h(블록
+   이동)·89h(보호 모드)·24h(A20)·C0h(구성 표)·E8h(메모리 지도)는 "지원
+   안 함" 으로 답한다. 원래 AT BIOS 도 C0h 가 없었다. *)
+let extended_memory_kb = 0
+let unsupported_function = 0x86
+
+let system t =
+  let cpu = t.cpu in
+  match Cpu86.reg8 cpu 4 with
+  | 0x88 -> Cpu86.set_reg16 cpu 0 extended_memory_kb; set_cf t false
+  | 0x4F -> set_cf t true (* 키보드 가로채기: 그 스캔 코드를 그대로 쓰라 *)
+  | 0x90 | 0x91 -> () (* 장치 바쁨·끝남 알림: SeaBIOS 도 아무것도 안 한다 *)
+  | _ -> Cpu86.set_reg8 cpu 4 unsupported_function; set_cf t true
+
 let service t s =
   match s with
   | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
@@ -440,4 +466,5 @@ let service t s =
   | Equipment -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410); Completed
   | Memory_size -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413); Completed
   | Time_of_day -> clock t; Completed
+  | System -> system t; Completed
   | Mouse -> mouse t; Completed

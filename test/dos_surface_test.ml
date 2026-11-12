@@ -512,14 +512,14 @@ let test_bios_clock_reads_rtc () =
 
 (* INT 1Ah 를 가로채 옛 벡터로 넘겨도 AH=02 의 CF=0 이 호출자에게 간다.
    호출 전 CF=1 로 두어, 호출자 프레임의 FLAGS 가 그대로 돌아오면 남게 한다. *)
-let test_bios_clock_cf_through_a_hook () =
+let carry_through_a_hook ~vector ~ah =
   let code =
     assemble
       (fun off ->
          let old = off + 5 in
-         mov_ax 0x351A ^ int_ 0x21 ^ store_bx old ^ "\x8c\x06" ^ w (old + 2)
-         ^ mov_dx off ^ mov_ax 0x251A ^ int_ 0x21
-         ^ "\xf9" (* stc *) ^ mov_ah 0x02 ^ int_ 0x1A
+         mov_ax (0x3500 lor vector) ^ int_ 0x21 ^ store_bx old ^ "\x8c\x06" ^ w (old + 2)
+         ^ mov_dx off ^ mov_ax (0x2500 lor vector) ^ int_ 0x21
+         ^ "\xf9" (* stc *) ^ mov_ah ah ^ int_ vector
          ^ sbb_ax_ax ^ store_ax scratch ^ quit)
       ((* hook: jmp far [cs:old] *) "\x2e\xff\x2e" ^ w 0 ^ "\x00\x00\x00\x00")
   in
@@ -527,8 +527,41 @@ let test_bios_clock_cf_through_a_hook () =
   let code =
     String.sub code 0 (hook_at + 3) ^ w (0x100 + hook_at + 5) ^ String.sub code (hook_at + 5) 4
   in
-  let m = run_com code in
-  check "훅을 지난 INT 1Ah AH=02 도 CF=0" (peek16 m scratch) 0
+  peek16 (run_com code) scratch
+
+let test_bios_clock_cf_through_a_hook () =
+  check "훅을 지난 INT 1Ah AH=02 도 CF=0" (carry_through_a_hook ~vector:0x1A ~ah:0x02) 0
+
+(* INT 15h(SeaBIOS src/system.c). 88h 는 1MB 위 메모리 0KB, 모르는
+   기능은 CF=1·AH=86h. 각 호출 전 CF 와 AX 를 반대로 채워 둔다. *)
+let test_bios_system_services () =
+  let call ~cf ~ax =
+    (if cf then "\xf9" else "\xf8") ^ mov_ax ax ^ int_ 0x15
+  in
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+            call ~cf:true ~ax:0x88FF ^ store_ax scratch ^ sbb_cx_cx ^ store_cx (scratch + 2)
+            ^ call ~cf:false ~ax:0xC000 ^ store_ax (scratch + 4) ^ sbb_cx_cx ^ store_cx (scratch + 6)
+            ^ call ~cf:false ~ax:0x8700 ^ store_ax (scratch + 8) ^ sbb_cx_cx ^ store_cx (scratch + 10)
+            ^ call ~cf:false ~ax:0x4F1E ^ store_ax (scratch + 12) ^ sbb_cx_cx ^ store_cx (scratch + 14)
+            ^ call ~cf:true ~ax:0x9002 ^ store_ax (scratch + 16) ^ sbb_cx_cx ^ store_cx (scratch + 18)
+            ^ quit)
+         "")
+  in
+  check "INT 15h AH=88h AX=0KB" (peek16 m scratch) 0;
+  check "INT 15h AH=88h CF=0" (peek16 m (scratch + 2)) 0;
+  check "INT 15h AH=C0h 는 지원 안 함(AH=86h)" (peek m (scratch + 5)) 0x86;
+  check "INT 15h AH=C0h CF=1" (peek16 m (scratch + 6)) 0xFFFF;
+  check "INT 15h AH=87h 는 지원 안 함(AH=86h)" (peek m (scratch + 9)) 0x86;
+  check "INT 15h AH=87h CF=1" (peek16 m (scratch + 10)) 0xFFFF;
+  check "INT 15h AH=4Fh 는 AX 를 그대로" (peek16 m (scratch + 12)) 0x4F1E;
+  check "INT 15h AH=4Fh CF=1" (peek16 m (scratch + 14)) 0xFFFF;
+  check "INT 15h AH=90h 는 AX 를 그대로" (peek16 m (scratch + 16)) 0x9002;
+  check "INT 15h AH=90h 는 CF 를 그대로" (peek16 m (scratch + 18)) 0xFFFF;
+  check "훅을 지난 INT 15h AH=88h 도 CF=0" (carry_through_a_hook ~vector:0x15 ~ah:0x88) 0;
+  check "F000:FFFE 는 AT 모델 바이트" (Dos_machine.mem_read m 0xFFFFE) 0xFC
 
 (* 스텁을 까는 쪽과 서비스를 고르는 쪽이 같은 벡터를 본다. *)
 let test_every_host_vector_has_a_stub () =
@@ -660,6 +693,7 @@ let () =
   test_bios_equipment_memory_clock ();
   test_bios_clock_reads_rtc ();
   test_bios_clock_cf_through_a_hook ();
+  test_bios_system_services ();
   test_every_host_vector_has_a_stub ();
   if !failed = 0 then print_endline "dos 표면: all passed"
   else begin

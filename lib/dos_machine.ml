@@ -46,7 +46,7 @@ let service_status_mask t v =
   let ah = Cpu86.reg8 t.cpu 4 in
   match Dos_bios.host_vector v with
   | Some (Bios Keyboard) -> if ah = 0x01 || ah = 0x11 then Cpu86.f_zero else 0
-  | Some (Bios Time_of_day) -> Cpu86.f_carry
+  | Some (Bios (Time_of_day | System)) -> Cpu86.f_carry
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
