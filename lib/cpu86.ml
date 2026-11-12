@@ -264,6 +264,17 @@ let op_write t width opd v =
       t.write (at t b (o + 1)) (v lsr 8)
     end
 
+(* 포트는 바이트 폭이다. 워드 접근은 p 와 p+1 두 번 — 한 번으로
+   줄이면 상위 바이트가 늘 0 이 되고, 장치 쪽에서도 두 번째 포트의
+   부수효과(DAC 데이터 레지스터 등)가 사라진다. IN/OUT 과 INSW/OUTSW 가
+   같이 쓴다. *)
+let port_in16 t p =
+  (t.port_in p land 0xff) lor ((t.port_in ((p + 1) land 0xffff) land 0xff) lsl 8)
+
+let port_out16 t p v =
+  t.port_out p (v land 0xff);
+  t.port_out ((p + 1) land 0xffff) ((v lsr 8) land 0xff)
+
 let push16 t v =
   t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
   let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
@@ -501,9 +512,11 @@ let step t =
             let d = op_read t width (seg_di ()) in
             ignore (alu_result t 7 al d width)
           | Ins (* 186: ES:[DI] <- 포트 DX *) ->
-            op_write t width (seg_di ()) (t.port_in (reg16 t 2))
+            let p = reg16 t 2 in
+            op_write t width (seg_di ()) (if word then port_in16 t p else t.port_in p)
           | Outs (* 186: 포트 DX <- DS:[SI] *) ->
-            t.port_out (reg16 t 2) (op_read t width (seg_si ()))
+            let p = reg16 t 2 and v = op_read t width (seg_si ()) in
+            if word then port_out16 t p v else t.port_out p v
         in
         match !rep with
         | None -> run_once (); step_regs ()
@@ -1029,36 +1042,15 @@ let step t =
         let d = if d >= 0x80 then d - 0x100 else d in
         if t.regs.(1) = 0 then t.ip <- (t.ip + d) land 0xffff;
         5
-      (* --- in/out --- *)
-      (* 포트는 바이트 폭이다. 워드 접근은 p 와 p+1 두 번 — 한 번으로
-         줄이면 상위 바이트가 늘 0 이 되고, 장치 쪽에서도 두 번째 포트의
-         부수효과(DAC 데이터 레지스터 등)가 사라진다. *)
+      (* --- in/out (워드는 port_in16/port_out16) --- *)
       | 0xe4 -> set_reg8 t 0 (t.port_in (fetch8 t)); 10
-      | 0xe5 ->
-        let p = fetch8 t in
-        set_reg16 t 0
-          ((t.port_in p land 0xff)
-           lor ((t.port_in ((p + 1) land 0xffff) land 0xff) lsl 8));
-        10
+      | 0xe5 -> set_reg16 t 0 (port_in16 t (fetch8 t)); 10
       | 0xe6 -> t.port_out (fetch8 t) (reg8 t 0); 10
-      | 0xe7 ->
-        let p = fetch8 t and v = reg16 t 0 in
-        t.port_out p (v land 0xff);
-        t.port_out ((p + 1) land 0xffff) (v lsr 8);
-        10
+      | 0xe7 -> port_out16 t (fetch8 t) (reg16 t 0); 10
       | 0xec -> set_reg8 t 0 (t.port_in (reg16 t 2)); 8
-      | 0xed ->
-        let p = reg16 t 2 in
-        set_reg16 t 0
-          ((t.port_in p land 0xff)
-           lor ((t.port_in ((p + 1) land 0xffff) land 0xff) lsl 8));
-        8
+      | 0xed -> set_reg16 t 0 (port_in16 t (reg16 t 2)); 8
       | 0xee -> t.port_out (reg16 t 2) (reg8 t 0); 8
-      | 0xef ->
-        let p = reg16 t 2 and v = reg16 t 0 in
-        t.port_out p (v land 0xff);
-        t.port_out ((p + 1) land 0xffff) (v lsr 8);
-        8
+      | 0xef -> port_out16 t (reg16 t 2) (reg16 t 0); 8
       (* --- jmp far imm --- *)
       | 0xea ->
         let off = fetch16 t in
