@@ -19,7 +19,6 @@ let refresh_toggle_cycles = 158
 let opl_t1_step = 382
 let opl_t2_step = 1527
 
-let crtc_regs = 25
 let dac_entries = 256
 
 type t = {
@@ -41,8 +40,6 @@ type t = {
   mutable dac_phase : int;              (** 0=R 1=G 2=B *)
   mutable dac_mask : int;
   (* CRTC *)
-  mutable crtc_index : int;
-  crtc : int array;
   (* 기타 *)
   mutable scancode : int;
   mutable port_b : int;                 (** 0x61 래치 *)
@@ -101,8 +98,6 @@ let create ~mem ~video =
     dac_read_index = 0;
     dac_phase = 0;
     dac_mask = 0xFF;
-    crtc_index = 0;
-    crtc = Array.make crtc_regs 0;
     scancode = 0;
     port_b = 0;
     cga_status = false;
@@ -151,10 +146,20 @@ let pit0_count t =
    같은 값을 BDA 0x450/0x451 에 행·열로 둔다 — 커서의 진실 원천이
    둘로 갈라지지 않게 여기서 같이 맞춘다. *)
 let sync_cursor_to_bda t =
-  let linear = ((t.crtc.(0x0E) land 0xff) lsl 8) lor (t.crtc.(0x0F) land 0xff) in
+  let reg i = Dos_video.crtc t.video i land 0xff in
+  let linear = (reg 0x0E lsl 8) lor reg 0x0F in
   let cols = max 1 (Dos_video.text_cols t.video) in
   Bytes.set t.mem 0x450 (Char.chr (linear mod cols));
   Bytes.set t.mem 0x451 (Char.chr ((linear / cols) land 0xff))
+
+(* CRTC 는 비디오 어댑터가 가진다. 커서 위치(0x0E/0x0F)와 모양(0x0A/0x0B)
+   은 BIOS 도 BDA 에 두므로, 어댑터가 쓰기를 받은 뒤 여기서 BDA 를 맞춘다. *)
+let crtc_written t v =
+  match Dos_video.crtc_index t.video with
+  | 0x0E | 0x0F -> sync_cursor_to_bda t
+  | 0x0A -> Bytes.set t.mem 0x461 (Char.chr v)
+  | 0x0B -> Bytes.set t.mem 0x460 (Char.chr v)
+  | _ -> ()
 
 let port_in t p =
   match Dos_video.port_in t.video p with
@@ -200,9 +205,6 @@ let port_in t p =
       t.dac_read_index <- (t.dac_read_index + 1) land 0xff
     end;
     v land 0x3f
-  | 0x3B4 | 0x3D4 -> t.crtc_index
-  | 0x3B5 | 0x3D5 ->
-    if t.crtc_index < crtc_regs then t.crtc.(t.crtc_index) else 0xff
   | 0x3D8 -> t.mode_control
   | 0x3D9 -> t.color_select
   | 0x3BA | 0x3DA ->
@@ -236,7 +238,11 @@ let port_in t p =
 
 let port_out t p v =
   let v = v land 0xff in
-  if Dos_video.port_out t.video p v then ()
+  if Dos_video.port_out t.video p v then begin
+    match p land 0xffff with
+    | 0x3B5 | 0x3D5 -> crtc_written t v
+    | _ -> ()
+  end
   else
   match p land 0xffff with
   | 0x20 -> ()                        (* EOI — 우선순위 모델이 없다 *)
@@ -285,15 +291,6 @@ let port_out t p v =
       t.dac_phase <- 0;
       t.dac_write_index <- (i + 1) land 0xff
     end
-  | 0x3B4 | 0x3D4 -> t.crtc_index <- v
-  | 0x3B5 | 0x3D5 ->
-    if t.crtc_index < crtc_regs then begin
-      t.crtc.(t.crtc_index) <- v;
-      if t.crtc_index = 0x0E || t.crtc_index = 0x0F then sync_cursor_to_bda t;
-      (* 커서 모양(시작·끝 스캔라인)도 BIOS 가 BDA 에 둔다 *)
-      if t.crtc_index = 0x0A then Bytes.set t.mem 0x461 (Char.chr v);
-      if t.crtc_index = 0x0B then Bytes.set t.mem 0x460 (Char.chr v)
-    end
   | 0x3D8 -> t.mode_control <- v
   | 0x3D9 -> t.color_select <- v; Dos_video.set_cga_color_select t.video v
   | 0x388 -> t.opl_reg <- v              (* 레지스터 선택 *)
@@ -337,7 +334,7 @@ let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
         pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
-        dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
+        dac_phase; dac_mask; scancode; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
   in
@@ -359,8 +356,6 @@ let write_state w t =
   put "dac_read_index" C.byte dac_read_index;
   put "dac_phase" dac_phase_r dac_phase;
   put "dac_mask" C.byte dac_mask;
-  put "crtc_index" C.byte crtc_index;
-  C.put_int_array w ~what:"crtc" C.byte crtc;
   put "scancode" C.byte scancode;
   put "port_b" C.byte port_b;
   C.put_bool w cga_status;
@@ -396,8 +391,6 @@ let read_state r t =
   t.dac_read_index <- get "dac_read_index" C.byte;
   t.dac_phase <- get "dac_phase" dac_phase_r;
   t.dac_mask <- get "dac_mask" C.byte;
-  t.crtc_index <- get "crtc_index" C.byte;
-  C.fill_int_array r ~what:"crtc" C.byte t.crtc;
   t.scancode <- get "scancode" C.byte;
   t.port_b <- get "port_b" C.byte;
   t.cga_status <- C.get_bool r;

@@ -170,12 +170,12 @@ let rgb_planar planes ~w ~h ~attr ~pal =
   done;
   Bytes.to_string img
 
-(* VGA 13h: 0xA0000 선형 320x200, DAC 은 채널당 6비트. *)
-let rgb_vga13 mem pal =
-  let width = 320 and height = 200 in
-  let img = Bytes.make (width * height * 3) '\000' in
-  for i = 0 to (width * height) - 1 do
-    let r, g, b = rgb_of_dac pal (Char.code (Bytes.get mem (0xA0000 + i))) in
+(* 256색: 화면 순서로 늘어선 색 번호, DAC 은 채널당 6비트. *)
+let rgb_indexed indices pal =
+  let n = Bytes.length indices in
+  let img = Bytes.make (n * 3) '\000' in
+  for i = 0 to n - 1 do
+    let r, g, b = rgb_of_dac pal (Char.code (Bytes.get indices i)) in
     Bytes.set img (i * 3) (Char.chr r);
     Bytes.set img ((i * 3) + 1) (Char.chr g);
     Bytes.set img ((i * 3) + 2) (Char.chr b)

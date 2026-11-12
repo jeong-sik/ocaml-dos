@@ -386,7 +386,7 @@ let frame_rgb t =
     let w, h = Dos_video.dims t.video in
     Dos_render.rgb_planar (Dos_video.planes t.video) ~w ~h
       ~attr:(Dos_video.attr_palette t.video) ~pal
-  | Dos_video.Linear256 -> Dos_render.rgb_vga13 t.mem pal
+  | Dos_video.Linear256 -> Dos_render.rgb_indexed (Dos_video.screen256 t.video) pal
 
 let frame_ppm t =
   let w, h = frame_dims t in
@@ -402,7 +402,7 @@ let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
-let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
+let pixel t ~x ~y = Dos_video.screen_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_year <- year;
