@@ -3,8 +3,9 @@
     new byte arrives.
 
     A key goes down and comes up. The make code (the BIOS scan code) comes
-    first and the break code (make + 80h) after it; an upper-case letter
-    and back-tab are wrapped in left shift down (2Ah) and up (AAh). The
+    first and the break code (make + 80h) after it. A word the key gives
+    with shift, ctrl or alt ({!Dos_keymap}) is wrapped in that modifier's
+    make and break: 'A' is 2Ah 1Eh 9Eh AAh, alt-X is 38h 2Dh ADh B8h. The
     make is sent when the key is pressed and the break 100 ms later, so a
     game that samples which keys are down sees the key down. Bytes go out
     in the order they are due; a key pressed while another is held sends
@@ -23,8 +24,9 @@ val create : unit -> t
 
 val press : t -> now:int -> int -> unit
 (** One key down at cycle [now] and up 100 ms later, for the BIOS word
-    [scan lsl 8 lor ascii]. The make code is the word's scan byte, whatever
-    it is. *)
+    [scan lsl 8 lor ascii]. The key and its modifier come from
+    {!Dos_keymap.of_word}; for a word no key gives, the make code is the
+    word's high byte and nothing is held. *)
 
 val latch : t -> now:int -> bool
 (** Moves the next byte into port 0x60 if it is due, the last one was
@@ -47,11 +49,7 @@ val status : t -> int
 
 val data_word : t -> int option
 (** The BIOS word the byte in port 0x60 stands for: [Some] for a make code
-    from {!press}, [None] for a break code or a shift byte. *)
-
-val left_shift_make : int
-val left_shift_break : int
-(** The two shift bytes {!press} sends around an upper-case letter. *)
+    from {!press}, [None] for a break code or a modifier byte. *)
 
 val holds_key : t -> bool
 (** A make code the program has not read yet, queued or waiting in port

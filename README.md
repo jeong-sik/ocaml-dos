@@ -195,6 +195,14 @@ IRQ1 이 INT 9 로 가고, BIOS INT 9 가 make 바이트의 워드를 링에 넣
 뒤에 링에 닿는다. `key_unread`는 링이나 컨트롤러에 프로그램이 아직 안 가져간
 키가 있는지 답한다.
 
+워드가 어느 키와 어느 수식키에서 나왔는지는 AT BIOS 의 키 표(SeaBIOS
+`src/kbd.c` 의 `scan_to_keycode`)로 거꾸로 찾는다. 수식키가 있으면 그 키의
+make·break 가 앞뒤를 감싼다: `!`(0221h)는 `2A 02 82 AA`, alt-X(2D00h)는
+`38 2D AD B8`, alt-1(7800h)은 1 키라 `38 02 82 B8` 이다. 한 키가 여러
+수식키에서 같은 워드를 내면(스페이스, Enter) 수식키 없이 누른 것으로 본다.
+표에 없는 워드는 상위 바이트를 make 로 보낸다. BIOS INT 9 는 왼쪽 shift·
+ctrl·alt 를 0040:0017 과 0040:0018 에 둔다.
+
 BIOS INT 16h AH=00/10은 키가 없으면 호출자를 멈추며, IRQ handler는 실행될 수
 있다. `kbd_waiting`은 마지막 읽기나 비차단 poll이 빈 링을 관측했다는 뜻이다.
 이 관측만으로 게임의 화면 전환 완료를 보장하지는 않는다.
@@ -229,6 +237,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, CRTC, 스피커. PIC 와 키보드 포트는 아래 둘에 넘긴다 |
 | `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가 |
+| `Dos_keymap` | BIOS 키 워드 ↔ 키·수식키 표 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 09h/10h/11h/12h/16h/1Ah/33h |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
