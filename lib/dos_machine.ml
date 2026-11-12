@@ -31,23 +31,27 @@ let accept_service t ~return_to = function
        guest hook, where the interrupt entry already cleared IF. *)
     Cpu86.set_flags t.cpu ((flags lor Cpu86.f_interrupt) land lnot Cpu86.f_trap)
 
+(* [None]: IVT 가 0:0 인 벡터. 실기라면 0000:0000 으로 뛴다. *)
 let host_service t ~return_to v =
-  match v with
-  | 0x20 -> Dos_dos.terminate t; Control_transferred
-  | 0x21 -> Dos_dos.service t ~return_to
-  | 0x27 -> Dos_dos.int27 t; Control_transferred
-  | 0x67 -> Dos_ems.service t; Completed
-  | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
-  | _ -> Completed
+  match Dos_bios.host_vector v with
+  | Some Dos_terminate -> Dos_dos.terminate t; Control_transferred
+  | Some Dos_call -> Dos_dos.service t ~return_to
+  | Some Dos_keep -> Dos_dos.int27 t; Control_transferred
+  | Some Ems -> Dos_ems.service t; Completed
+  | Some (Bios s) -> Dos_bios.service t s
+  | None -> Completed
 
+(* 게스트 훅을 지나 서비스를 불렀을 때 호출자의 FLAGS 로 돌려줄 비트. *)
 let service_status_mask t v =
   let ah = Cpu86.reg8 t.cpu 4 in
-  let fn = if v = 0x21 && ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
-  match v, fn with
-  | 0x16, (0x01 | 0x11) -> Cpu86.f_zero
-  | 0x21, 0x06 -> Cpu86.f_zero
-  | 0x21, _ -> Cpu86.f_carry
-  | _ -> 0
+  match Dos_bios.host_vector v with
+  | Some (Bios Keyboard) -> if ah = 0x01 || ah = 0x11 then Cpu86.f_zero else 0
+  | Some (Bios Time_of_day) -> Cpu86.f_carry
+  | Some Dos_call ->
+    let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
+    if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
+  | Some (Bios (Video | Equipment | Memory_size | Mouse) | Dos_terminate | Dos_keep | Ems)
+  | None -> 0
 
 let create () =
   let mem = Bytes.make (1024 * 1024) '\000' in

@@ -9,15 +9,32 @@
 
 open Dos_state
 
-(* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
-   전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
-   삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
+(* 호스트 구현으로 가야 하는 벡터. 스텁을 까는 [install] 과 서비스를
+   고르는 [Dos_machine.host_service] 가 모두 [host_vector] 하나에서
+   나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
+   조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
+   12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
+type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type host_vector = Bios of bios_service | Dos_terminate | Dos_call | Dos_keep | Ems
+
+let host_vector = function
+  | 0x10 -> Some (Bios Video)
+  | 0x11 -> Some (Bios Equipment)
+  | 0x12 -> Some (Bios Memory_size)
+  | 0x16 -> Some (Bios Keyboard)
+  | 0x1A -> Some (Bios Time_of_day)
+  | 0x20 -> Some Dos_terminate
+  | 0x21 -> Some Dos_call
+  | 0x27 -> Some Dos_keep
+  | 0x33 -> Some (Bios Mouse)
+  | 0x67 -> Some Ems
+  | _ -> None
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
    0x20, 호스트 서빙 벡터의 되돌림 스텁은 0x100 부터 16바이트씩. *)
 let rom_seg = 0xF000
+let timer_vector = 0x08
 let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
 let bios_int8_off = 0x0040
@@ -66,8 +83,7 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
-  set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
-  set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
+  set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
@@ -94,27 +110,26 @@ let install t =
      Pascal 의 Intr 썽크는 INT 명령 없이 IVT 를 직접 읽어 그 주소로
      retf 한다(실측: 빈 IVT[10h] 로 0000:0000 추락). 스텁 본체는
      "int 사설벡터; iret" 이고, 사설 벡터는 비어 있어 호스트 훅이 받는다. *)
+  (* EMS 는 헤더 0 번지의 스텁으로 간다 — EMS 런타임이 세그먼트+0x0A 를
+     읽기 때문이다. 나머지 벡터는 전부 IRET 스텁으로 채운다. 실기 BIOS 는
+     모든 벡터가 ROM/DOS 를 가리켜서, 프로그램이 훅을 걸며 되읽은 "옛
+     벡터" 가 0:0 이 아니다. 하나라도 비워 두면 체인 복귀가 0000:0000
+     으로 떨어진다. *)
   let off = ref stub_area in
-  List.iter
-    (fun v ->
+  for v = 0 to 255 do
+    match host_vector v with
+    | Some Ems ->
+      set_ivt t v emm_entry_off rom_seg;
+      t.stubs <- (v, emm_entry_off) :: t.stubs
+    | Some (Bios _ | Dos_terminate | Dos_call | Dos_keep) ->
       let a = (rom_seg * 16) + !off in
       wr8 t a 0xCD;
       wr8 t (a + 1) (private_vector v);
       wr8 t (a + 2) 0xCF;
       set_ivt t v !off rom_seg;
       t.stubs <- (v, !off) :: t.stubs;
-      off := !off + stub_stride)
-    host_served;
-  (* 0x67 은 위의 일괄 배정을 덮어써 헤더 0 번지로 — EMS 런타임이
-     세그먼트+0x0A 를 읽기 때문이다. 되돌림 스텁 자리는 비워 둔다. *)
-  set_ivt t 0x67 emm_entry_off rom_seg;
-  t.stubs <- (0x67, emm_entry_off) :: t.stubs;
-  (* 나머지 벡터는 전부 IRET 스텁으로 채운다. 실기 BIOS 는 모든 벡터가
-     ROM/DOS 를 가리켜서, 프로그램이 훅을 걸며 되읽은 "옛 벡터" 가 0:0
-     이 아니다. 하나라도 비워 두면 체인 복귀가 0000:0000 으로 떨어진다. *)
-  for v = 0 to 255 do
-    if not (List.mem v (0x08 :: host_served)) then
-      set_ivt t v iret_stub_off rom_seg
+      off := !off + stub_stride
+    | None -> if v <> timer_vector then set_ivt t v iret_stub_off rom_seg
   done;
   (* IBM PC BIOS(5150)는 8x8 글꼴 표를 F000:FA6E 에 둔다. 그래픽 모드에서
      글자를 직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 —
@@ -417,17 +432,12 @@ let mouse t =
 
 (* ---------- 묶음 ---------- *)
 
-let service t vec =
-  if vec = 0x16 && (Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10)
-  then read_key t
-  else begin
-  (match vec with
-  | 0x10 -> video t
-  | 0x11 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410)
-  | 0x12 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413)
-  | 0x16 -> keyboard t
-  | 0x1A -> clock t
-  | 0x33 -> mouse t
-  | _ -> ());
-  Completed
-  end
+let service t s =
+  match s with
+  | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
+  | Keyboard -> keyboard t; Completed
+  | Video -> video t; Completed
+  | Equipment -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410); Completed
+  | Memory_size -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413); Completed
+  | Time_of_day -> clock t; Completed
+  | Mouse -> mouse t; Completed
