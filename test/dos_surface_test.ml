@@ -544,17 +544,20 @@ let test_every_host_vector_has_a_stub () =
 let spin_program = "\xfb\xeb\xfe"          (* sti; jmp $ *)
 let spin_no_int = "\xfa\xeb\xfe"           (* cli; jmp $ *)
 
-let test_timer_ticks () =
+(* 틱은 부팅 때 기준시각(08:00:00)으로 채워진다. 테스트는 그 뒤로 늘어난
+   만큼을 본다. *)
+let ticks_run program =
   let m = Dos_machine.create () in
-  Dos_machine.load_com m spin_program;
+  let boot = Dos_machine.tick_count m in
+  Dos_machine.load_com m program;
   ignore (Dos_machine.run_until m ~max_steps:3_000_000 ~stop:(fun _ -> false));
-  check_true "타이머가 돈다" (Dos_machine.tick_count m > 0)
+  Dos_machine.tick_count m - boot
+
+let test_timer_ticks () =
+  check_true "타이머가 돈다" (ticks_run spin_program > 0)
 
 let test_cli_holds_the_tick () =
-  let m = Dos_machine.create () in
-  Dos_machine.load_com m spin_no_int;
-  ignore (Dos_machine.run_until m ~max_steps:3_000_000 ~stop:(fun _ -> false));
-  check "인터럽트를 막으면 틱이 안 들어온다" (Dos_machine.tick_count m) 0
+  check "인터럽트를 막으면 틱이 안 들어온다" (ticks_run spin_no_int) 0
 
 let test_pit_divisor_speeds_up_ticks () =
   (* 채널 0 을 분주비 0x1000 으로 — 기본 65536 보다 16 배 빠르다. *)
@@ -566,14 +569,8 @@ let test_pit_divisor_speeds_up_ticks () =
         ^ "\xfb\xeb\xfe")
       ""
   in
-  let m = Dos_machine.create () in
-  Dos_machine.load_com m prog;
-  ignore (Dos_machine.run_until m ~max_steps:3_000_000 ~stop:(fun _ -> false));
-  let fast = Dos_machine.tick_count m in
-  let m2 = Dos_machine.create () in
-  Dos_machine.load_com m2 spin_program;
-  ignore (Dos_machine.run_until m2 ~max_steps:3_000_000 ~stop:(fun _ -> false));
-  let normal = Dos_machine.tick_count m2 in
+  let fast = ticks_run prog in
+  let normal = ticks_run spin_program in
   check_true
     (Printf.sprintf "분주비를 줄이면 틱이 빨라진다 (fast=%d normal=%d)" fast
        normal)
