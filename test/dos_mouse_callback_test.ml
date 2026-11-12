@@ -17,8 +17,9 @@ let checki name got want =
     Printf.eprintf "FAIL %s: got 0x%x want 0x%x\n%!" name got want
   end
 
-(* COM 원점 0x100. 마스크와 대기 뒤 꼬리만 달리한다. *)
-let guest ~mask ~tail =
+(* COM 원점 0x100. 마스크와 대기 뒤 꼬리만 달리한다. [after_register] 는
+   등록과 대기 사이에 끼운다. *)
+let guest ?(after_register = "") ~mask ~tail () =
   let head =
     String.concat ""
       [ "\xb8\x0c\x00" (* mov ax,0x000C *)
@@ -27,6 +28,7 @@ let guest ~mask ~tail =
       ; "\xba\x20\x01" (* mov dx,0x0120 — 핸들러 *)
       ; "\x0e\x07" (* push cs; pop es *)
       ; "\xcd\x33" (* int 0x33 *)
+      ; after_register
       ; "\xa0\x40\x01" (* wait: mov al,[0x0140] *)
       ; "\x08\xc0" (* or al,al *)
       ; "\x74\xf9" (* jz wait *)
@@ -181,13 +183,54 @@ let test_reset_clears () =
   checki "00h drops the y range" (peek_word m (out + 2)) 0;
   checki "00h drops the press count" (peek_word m (out + 4)) 0
 
+(* ---------- 00h·21h 리셋 ---------- *)
+
+(* 핸들러를 건 뒤 [call] 을 부르고 누름을 기다린다. 02h(숨기기)는 핸들러를
+   그대로 두므로 테스트가 헛돌지 않는지 보는 짝이다. *)
+let test_reset_turns_the_handler_off () =
+  List.iter
+    (fun (name, call, handler_runs) ->
+      let m = Dos_machine.create () in
+      let call_code = "\xb8" ^ w16 call ^ "\xcd\x33" in
+      Dos_machine.load_com m (guest ~after_register:call_code ~mask:0x0002 ~tail:tail_events ());
+      Dos_machine.run m ~max_steps:500;
+      Dos_machine.set_mouse m ~x:100 ~y:50 ~buttons:1;
+      Dos_machine.run m ~max_steps:2000;
+      checkb name (Dos_machine.exited m) handler_runs)
+    [ ("02h keeps the handler", 0x02, true);
+      ("00h turns the handler off", 0x00, false);
+      ("21h turns the handler off", 0x21, false) ]
+
+let test_software_reset () =
+  let code =
+    String.concat ""
+      [ mouse_call 0x07 ~cx:20 ~dx:100;
+        mouse_call 0x21; store_ax out; store_bx (out + 2);
+        mouse_call 0x04 ~cx:300 ~dx:0;
+        mouse_call 0x03; store_cx (out + 4);
+        exit_0 ]
+  in
+  let m = run_program code in
+  checki "21h: AX = installed" (peek_word m out) 0xFFFF;
+  checki "21h: BX = two buttons" (peek_word m (out + 2)) 2;
+  checki "21h drops the x range" (peek_word m (out + 4)) 300;
+  let absent =
+    run_program
+      (String.concat "" [ mouse_call 0x21 ~bx:0x1234; store_ax out; store_bx (out + 2); exit_0 ])
+      ~before:(fun m -> m.Dos_state.mouse.Dos_state.mouse_present <- false)
+  in
+  checki "21h without a driver: AX stays 0021h" (peek_word absent out) 0x0021;
+  checki "21h without a driver: BX unchanged" (peek_word absent (out + 2)) 0x1234
+
 let () =
   test_button_logs ();
+  test_reset_turns_the_handler_off ();
+  test_software_reset ();
   test_ranges ();
   test_reset_clears ();
   (* 왼쪽 누름 등록: 이동+누름이 닿아 핸들러가 돈다. *)
   let m = Dos_machine.create () in
-  Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_events);
+  Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_events ());
   Dos_machine.run m ~max_steps:500;
   checkb "press: still spinning before the event" (Dos_machine.exited m) false;
   Dos_machine.set_mouse m ~x:100 ~y:50 ~buttons:1;
@@ -201,7 +244,7 @@ let () =
   checki "press: DI = dy" (peek_word m 0x14a) 50;
   (* 이동량 소비: 호출이 si/di 를 가져가면 뒤이은 AX=0x0B 는 0 이다. *)
   let m = Dos_machine.create () in
-  Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_mickeys);
+  Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_mickeys ());
   Dos_machine.run m ~max_steps:500;
   Dos_machine.set_mouse m ~x:100 ~y:50 ~buttons:1;
   Dos_machine.run m ~max_steps:2000;
@@ -209,7 +252,7 @@ let () =
   checki "mickeys: AX=0x0B CX is 0 after the call" (Dos_machine.exit_code m) 0;
   (* 마스크 빗나감: 이동만 보는 등록에 누름은 닿지 않는다. *)
   let m = Dos_machine.create () in
-  Dos_machine.load_com m (guest ~mask:0x0001 ~tail:tail_events);
+  Dos_machine.load_com m (guest ~mask:0x0001 ~tail:tail_events ());
   Dos_machine.run m ~max_steps:500;
   Dos_machine.set_mouse m ~x:0 ~y:0 ~buttons:1;
   Dos_machine.run m ~max_steps:500;
@@ -223,7 +266,7 @@ let () =
   checki "mask: SI = dx since press" (peek_word m 0x148) 10;
   (* 등록은 스냅샷을 타고: 저장→복원 뒤 누름이 닿는다. *)
   let m = Dos_machine.create () in
-  Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_events);
+  Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_events ());
   Dos_machine.run m ~max_steps:500;
   let bytes = save_exn m in
   (match Dos_snapshot.header bytes with
