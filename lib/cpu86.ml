@@ -33,8 +33,14 @@ let f_interrupt = 0x200
 let f_direction = 0x400
 let f_overflow = 0x800
 
+(* 주소선 수. 8086·186 은 20개라 FFFF:0010 이 0 으로 감기고, 286 은
+   24개라 실모드에서도 10FFEFh 까지 닿는다. 1MB 에서 감는 것은 286 보드의
+   A20 게이트가 할 일이다(Dos_machine 의 메모리가 감는다). *)
+let address_mask = function I8086 | I80186 -> 0xfffff | I80286 -> 0xffffff
+
 type t = {
   model : model;
+  addr_mask : int;  (** [address_mask model] — 메모리 접근마다 쓰는 파생값 *)
   mutable regs : int array;  (** AX CX DX BX SP BP SI DI *)
   mutable segs : int array;  (** ES CS SS DS *)
   mutable ip : int;
@@ -56,11 +62,12 @@ type t = {
   port_out : int -> int -> unit;
 }
 
-let physical ~seg ~off = ((seg lsl 4) + off) land 0xfffff
+let physical t ~seg ~off = ((seg lsl 4) + off) land t.addr_mask
 
 let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
   {
     model;
+    addr_mask = address_mask model;
     regs = Array.make 8 0;
     segs = Array.make 4 0;
     ip = 0;
@@ -176,7 +183,7 @@ let alu_result t op a b width =
 (* ---------- 명령 페치와 피연산자 ---------- *)
 
 let fetch8 t =
-  let phys = physical ~seg:t.segs.(1) ~off:t.ip in
+  let phys = physical t ~seg:t.segs.(1) ~off:t.ip in
   t.ip <- (t.ip + 1) land 0xffff;
   t.read phys
 
@@ -239,33 +246,33 @@ let decode_modrm t ~ovr =
   (m, regf, operand, ea)
 
 (* 세그먼트 베이스 + 오프셋 → 물리 주소. 오프셋은 16비트에서 감긴다. *)
-let at base off = (base + (off land 0xffff)) land 0xfffff
+let at t base off = (base + (off land 0xffff)) land t.addr_mask
 
 let op_read t width = function
   | Reg n -> if width = 8 then reg8 t n else reg16 t n
   | Mem (b, o) ->
-    if width = 8 then t.read (at b o)
-    else t.read (at b o) lor (t.read (at b (o + 1)) lsl 8)
+    if width = 8 then t.read (at t b o)
+    else t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8)
 
 let op_write t width opd v =
   match opd with
   | Reg n -> if width = 8 then set_reg8 t n v else set_reg16 t n v
   | Mem (b, o) ->
-    if width = 8 then t.write (at b o) v
+    if width = 8 then t.write (at t b o) v
     else begin
-      t.write (at b o) (v land 0xff);
-      t.write (at b (o + 1)) (v lsr 8)
+      t.write (at t b o) (v land 0xff);
+      t.write (at t b (o + 1)) (v lsr 8)
     end
 
 let push16 t v =
   t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
   let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
-  t.write (at b o) (v land 0xff);
-  t.write (at b (o + 1)) (v lsr 8)
+  t.write (at t b o) (v land 0xff);
+  t.write (at t b (o + 1)) (v lsr 8)
 
 let pop16 t =
   let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
-  let v = t.read (at b o) lor (t.read (at b (o + 1)) lsl 8) in
+  let v = t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8) in
   t.regs.(4) <- (t.regs.(4) + 2) land 0xffff;
   v
 
@@ -299,6 +306,13 @@ let seg_override_of = function
 let idle t =
   t.cycles <- t.cycles + 2;
   2
+
+(* DAA/DAS 의 두 번째 보정 경계. 8086 은 실칩 관측(위 0x27 주석), 286 은
+   Intel 문서 그대로 99H 다. *)
+let bcd_threshold t ~old_af ~nib =
+  match t.model with
+  | I8086 | I80186 -> if old_af && nib then 0x9F else 0x99
+  | I80286 -> 0x99
 
 let step t =
   if t.halted then idle t
@@ -510,11 +524,12 @@ let step t =
       in
       match opcode with
       (* --- BCD 조정 4종 (ZZT/TP 런타임 실측 요구: AAA). 8086 규칙. --- *)
-      (* --- BCD 조정 4종. 두 번째 보정의 경계값은 Intel 문서의 99H 가
-             아니라 실칩 관측에서 뽑았다: AF 가 이미 서 있고 낮은 니블도
-             9 를 넘은 경우에만 9FH 이고, 나머지는 99H 다. 이 갈래를
+      (* --- BCD 조정 4종. 두 번째 보정의 경계값은 8086 에서 Intel 문서의
+             99H 가 아니라 실칩 관측에서 뽑았다: AF 가 이미 서 있고 낮은
+             니블도 9 를 넘은 경우에만 9FH 이고, 나머지는 99H 다. 이 갈래를
              빼면 AL0 가 9A..9F 인 구간에서 실칩과 어긋난다
-             (SingleStepTests 27/2F 각 2000 케이스로 확인). --- *)
+             (SingleStepTests/8086 27/2F 각 2000 케이스로 확인). 286 은 문서
+             대로 늘 99H 다(SingleStepTests/80286 27/2F). --- *)
       | 0x27 (* DAA *) ->
         let al0 = reg8 t 0 in
         let old_cf = t.cf and old_af = t.af in
@@ -523,7 +538,7 @@ let step t =
           set_reg8 t 0 (al0 + 6);
           t.af <- true
         end else t.af <- false;
-        let threshold = if old_af && nib then 0x9F else 0x99 in
+        let threshold = bcd_threshold t ~old_af ~nib in
         if old_cf || al0 > threshold then begin
           set_reg8 t 0 (reg8 t 0 + 0x60);
           t.cf <- true
@@ -539,7 +554,7 @@ let step t =
           set_reg8 t 0 (al0 - 6);
           t.af <- true
         end else t.af <- false;
-        let threshold = if old_af && nib then 0x9F else 0x99 in
+        let threshold = bcd_threshold t ~old_af ~nib in
         if old_cf || al0 > threshold then begin
           set_reg8 t 0 (reg8 t 0 - 0x60);
           t.cf <- true
@@ -547,12 +562,16 @@ let step t =
         let r = reg8 t 0 in
         t.zf <- r = 0; t.sf <- r land 0x80 <> 0; t.pf <- parity_even r;
         4
-      (* AAA/AAS 는 AL 과 AH 를 따로 고친다. AX 에 0x106 을 한 번에
-         더하면 AL+6 의 자리올림이 AH 로 새어 AH 가 하나 더 오른다. *)
+      (* AAA/AAS 는 8086 에서 AL 과 AH 를 따로 고친다. 286 의 AAA 는 AX 에
+         0x106 을 한 번에 더해 AL+6 의 자리올림이 AH 로 샌다
+         (SingleStepTests/80286 37: DFFC → E102). *)
       | 0x37 (* AAA *) ->
         if reg8 t 0 land 0x0F > 9 || t.af then begin
-          set_reg8 t 0 (reg8 t 0 + 6);
-          set_reg8 t 4 (reg8 t 4 + 1);
+          (match t.model with
+           | I8086 | I80186 ->
+             set_reg8 t 0 (reg8 t 0 + 6);
+             set_reg8 t 4 (reg8 t 4 + 1)
+           | I80286 -> set_reg16 t 0 (reg16 t 0 + 0x106));
           t.af <- true; t.cf <- true
         end else begin
           t.af <- false; t.cf <- false
@@ -648,7 +667,7 @@ let step t =
       | 0x54 when t.model = I80286 -> push16 t t.regs.(4); 10
       | 0x54 ->
         t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
-        let a = physical ~seg:t.segs.(2) ~off:t.regs.(4) in
+        let a = physical t ~seg:t.segs.(2) ~off:t.regs.(4) in
         t.write a (t.regs.(4) land 0xff);
         t.write (a + 1) (t.regs.(4) lsr 8);
         10
@@ -736,7 +755,7 @@ let step t =
           for _ = 1 to nesting - 1 do
             t.regs.(5) <- (t.regs.(5) - 2) land 0xffff;
             let b = t.segs.(2) lsl 4 and o = t.regs.(5) in
-            push16 t (t.read (at b o) lor (t.read (at b (o + 1)) lsl 8))
+            push16 t (t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8))
           done;
           push16 t frame
         end;
@@ -879,9 +898,9 @@ let step t =
         let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
         (match rm with
          | Mem (b, o) ->
-           set_reg16 t regf (t.read (at b o) lor (t.read (at b (o + 1)) lsl 8));
+           set_reg16 t regf (t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8));
            let segv =
-             t.read (at b (o + 2)) lor (t.read (at b (o + 3)) lsl 8) in
+             t.read (at t b (o + 2)) lor (t.read (at t b (o + 3)) lsl 8) in
            if opcode = 0xc4 then set_seg t 0 segv else set_seg t 3 segv
          | Reg _ -> bad "les/lds reg");
         2
@@ -954,11 +973,14 @@ let step t =
         let base = fetch8 t in
         let al = reg8 t 0 in
         if base = 0 then begin
-          (* 0 으로 나누면 divide error 다. 실칩은 트랩 전에 결과 0 으로
+          (* 0 으로 나누면 divide error 다. 8086 은 트랩 전에 결과 0 으로
              SF·ZF·PF 를 세워 두고, 그 플래그가 인터럽트 프레임에 밀린다
-             — 인터럽트 핸들러가 보는 값이라 관측 가능한 차이다. *)
-          ignore al;
-          t.zf <- true; t.sf <- false; t.pf <- true;
+             — 인터럽트 핸들러가 보는 값이라 관측 가능한 차이다. 286 은
+             AL 을 한 비트 오른쪽으로 민 값으로 세운다. SingleStepTests/
+             80286 D4 의 aam 0 열한 건이 모두 이 규칙을 따른다(FFh → PF=0,
+             97h → PF=1). 표본이 적어 마이크로코드의 이유는 모른다. *)
+          let r = match t.model with I8086 | I80186 -> 0 | I80286 -> al lsr 1 in
+          t.zf <- r = 0; t.sf <- r land 0x80 <> 0; t.pf <- parity_even r;
           t.cf <- false; t.of_ <- false; t.af <- false;
           divide_error ()
         end
@@ -987,7 +1009,7 @@ let step t =
                  세그먼트를 읽는다. 세그먼트 override 도 먹는다. *) ->
         let sel = match !ovr with Some s -> s | None -> 3 in
         let off = (reg16 t 3 + reg8 t 0) land 0xffff in
-        set_reg8 t 0 (t.read (physical ~seg:t.segs.(sel) ~off));
+        set_reg8 t 0 (t.read (physical t ~seg:t.segs.(sel) ~off));
         7
       (* --- loopnz/loopz/loop/jcxz --- *)
       | 0xe0 | 0xe1 | 0xe2 ->
@@ -1161,8 +1183,8 @@ let step t =
          | 3, 0xff ->
            (match rm with
             | Mem (b, o) ->
-              let off = t.read (at b o) lor (t.read (at b (o + 1)) lsl 8) in
-              let sg = t.read (at b (o + 2)) lor (t.read (at b (o + 3)) lsl 8) in
+              let off = t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8) in
+              let sg = t.read (at t b (o + 2)) lor (t.read (at t b (o + 3)) lsl 8) in
               push16 t (seg t 1);
               push16 t t.ip;
               set_seg t 1 sg;
@@ -1172,8 +1194,8 @@ let step t =
          | 5, 0xff ->
            (match rm with
             | Mem (b, o) ->
-              let off = t.read (at b o) lor (t.read (at b (o + 1)) lsl 8) in
-              set_seg t 1 (t.read (at b (o + 2)) lor (t.read (at b (o + 3)) lsl 8));
+              let off = t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8) in
+              set_seg t 1 (t.read (at t b (o + 2)) lor (t.read (at t b (o + 3)) lsl 8));
               t.ip <- off
             | Reg _ -> bad "jmp far reg")
          (* /7 은 문서에 없지만 실칩은 /6 과 같은 push 로 응답한다.
@@ -1184,8 +1206,8 @@ let step t =
             | Reg 4 when t.model <> I80286 ->
               t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
               let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
-              t.write (at b o) (t.regs.(4) land 0xff);
-              t.write (at b (o + 1)) (t.regs.(4) lsr 8)
+              t.write (at t b o) (t.regs.(4) land 0xff);
+              t.write (at t b (o + 1)) (t.regs.(4) lsr 8)
             | _ -> push16 t (op_read t 16 rm))
          | _ -> bad "group FE/FF");
         15
@@ -1201,7 +1223,7 @@ let step t =
         (match rm with
          | Mem (b, o) ->
            let sx v = if v >= 0x8000 then v - 0x10000 else v in
-           let rd k = t.read (at b k) lor (t.read (at b (k + 1)) lsl 8) in
+           let rd k = t.read (at t b k) lor (t.read (at t b (k + 1)) lsl 8) in
            let idx = sx (reg16 t regf) in
            if idx < sx (rd o) || idx > sx (rd (o + 2)) then do_int 5
          | Reg _ -> bad "bound on register");
@@ -1216,7 +1238,7 @@ let step t =
              8086 은 피연산자만 읽고 아무 일도 하지 않는다. --- *)
       | b when b >= 0xd8 && b <= 0xdf ->
         let _, _, rm, _ = decode_modrm t ~ovr:!ovr in
-        (match rm with Mem (b, o) -> ignore (t.read (at b o)) | Reg _ -> ());
+        (match rm with Mem (b, o) -> ignore (t.read (at t b o)) | Reg _ -> ());
         2
       (* --- 나머지는 예외로 알린다 — 조용한 오동작 대신 하네스가
              다음에 구현할 명령을 읽는다. --- *)
@@ -1246,6 +1268,7 @@ type saved = {
    until a snapshot either carries it or says why it does not. *)
 let save_state t =
   let { model = _ (* fixed by whoever creates the CPU *);
+        addr_mask = _ (* derived from the model *);
         regs; segs; ip;
         cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
         of_ = _ (* the nine flags travel as one word, [flags t] *);
