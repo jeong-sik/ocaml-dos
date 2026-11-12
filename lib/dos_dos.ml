@@ -515,6 +515,22 @@ let fcb_name t fcb =
   let base = take 8 1 and ext = take 3 9 in
   if ext = "" then base else base ^ "." ^ ext
 
+(* INT 21h AH=29h — DS:SI 의 글자열을 ES:DI 의 FCB 로(Dos_fcb_parse).
+   AL 에 결과를, SI 에 이름 다음 자리를 돌려준다. DI 는 그대로다
+   (PARSE.ASM 은 user_SI 만 고친다). 이 기계의 드라이브는 C: 하나다. *)
+let parse_fcb_service t =
+  let cpu = t.cpu in
+  let ds = Cpu86.seg cpu 3 and es = Cpu86.seg cpu 0 and di = Cpu86.reg16 cpu 7 in
+  let read off = rd8 t ((ds lsl 4) + (off land 0xffff)) in
+  let write i v = wr8 t ((es lsl 4) + ((di + i) land 0xffff)) v in
+  let drive_exists n = n = default_drive + 1 in
+  let { Dos_fcb_parse.al; next } =
+    Dos_fcb_parse.parse (Dos_fcb_parse.options_of_al (Cpu86.reg8 cpu 0))
+      ~drive_exists ~read ~write (Cpu86.reg16 cpu 6)
+  in
+  Cpu86.set_reg8 cpu 0 al;
+  Cpu86.set_reg16 cpu 6 next
+
 let fcb_service t ah =
   let cpu = t.cpu in
   let fcb = seg_off t 3 2 in
@@ -745,6 +761,7 @@ let service_immediate t =
     let v = Cpu86.reg8 cpu 0 in
     Cpu86.set_reg16 cpu 3 (rd16 t (v * 4));
     Cpu86.set_seg cpu 0 (rd16 t ((v * 4) + 2))
+  | 0x29 -> parse_fcb_service t
   | 0x2A ->
     let y, m, d, _, _, _ = now_fields t in
     Cpu86.set_reg16 cpu 1 y;

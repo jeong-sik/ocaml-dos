@@ -69,7 +69,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
   최상위 비트가 왼쪽 점인 IBM 순서다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
+  seek/close/dup), FCB(29h 이름 나누기 포함), findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
@@ -221,6 +221,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/16h/1Ah/33h |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
+| `Dos_fcb_parse` | INT 21h AH=29h — 글자열을 FCB 의 드라이브·이름·확장자로 나눈다(MS-DOS 4.0 `MakeFcb`) |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
 | `Dos_snapshot` | 기계 전체를 바이트로 저장하고 새 기계로 되살린다. 형식 번호가 다르면 거절하고, 코어 digest 는 보여 주기만 한다 |
