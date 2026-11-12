@@ -312,7 +312,71 @@ let test_forty_column_text () =
   check_s "나머지는 다음 줄로"
     (List.nth lines 1) (String.make 5 'A' ^ String.make 35 ' ')
 
+(* 렌더러가 색 표를 미리 만들고 바이트를 여덟 점마다 한 번 읽어도, 점마다
+   평면 비트를 모아 DAC 을 읽던 원래 정의와 같은 바이트를 내야 한다.
+   원래 정의를 그대로 옮겨 두고 무작위 평면·팔레트로 견준다. 너비 20 은
+   8 의 배수가 아니라 마지막 바이트가 다음 줄에 걸치는 경우다. *)
+let reference_planar planes ~w ~h ~attr ~pal =
+  let dac8 v = (max 0 (min 63 v) * 255) / 63 in
+  let img = Bytes.make (w * h * 3) '\000' in
+  let bytes_per_row = w / 8 in
+  for y = 0 to h - 1 do
+    for x = 0 to w - 1 do
+      let off = ((y * bytes_per_row) + (x / 8)) land 0xffff in
+      let bit = 7 - (x mod 8) in
+      let idx = ref 0 in
+      Array.iteri
+        (fun p plane ->
+          if (Char.code (Bytes.get plane off) lsr bit) land 1 = 1 then
+            idx := !idx lor (1 lsl p))
+        planes;
+      let r, g, b = pal.(attr.(!idx land 0x0f) land 0xff) in
+      let i = ((y * w) + x) * 3 in
+      Bytes.set img i (Char.chr (dac8 r));
+      Bytes.set img (i + 1) (Char.chr (dac8 g));
+      Bytes.set img (i + 2) (Char.chr (dac8 b))
+    done
+  done;
+  Bytes.to_string img
+
+let test_planar_render_matches_reference () =
+  let rng = Random.State.make [| 0x3c0 |] in
+  let plane_size = 0x10000 in
+  List.iter
+    (fun (w, h) ->
+      let planes =
+        Array.init 4 (fun _ ->
+            Bytes.init plane_size (fun _ -> Char.chr (Random.State.int rng 256)))
+      in
+      let attr = Array.init 21 (fun _ -> Random.State.int rng 256) in
+      let pal =
+        Array.init 256 (fun _ ->
+            (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
+      in
+      check_true
+        (Printf.sprintf "평면 렌더가 점 단위 정의와 같다 (%dx%d)" w h)
+        (Dos_render.rgb_planar planes ~w ~h ~attr ~pal
+         = reference_planar planes ~w ~h ~attr ~pal))
+    [ (640, 480); (320, 200); (20, 3) ]
+
+let test_vga13_render_matches_reference () =
+  let rng = Random.State.make [| 0x13 |] in
+  let mem = Bytes.init (1024 * 1024) (fun _ -> Char.chr (Random.State.int rng 256)) in
+  let pal =
+    Array.init 256 (fun _ ->
+        (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
+  in
+  let dac8 v = (v * 255) / 63 in
+  let expected =
+    String.init (320 * 200 * 3) (fun i ->
+        let r, g, b = pal.(Char.code (Bytes.get mem (0xA0000 + (i / 3)))) in
+        Char.chr (dac8 (match i mod 3 with 0 -> r | 1 -> g | _ -> b)))
+  in
+  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_vga13 mem pal = expected)
+
 let () =
+  test_planar_render_matches_reference ();
+  test_vga13_render_matches_reference ();
   test_bios_pixel_mode_0d ();
   test_set_reset_bit_mask ();
   test_write_mode_1_copies_latches ();
