@@ -176,8 +176,9 @@ val screen_digest : t -> int
     그리는 중이다. *)
 
 val pixel : t -> x:int -> y:int -> int
-(** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는
-    0-255. 텍스트 모드에서는 늘 0 이다. *)
+(** 화면에 보이는 그래픽 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15,
+    256색은 0-255. 256색은 CRTC 시작 주소를 따른다. 텍스트 모드에서는 늘
+    0 이다. *)
 
 (** {1 관측} *)
 
@@ -185,7 +186,8 @@ val cpu_of : t -> Cpu86.t
 val psp_seg_of : t -> int
 
 val mem_read : t -> int -> int
-(** 물리 주소 한 바이트. *)
+(** 물리 주소 한 바이트, RAM 에서. 16색·256색 모드의 0xA0000 창은 비디오
+    어댑터의 평면이라 여기 없다 — 화면은 {!pixel} 로 읽는다. *)
 
 val mem_write : t -> int -> int -> unit
 (** 물리 주소 한 바이트 쓰기({!mem_read} 의 짝). 하네스가 게스트 RAM 에

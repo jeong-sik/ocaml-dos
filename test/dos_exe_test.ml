@@ -122,7 +122,8 @@ let () =
   let w, h = Dos_machine.frame_dims m in
   check "vga width" w 320;
   check "vga height" h 200;
-  check "vga pixel 0 = color 4" (Dos_machine.mem_read m 0xA0000) 4;
+  (* 13h 화면은 RAM 이 아니라 평면에 있다 — 화면에 보이는 점으로 읽는다. *)
+  check "vga pixel 0 = color 4" (Dos_machine.pixel m ~x:0 ~y:0) 4;
   let rgb = Dos_machine.frame_rgb m in
   (* 색 4 = 빨강 계열 (기본 팔레트 R 우세) *)
   let r = Char.code rgb.[0] and g = Char.code rgb.[1] and b = Char.code rgb.[2] in
