@@ -16,7 +16,30 @@
     A make code carries the BIOS word it stands for. The BIOS keyboard
     interrupt puts that word in the ring, so INT 16h answers the word the
     host pressed, and a game that hooks INT 9 and reads port 0x60 itself
-    sees the scan codes. *)
+    sees the scan codes.
+
+    A program can also talk to both chips, as QEMU's 8042 and PS/2
+    keyboard answer (hw/input/pckbd.c, hw/input/ps2.c):
+    - A byte written to port 0x64 is a controller command: 20h/60h read and
+      write the command byte, AAh answers 55h, ABh and A9h answer 00h,
+      ADh/AEh disable and enable the keyboard, A7h/A8h the aux port, C0h
+      and D0h read the input and output ports, D1h writes the output port,
+      D2h puts the next byte in port 0x60 as if the keyboard sent it.
+    - A byte written to port 0x60 goes to the keyboard unless a controller
+      command is waiting for it. EDh (LEDs), F0h (scan code set), F3h
+      (rate) and FCh take one more byte; each byte draws FAh. EEh echoes,
+      F2h answers FAh ABh 41h, F4h enables scanning, F5h and F6h reset it
+      off and on, FFh answers FAh AAh. Any other byte draws FEh.
+    - The controller's answer comes before the keyboard's, and both before
+      any key. A reset drops the keys not yet sent; while scanning is off a
+      pressed key sends nothing. While the keyboard is disabled its keys
+      wait, and a write to port 0x60 enables it again.
+
+    What this board does not do: the A20 line stays low (memory wraps at
+    1 MB) so bit 1 of the output port reads 0; a CPU reset (FEh, or bit 0
+    cleared) is not carried out; there is no aux device, so D3h and D4h
+    take their byte and nothing answers; keys keep coming in the set the
+    BIOS expects, whichever set or translation a program picks. *)
 
 type t
 
@@ -29,9 +52,10 @@ val press : t -> now:int -> int -> unit
     word's high byte and nothing is held. *)
 
 val latch : t -> now:int -> bool
-(** Moves the next byte into port 0x60 if it is due, the last one was
-    read, and 1 ms passed since. [true] when a byte arrived: the controller
-    raises IRQ1.
+(** Moves the next byte into port 0x60 if it is due and the last one was
+    read. A controller answer comes at once; a byte from the keyboard 1 ms
+    after the last read at the earliest. [true] when a byte arrived and bit
+    0 of the command byte asks for IRQ1.
     The machine calls it before each instruction. *)
 
 val ready_at : t -> int
@@ -46,6 +70,18 @@ val read_data : t -> now:int -> int
 
 val status : t -> int
 (** A read of port 0x64. Bit 0 is set while a byte waits in port 0x60. *)
+
+val write_data : t -> now:int -> int -> unit
+(** A write to port 0x60 at cycle [now]. *)
+
+val write_command : t -> int -> unit
+(** A write to port 0x64. *)
+
+val command_byte : t -> int
+(** The controller's command byte, 61h after POST. *)
+
+val leds : t -> int
+(** The LEDs the program last set: scroll, num and caps lock in bits 0-2. *)
 
 val data_word : t -> int option
 (** The BIOS word the byte in port 0x60 stands for: [Some] for a make code

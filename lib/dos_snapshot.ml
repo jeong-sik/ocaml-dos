@@ -25,8 +25,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    7: the interrupt controller (mask, requests, in service, OCW3 read
    choice) and the keyboard controller (queued bytes, port 0x60, its full
    flag, the last read) replace the PIC mask, the last scan code and the
-   machine's pending-tick flag. *)
-let format_version = 7
+   machine's pending-tick flag.
+   8: the keyboard controller also carries the replies it has not sent,
+   the command byte, the output port, a command waiting for its byte,
+   scanning, the LEDs and the scan code set. *)
+let format_version = 8
 
 let digest_hex_len = 32
 let checksum_len = 16

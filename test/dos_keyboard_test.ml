@@ -278,7 +278,180 @@ let test_snapshot_mid_key () =
        [ m; resumed ]);
   check "the restored machine ran the same" (save m = save resumed)
 
+(* G: commands to the controller (port 0x64) and the keyboard (port 0x60),
+   as QEMU's 8042 and PS/2 keyboard answer them. [clock] is the cycle
+   now; [answers] reads what comes, a byte time apart, until nothing does,
+   and moves the clock on. *)
+let clock = ref 0
+
+let answers k =
+  let rec go acc =
+    ignore (Dos_kbc.latch k ~now:!clock);
+    if Dos_kbc.status k land 1 = 1 then begin
+      let b = Dos_kbc.read_data k ~now:!clock in
+      clock := !clock + byte_time;
+      go (b :: acc)
+    end
+    else List.rev acc
+  in
+  let got = go [] in
+  clock := !clock + byte_time;
+  got
+
+let show l = String.concat " " (List.map (Printf.sprintf "%02X") l)
+
+let check_answers name got want =
+  if got <> want then begin
+    incr failed;
+    Printf.eprintf "FAIL %s: got [%s] want [%s]\n%!" name (show got) (show want)
+  end
+
+let test_controller_commands () =
+  let k = Dos_kbc.create () in
+  let cmd v = Dos_kbc.write_command k v and data v = Dos_kbc.write_data k ~now:!clock v in
+  cmd 0x20;
+  check_answers "20h reads the command byte SeaBIOS leaves" (answers k) [ 0x61 ];
+  cmd 0x60; data 0x45;
+  cmd 0x20;
+  check_answers "60h writes it" (answers k) [ 0x45 ];
+  cmd 0xAA;
+  check_answers "AAh self test" (answers k) [ 0x55 ];
+  cmd 0xAB;
+  check_answers "ABh keyboard interface test" (answers k) [ 0x00 ];
+  cmd 0xD1; data 0xDF;
+  cmd 0xD0;
+  check_answers "the A20 bit reads 0 whatever D1h wrote" (answers k) [ 0xDD ];
+  cmd 0xD2; data 0x99;
+  check_answers "D2h puts a byte in port 0x60" (answers k) [ 0x99 ];
+  cmd 0xA7;
+  check "A7h sets the aux disable bit" (Dos_kbc.command_byte k land 0x20 <> 0);
+  cmd 0xD4; data 0xF2;
+  check_answers "D4h takes its byte and no aux device answers" (answers k) []
+
+let test_keyboard_commands () =
+  let k = Dos_kbc.create () in
+  let data v = Dos_kbc.write_data k ~now:!clock v in
+  data 0xED;
+  check_answers "EDh is acknowledged" (answers k) [ 0xFA ];
+  data 0x05;
+  check_answers "and so is its byte" (answers k) [ 0xFA ];
+  check "the LEDs are set" (Dos_kbc.leds k = 0x05);
+  data 0xED; data 0xFF;
+  ignore (answers k);
+  check "only bits 0-2 of the LED byte are LEDs" (Dos_kbc.leds k = 0x07);
+  data 0xEE;
+  Dos_kbc.write_command k 0x20;
+  check_answers "the controller's answer comes before the keyboard's" (answers k) [ 0x61; 0xEE ];
+  data 0xF2;
+  check_answers "F2h through translation" (answers k) [ 0xFA; 0xAB; 0x41 ];
+  data 0xF0; data 0x00;
+  check_answers "F0h 00h reports set 2 as translated; the unread FAh of F0h is dropped"
+    (answers k) [ 0xFA; 0x41 ];
+  data 0xEE;
+  check_answers "EEh echoes" (answers k) [ 0xEE ];
+  data 0x99;
+  check_answers "an unknown byte draws a resend" (answers k) [ 0xFE ];
+  Dos_kbc.write_command k 0x60; data 0x21;
+  data 0xF2;
+  check_answers "F2h with translation off" (answers k) [ 0xFA; 0xAB; 0x83 ];
+  (* replies before keys, and a reset drops the keys not sent *)
+  let k = Dos_kbc.create () in
+  Dos_kbc.press k ~now:!clock 0x1E61;
+  Dos_kbc.write_data k ~now:!clock 0xED;
+  check_answers "the answer comes before the pressed key" (answers k) [ 0xFA; 0x1E ];
+  Dos_kbc.write_data k ~now:!clock 0x02;
+  check_answers "the LED byte after the key" (answers k) [ 0xFA ];
+  Dos_kbc.press k ~now:!clock 0x3062;
+  Dos_kbc.write_data k ~now:!clock 0xFF;
+  check_answers "FFh answers FAh AAh and drops the queued keys" (answers k) [ 0xFA; 0xAA ];
+  check "nothing of the keys is left" (not (Dos_kbc.holds_key k));
+  Dos_kbc.write_data k ~now:!clock 0xF5;
+  ignore (answers k);
+  Dos_kbc.press k ~now:!clock 0x1E61;
+  check "a key pressed while scanning is off sends nothing" (not (Dos_kbc.holds_key k));
+  Dos_kbc.write_data k ~now:!clock 0xF4;
+  ignore (answers k);
+  Dos_kbc.press k ~now:!clock 0x1E61;
+  check "F4h turns scanning on again" (Dos_kbc.holds_key k);
+  (* ADh holds the keys back; AEh lets them through *)
+  let k = Dos_kbc.create () in
+  Dos_kbc.write_command k 0xAD;
+  Dos_kbc.press k ~now:!clock 0x1E61;
+  check_answers "a disabled keyboard sends nothing" (answers k) [];
+  Dos_kbc.write_command k 0xAE;
+  check_answers "enabled, its key comes" (answers k) [ 0x1E ];
+  let k = Dos_kbc.create () in
+  Dos_kbc.write_command k 0xAD;
+  Dos_kbc.press k ~now:!clock 0x1E61;
+  Dos_kbc.write_data k ~now:!clock 0xF4;
+  check_answers "a byte for the keyboard enables it again" (answers k) [ 0xFA; 0x1E ];
+  (* bit 0 of the command byte gates IRQ1, not the byte *)
+  let k = Dos_kbc.create () in
+  Dos_kbc.write_command k 0x60; Dos_kbc.write_data k ~now:!clock 0x60;
+  Dos_kbc.press k ~now:!clock 0x1E61;
+  check "no IRQ1 with bit 0 clear" (not (Dos_kbc.latch k ~now:!clock));
+  check "but the byte is there" (Dos_kbc.status k land 1 = 1)
+
+(* A program that talks to both with interrupts off and polls bit 0 of port
+   0x64: AAh to the controller, then EDh and 07h to the keyboard. *)
+let talker_off = 0x140
+
+let talker =
+  String.concat ""
+    [ "\xfa";                     (* 0x100 cli *)
+      "\xb0\xaa\xe6\x64";         (* 0x101 mov al,AAh; out 64h,al *)
+      "\xe8\x1c\x00";             (* 0x105 call 0124h *)
+      "\xa2\x40\x01";             (* 0x108 mov [0140h],al *)
+      "\xb0\xed\xe6\x60";         (* 0x10b mov al,EDh; out 60h,al *)
+      "\xe8\x12\x00";             (* 0x10f call 0124h *)
+      "\xa2\x41\x01";             (* 0x112 mov [0141h],al *)
+      "\xb0\x07\xe6\x60";         (* 0x115 mov al,07h; out 60h,al *)
+      "\xe8\x08\x00";             (* 0x119 call 0124h *)
+      "\xa2\x42\x01";             (* 0x11c mov [0142h],al *)
+      "\xb8\x00\x4c\xcd\x21";     (* 0x11f mov ax,4C00h; int 21h *)
+      "\xe4\x64";                 (* 0x124 in al,64h *)
+      "\xa8\x01";                 (* 0x126 test al,1 *)
+      "\x74\xfa";                 (* 0x128 jz 0124h *)
+      "\xe4\x60";                 (* 0x12a in al,60h *)
+      "\xc3";                     (* 0x12c ret *)
+      String.make 19 '\000';      (* 0x12d *)
+      "\x00\x00\x00" ]            (* 0x140 the three answers *)
+
+let test_program_talks () =
+  let m = machine talker in
+  ignore (run_to m tap_steps (fun _ -> Dos_machine.exited m));
+  check "the program got its answers" (Dos_machine.exited m);
+  check_answers "55h FAh FAh" (List.init 3 (fun i -> code_byte m (talker_off + i))) [ 0x55; 0xFA; 0xFA ];
+  check "the LEDs it set" (Dos_kbc.leds (Dos_ports.kbc m.Dos_state.ports) = 0x07)
+
+(* A snapshot while both chips wait for a command's byte. *)
+let test_snapshot_mid_command () =
+  let m = machine spin in
+  let k = Dos_ports.kbc m.Dos_state.ports in
+  Dos_kbc.write_data k ~now:0 0xED;
+  Dos_kbc.write_command k 0xD2;
+  let resumed = restore (save m) in
+  List.iter
+    (fun c ->
+      let k = Dos_ports.kbc c.Dos_state.ports in
+      Dos_kbc.write_data k ~now:0 0x77;
+      Dos_kbc.write_data k ~now:0 0x03)
+    [ m; resumed ];
+  check "the restored machine is the same" (save m = save resumed);
+  let start = !clock in
+  check "both took D2h's byte, then the LED byte"
+    (List.for_all
+       (fun c ->
+         let k = Dos_ports.kbc c.Dos_state.ports in
+         clock := start;
+         Dos_kbc.leds k = 0x03 && answers k = [ 0x77; 0xFA ])
+       [ m; resumed ])
+
 let () =
+  test_controller_commands ();
+  test_keyboard_commands ();
+  test_program_talks ();
+  test_snapshot_mid_command ();
   test_hook_sees_make_then_break ();
   test_rollover ();
   test_upper_case_is_shifted ();
