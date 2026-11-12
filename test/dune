@@ -19,6 +19,10 @@
  (libraries dosmachine))
 
 (test
+ (name dos_keyboard_test)
+ (libraries dosmachine))
+
+(test
  (name dos_exe_test)
  (libraries dosmachine))
 

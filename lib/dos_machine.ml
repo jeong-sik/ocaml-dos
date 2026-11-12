@@ -37,7 +37,7 @@ let host_service t ~return_to v =
   | 0x21 -> Dos_dos.service t ~return_to
   | 0x27 -> Dos_dos.int27 t; Control_transferred
   | 0x67 -> Dos_ems.service t; Completed
-  | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
+  | 0x09 | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
   | _ -> Completed
 
 let service_status_mask t v =
@@ -94,7 +94,7 @@ let create () =
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
+      kbd_wait = false; kbd_requests = 0; last_tick = 0;
       ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
@@ -175,20 +175,26 @@ let step_result t =
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
     let interval = Dos_ports.cycles_per_tick t.ports in
     let cyc = Cpu86.cycles t.cpu in
+    let pic = Dos_ports.pic t.ports in
     if cyc - t.last_tick >= interval then begin
       t.last_tick <- cyc;
-      t.pending_irq0 <- true
+      Dos_pic.raise_irq pic Dos_pic.Timer
     end;
-    (* IRQ0 은 IF 가 켜져 있고 PIC 마스크가 풀렸을 때만 들어간다. 못
-       넣은 틱은 버리지 않고 들고 있다가 다음 기회에 넣는다 — 버리면
-       임계구역이 긴 프로그램에서 시계가 느려진다. HLT 는 그 인터럽트로
-       깨어난다. *)
-    if t.pending_irq0 && interrupts_enabled t
-       && not (Dos_ports.irq0_masked t.ports) then begin
-      t.pending_irq0 <- false;
-      Cpu86.wake t.cpu;
-      ignore (deliver_ivt t 8)
-    end;
+    let kbc = Dos_ports.kbc t.ports in
+    if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~now:cyc then
+      Dos_pic.raise_irq pic Dos_pic.Keyboard;
+    (* 요청은 IF 가 켜지고, 마스크가 풀리고, 같거나 높은 줄이 EOI 를 받을
+       때까지 IRR 에 남는다 — 버리면 임계구역이 긴 프로그램에서 시계가
+       느려지고 키가 사라진다. 벡터가 0:0 이면 아무것도 넣지 않고, 그 줄은
+       핸들러가 생길 때까지 계속 묻는다. HLT 는 그 인터럽트로 깨어난다. *)
+    (if Dos_pic.pending pic && interrupts_enabled t then
+       match Dos_pic.next pic with
+       | None -> ()
+       | Some line ->
+         if deliver_ivt t (Dos_pic.vector line) then begin
+           Dos_pic.acknowledge pic line;
+           Cpu86.wake t.cpu
+         end);
     match t.input_continuations with
     | wait :: rest
       when Cpu86.seg t.cpu 1 = wait.return_cs && Cpu86.dump_ip t.cpu = wait.return_ip
@@ -264,7 +270,9 @@ let run_until t ~max_steps ~stop =
 
 (* ---------- 키 ---------- *)
 
-let push_key t word = push_key t word
+let push_key t word = Dos_kbc.press (Dos_ports.kbc t.ports) ~now:(Cpu86.cycles t.cpu) word
+
+let key_unread t = key_pending t || Dos_kbc.holds_key (Dos_ports.kbc t.ports)
 
 (* 굶주림을 보고 하나씩 넣는다. 키를 미리 다 밀어 넣으면 앞선 메뉴의
    "아무 키나" 루프가 전부 먹어 치운다 — 게임이 어떤 상태일 때 넣을지는

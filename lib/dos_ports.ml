@@ -32,8 +32,8 @@ type t = {
   mutable pit0_read_hi : bool;
   mutable pit0_latched : int option;
   mutable pit0_access : int;            (** 1=lo 2=hi 3=lo/hi *)
-  (* PIC *)
-  mutable pic_mask : int;               (** IMR — bit0 이 IRQ0 *)
+  pic : Dos_pic.t;
+  kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
   (* VGA DAC *)
   pal : (int * int * int) array;
   mutable dac_write_index : int;
@@ -44,7 +44,6 @@ type t = {
   mutable crtc_index : int;
   crtc : int array;
   (* 기타 *)
-  mutable scancode : int;
   mutable port_b : int;                 (** 0x61 래치 *)
   mutable cga_status : bool;
   mutable mode_control : int;           (** 0x3D8 *)
@@ -95,7 +94,8 @@ let create ~mem ~video =
     pit0_read_hi = false;
     pit0_latched = None;
     pit0_access = 3;
-    pic_mask = 0;
+    pic = Dos_pic.create ();
+    kbc = Dos_kbc.create ();
     pal = Array.init dac_entries default_vga_pal;
     dac_write_index = 0;
     dac_read_index = 0;
@@ -103,7 +103,6 @@ let create ~mem ~video =
     dac_mask = 0xFF;
     crtc_index = 0;
     crtc = Array.make crtc_regs 0;
-    scancode = 0;
     port_b = 0;
     cga_status = false;
     mode_control = 0x29;
@@ -133,8 +132,8 @@ let reset_dac t =
 
 let set_now t n = t.now <- n
 let palette t = t.pal
-let set_scancode t sc = t.scancode <- sc land 0xff
-let irq0_masked t = t.pic_mask land 1 <> 0
+let pic t = t.pic
+let kbc t = t.kbc
 let speaker_on t = t.port_b land 0x03 = 0x03
 
 let divisor t = if t.pit0_divisor = 0 then 0x10000 else t.pit0_divisor
@@ -161,7 +160,8 @@ let port_in t p =
   | Some v -> v
   | None ->
   match p land 0xffff with
-  | 0x21 -> t.pic_mask
+  | 0x20 -> Dos_pic.read_command t.pic
+  | 0x21 -> Dos_pic.read_mask t.pic
   | 0x40 ->
     let v = match t.pit0_latched with Some v -> v | None -> pit0_count t in
     (match t.pit0_access with
@@ -176,13 +176,13 @@ let port_in t p =
          t.pit0_read_hi <- true;
          v land 0xff
        end)
-  | 0x60 -> t.scancode
+  | 0x60 -> Dos_kbc.read_data t.kbc ~now:t.now
   | 0x61 ->
     (* bit4 는 메모리 리프레시 — 실기에서 쉬지 않고 뒤집힌다. 고정값을
        주면 이 비트를 세는 지연 루프가 안 끝난다. *)
     let refresh = (t.now / refresh_toggle_cycles) land 1 in
     (t.port_b land 0xEF) lor (refresh lsl 4)
-  | 0x64 -> 0x14                     (* 출력 버퍼 빔, 입력 버퍼 빔 *)
+  | 0x64 -> Dos_kbc.status t.kbc
   | 0x70 -> t.cmos_index
   | 0x71 -> 0x00
   (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
@@ -239,8 +239,8 @@ let port_out t p v =
   if Dos_video.port_out t.video p v then ()
   else
   match p land 0xffff with
-  | 0x20 -> ()                        (* EOI — 우선순위 모델이 없다 *)
-  | 0x21 -> t.pic_mask <- v
+  | 0x20 -> Dos_pic.write_command t.pic v
+  | 0x21 -> Dos_pic.write_mask t.pic v
   | 0x40 ->
     (match t.pit0_access with
      | 1 -> t.pit0_divisor <- (t.pit0_divisor land 0xff00) lor v
@@ -336,8 +336,8 @@ let dac_phase_r = C.range 0 2
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
-        pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
-        dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
+        pit0_access; pic; kbc; pal; dac_write_index; dac_read_index;
+        dac_phase; dac_mask; crtc_index; crtc; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
   in
@@ -350,7 +350,8 @@ let write_state w t =
    | None -> C.put_bool w false
    | Some v -> C.put_bool w true; put "pit0_latched" C.word v);
   put "pit0_access" pit_access pit0_access;
-  put "pic_mask" C.byte pic_mask;
+  Dos_pic.write_state w pic;
+  Dos_kbc.write_state w kbc;
   put "DAC size" C.count (Array.length pal);
   Array.iter
     (fun (r, g, b) -> put "DAC red" C.byte r; put "DAC green" C.byte g; put "DAC blue" C.byte b)
@@ -361,7 +362,6 @@ let write_state w t =
   put "dac_mask" C.byte dac_mask;
   put "crtc_index" C.byte crtc_index;
   C.put_int_array w ~what:"crtc" C.byte crtc;
-  put "scancode" C.byte scancode;
   put "port_b" C.byte port_b;
   C.put_bool w cga_status;
   put "mode_control" C.byte mode_control;
@@ -383,7 +383,8 @@ let read_state r t =
   t.pit0_read_hi <- C.get_bool r;
   t.pit0_latched <- (if C.get_bool r then Some (get "pit0_latched" C.word) else None);
   t.pit0_access <- get "pit0_access" pit_access;
-  t.pic_mask <- get "pic_mask" C.byte;
+  Dos_pic.read_state r t.pic;
+  Dos_kbc.read_state r t.kbc;
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri
     (fun i _ ->
@@ -398,7 +399,6 @@ let read_state r t =
   t.dac_mask <- get "dac_mask" C.byte;
   t.crtc_index <- get "crtc_index" C.byte;
   C.fill_int_array r ~what:"crtc" C.byte t.crtc;
-  t.scancode <- get "scancode" C.byte;
   t.port_b <- get "port_b" C.byte;
   t.cga_status <- C.get_bool r;
   t.mode_control <- get "mode_control" C.byte;

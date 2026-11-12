@@ -8,9 +8,6 @@
 let vram_base = 0xB8000
 let rows = 25
 
-(* 4.77MHz — IBM PC 의 CPU 클럭. 사이클을 초로 바꾸는 유일한 환산비다. *)
-let cpu_hz = 4_772_727
-
 (* DOS 핸들 표(JFT). 실기 DOS 는 PSP 마다 20칸짜리 표(PSP:18h, 크기는
    PSP:32h)를 두고, 0-4 는 stdin/stdout/stderr/stdaux/stdprn 이 이미
    차지한다. AH=3Ch/3Dh/45h 는 가장 낮은 빈 칸 번호를 돌려주고, 빈 칸이
@@ -132,7 +129,6 @@ type t = {
   mutable console_pending : string;  (* cooked AH=3F line bytes not yet returned *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
   mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
-  mutable pending_irq0 : bool;                (** IF 가 꺼져 못 넣은 틱 *)
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
@@ -234,7 +230,7 @@ let days_in_month y m =
   | 4 | 6 | 9 | 11 -> 30
   | _ -> if (y mod 4 = 0 && y mod 100 <> 0) || y mod 400 = 0 then 29 else 28
 
-let elapsed_seconds t = Cpu86.cycles t.cpu / cpu_hz
+let elapsed_seconds t = Cpu86.cycles t.cpu / Dos_clock.cpu_hz
 
 (* 기준 시각 + 경과. 윤년까지 세되 달력 라이브러리는 쓰지 않는다 —
    게스트가 보는 건 DOS 의 날짜 필드뿐이다. *)
@@ -359,13 +355,14 @@ let pop_key t =
   wr16 t 0x41A (if h >= ring_hi then ring_lo else h + 2);
   w
 
-let push_key t word =
+(* 링에 워드 하나 — BIOS 키보드 인터럽트와 INT 16h AH=05h 가 넣는다.
+   꽉 차면 버린다(실기 BIOS 는 삑 소리를 낸다). *)
+let ring_push t word =
   let head = ring_head t and tail = ring_tail t in
   let nxt = if tail >= ring_hi then ring_lo else tail + 2 in
   if nxt <> head then begin
     wr16 t (0x400 + tail) word;
-    wr16 t 0x41C nxt;
-    Dos_ports.set_scancode t.ports ((word lsr 8) land 0xff)
+    wr16 t 0x41C nxt
   end
 
 (* ---------- 인터럽트 전달 ---------- *)
