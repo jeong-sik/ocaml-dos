@@ -69,3 +69,11 @@
 (test
  (name dos_mouse_callback_test)
  (libraries dosmachine))
+
+(test
+ (name dos_scenario_test)
+ (libraries dosmachine dosharness))
+
+(test
+ (name samguk3_scenario_test)
+ (libraries dosmachine dosharness unix))
