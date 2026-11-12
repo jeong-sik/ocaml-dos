@@ -200,8 +200,10 @@ let () =
     (List.rev !mounts);
   if !demo = "hello" then Dos_machine.load_com m (hello_com ())
   else if !demo = "ega" then Dos_machine.load_com m (ega_com ())
-  else if !com <> "" then Dos_machine.load_com m (read_file !com)
-  else if !exe <> "" then Dos_machine.load_exe m (read_file !exe)
+  else if !com <> "" then
+    Dos_machine.load_com ~name:(Filename.basename !com) m (read_file !com)
+  else if !exe <> "" then
+    Dos_machine.load_exe ~name:(Filename.basename !exe) m (read_file !exe)
   else begin
     prerr_endline "need --demo hello|ega or --com PATH or --exe PATH";
     exit 2
