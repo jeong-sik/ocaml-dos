@@ -204,25 +204,95 @@ let init_memory t ~psp_seg =
    싣게 되면서 이리로 옮겨왔다. 배치만 매개변수로 갈린다 — 루트는
    정해진 자리, 자식은 블록 표 위에 얹는다. *)
 
-(* 환경 블록 — 실기 DOS 는 프로그램마다 환경을 복사해 PSP+0x2C 로
-   건넨다. 여기선 빈 환경 하나를 모든 프로세스가 공유한다(0x500:0 —
-   IVT·BDA 위의 스크래치). 세그먼트가 0 이면 KOEI 로더처럼 AH=49h 로
-   환경을 지우고 AH=4Ah 로 줄이는 프로그램이 연쇄로 실패해 EXEC 자리가
-   안 생긴다(실측). 내용은 이중 NUL 로 끝나는 빈 문자열 목록이다. *)
-let env_seg = 0x500
+(* 환경 블록 — PSP+2Ch 가 가리킨다. "이름=값" ASCIIZ 문자열들이 빈
+   문자열(NUL 하나)로 끝나고, 그 뒤에 워드 1 과 프로그램 이름(ASCIIZ)이
+   온다(MS-DOS 4.0 EXEC.ASM exec_save_environ). C 런타임은 이 이름으로
+   argv[0] 을 채우고, 오버레이 관리자는 이 이름으로 자기 EXE 를 다시 연다.
 
-let write_psp ?(init = true) t psp_seg =
+   루트의 환경은 0x500:0 에 둔다(IVT·BDA 위의 스크래치, 블록 표 밖).
+   세그먼트가 0 이면 KOEI 로더처럼 AH=49h 로 환경을 지우고 AH=4Ah 로
+   줄이는 프로그램이 연쇄로 실패해 EXEC 자리가 안 생긴다(실측). 문자열은
+   비어 있다. 이름을 모르면 꼬리를 쓰지 않는다. EXEC 자식은
+   [child_environment] 로 블록을 따로 받는다. *)
+let root_env_seg = 0x500
+let root_env_room = 0x100                (* 0x500..0x5FF *)
+let env_program_count = 1
+let env_scan_limit = 0x7FFF              (* EXEC.ASM: at most 32k of environment *)
+let error_bad_environment = 10
+let error_not_enough_memory = 8
+
+(* 문자열 목록 [list] 뒤에 꼬리(워드 1, [name], NUL)를 붙인 바이트 *)
+let environment_bytes ~list ~name =
+  let b = Buffer.create (String.length list + String.length name + 3) in
+  Buffer.add_string b list;
+  Buffer.add_char b (Char.chr env_program_count);
+  Buffer.add_char b '\x00';
+  Buffer.add_string b name;
+  Buffer.add_char b '\x00';
+  Buffer.contents b
+
+let empty_env_list = "\x00\x00"
+
+(* 루트 환경을 0x500 에 쓴다. [name] 은 C: 루트 디렉터리의 파일 이름이다
+   — 이 기계의 루트 프로그램은 거기 있다. 꼬리에는 드라이브와 역슬래시를
+   붙인 전체 경로를 쓴다. *)
+let write_root_env t ~name =
+  let bytes =
+    match name with
+    | None -> empty_env_list
+    | Some file ->
+      let drive = Char.chr (Char.code 'A' + default_drive) in
+      environment_bytes ~list:empty_env_list
+        ~name:(Printf.sprintf "%c:\\%s" drive (String.uppercase_ascii file))
+  in
+  if String.length bytes > root_env_room then
+    invalid_arg "program name does not fit the root environment";
+  String.iteri (fun i c -> wr8 t ((root_env_seg * 16) + i) (Char.code c)) bytes
+
+(* 환경 문자열 목록의 길이 — 끝의 NUL 두 개까지 센다. EXEC.ASM
+   exec_get_environ_len 처럼 0x7FFF 바이트 안에서 찾지 못하면 None. *)
+let env_list_length t seg =
+  let base = seg lsl 4 in
+  let rec scan i =
+    if i + 2 > env_scan_limit then None
+    else if rd8 t (base + i) = 0 && rd8 t (base + i + 1) = 0 then Some (i + 2)
+    else scan (i + 1)
+  in
+  scan 0
+
+(* EXEC 자식의 환경. [source] 가 0 이면 자식도 환경이 없다
+   (exec_check_environ). 아니면 목록을 새 블록에 옮기고 꼬리를 붙인다.
+   [name] 은 호출자가 DS:DX 에 준 문자열 그대로다 — EXEC.ASM 은 이름을
+   바꾸지 않고 DStrLen 길이(NUL 포함)만큼 옮긴다. 블록은 블록 표에
+   들어간다. 실패하면 블록 표를 건드리지 않는다. *)
+type child_env = No_environment | Environment of int
+
+let child_environment t ~source ~name =
+  if source = 0 then Ok No_environment
+  else
+    match env_list_length t source with
+    | None -> Error error_bad_environment
+    | Some len ->
+      let list = String.init len (fun i -> Char.chr (rd8 t ((source lsl 4) + i))) in
+      let bytes = environment_bytes ~list ~name in
+      match allocate t ((String.length bytes + 15) / 16) with
+      | None -> Error error_not_enough_memory
+      | Some seg ->
+        String.iteri (fun i c -> wr8 t ((seg lsl 4) + i) (Char.code c)) bytes;
+        Ok (Environment seg)
+
+let env_word = function No_environment -> 0 | Environment seg -> seg
+
+let write_psp ?(init = true) ~env t psp_seg =
   let psp = psp_seg * 16 in
   wr8 t psp 0xCD;                      (* int 20h *)
   wr8 t (psp + 1) 0x20;
   wr16 t (psp + 2) conv_mem_top;       (* 가진 메모리의 끝 *)
   wr16 t (psp + 0x0A) 0;               (* 종료 주소 *)
   wr16 t (psp + 0x0C) 0;
-  wr16 t (psp + 0x2C) env_seg;         (* 환경 세그먼트 *)
+  wr16 t (psp + 0x2C) env;             (* 환경 세그먼트 *)
   wr8 t (psp + 0x80) 0;                (* 커맨드라인 길이 0 *)
   wr8 t (psp + 0x81) 0x0D;
-  let eb = env_seg * 16 in
-  wr8 t eb 0x00; wr8 t (eb + 1) 0x00;  (* 빈 환경: 이중 NUL 로 끝 *)
   t.psp_seg <- psp_seg;
   t.dta <- physical psp_seg 0x80;      (* 기본 DTA = PSP:0x80 *)
   if init then init_memory t ~psp_seg
@@ -231,10 +301,10 @@ let write_psp ?(init = true) t psp_seg =
    IVT·BDA 와 겹쳐 부팅 스텁을 지운다(실측: PSP:0x80 쓰기가 IVT[20h]
    오프셋을 0 으로 만들었다). 세그 0x1000 — DOS 의 오랜 배치.
    자식 COM 은 64KB 블록 한 장을 할당받은 자리에 실린다. *)
-let load_com ?(psp_seg = 0x1000) ?(child = false) t image =
+let load_com_at ~psp_seg ~child ~env t image =
   let base = (psp_seg * 16) + 0x100 in
   Bytes.blit (Bytes.of_string image) 0 t.mem base (String.length image);
-  write_psp ~init:(not child) t psp_seg;
+  write_psp ~init:(not child) ~env t psp_seg;
   if child then begin
     t.blocks <- t.blocks @ [ (psp_seg, 0x1000) ];
     t.free_base <- psp_seg
@@ -336,7 +406,7 @@ let loadable image =
    대로 memtop 아래에 블록 하나로 받는다. 자식 EXE 도 마찬가지로
    남은 메모리를 통째로 블록으로 받는다 — 실기와 같아서, 자식이 다시
    EXEC 하려면 먼저 AH=4Ah 로 줄여야 한다. *)
-let load_exe_module ?psp_seg ~child t image m =
+let load_exe_module ?psp_seg ~child ~env t image m =
   let u16 = header_u16 image in
   let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
   let exe_sp = u16 0x10 and exe_ss = u16 0x0E in
@@ -348,7 +418,7 @@ let load_exe_module ?psp_seg ~child t image m =
   in
   let image_seg = psp_seg + 0x10 in
   place_mz_module t image m ~base:(image_seg * 16) ~factor:image_seg;
-  write_psp ~init:(not child) t psp_seg;
+  write_psp ~init:(not child) ~env t psp_seg;
   if child then begin
     t.blocks <- t.blocks @ [ (psp_seg, t.free_top - psp_seg) ];
     t.free_base <- psp_seg
@@ -374,9 +444,15 @@ let load_exe_module ?psp_seg ~child t image m =
   t.exited <- false;
   t.exit_code <- 0
 
-let load_exe t image =
+let load_com ?name t image =
+  write_root_env t ~name;
+  load_com_at ~psp_seg:0x1000 ~child:false ~env:root_env_seg t image
+
+let load_exe ?name t image =
   match loadable image with
-  | Ok (Exe_image m) -> load_exe_module ~child:false t image m
+  | Ok (Exe_image m) ->
+    write_root_env t ~name;
+    load_exe_module ~child:false ~env:root_env_seg t image m
   | Ok Com_image -> invalid_arg "not an MZ image"
   | Error e -> invalid_arg (mz_error_message e)
 
@@ -449,8 +525,13 @@ let child_exit t ~code ~keep =
        copy of the JFT, so a handle the child closed stays open for the
        parent. *)
     List.iter (fun (h, hd) -> Hashtbl.replace t.handles h hd) f.parent_handles;
+    (* 상주 종료(31h·INT 27h)는 PSP 블록만 [keep] 으로 줄이고 자식의 다른
+       블록(환경, 48h 로 받은 것)은 남긴다(RBIL INT 21/31: "the value in DX
+       only affects the memory block containing the PSP"). 그냥 끝나면 자식
+       블록이 모두 사라진다. *)
     (match keep with
-     | Some paras -> t.blocks <- f.parent_blocks @ [ (t.psp_seg, paras) ]
+     | Some paras ->
+       t.blocks <- (t.psp_seg, paras) :: List.remove_assoc t.psp_seg t.blocks
      | None -> t.blocks <- f.parent_blocks);
     t.free_base <- f.parent_free_base;
     t.free_top <- f.parent_free_top;
@@ -495,7 +576,8 @@ let exec_load_overlay = 0x03
    은 아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
 let exec_program t ~return_to =
   let cpu = t.cpu in
-  let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
+  let raw_name = asciiz_at t (seg_off t 3 2) in
+  let name = String.uppercase_ascii raw_name in
   let al = Cpu86.reg8 cpu 0 in
   if al <> exec_load_and_run && al <> exec_load_overlay then begin fail t 1; Completed end
   else
@@ -506,31 +588,42 @@ let exec_program t ~return_to =
       Completed
     | Some img_bytes ->
       let image = Bytes.to_string img_bytes in
+      (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
+      let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
+      let epb_env = rd16 t epb in
+      let tail_seg = rd16 t (epb + 4) and tail_off = rd16 t (epb + 2) in
+      let fcb1_seg = rd16 t (epb + 8) and fcb1_off = rd16 t (epb + 6) in
+      let fcb2_seg = rd16 t (epb + 12) and fcb2_off = rd16 t (epb + 10) in
+      (* EXEC.ASM 순서: 환경(10·8) → 헤더(11) → 프로그램 자리(8). 뒤에서
+         실패하면 환경 블록을 놓는다(exec_bomb → exec_dealloc). EPB 의
+         환경이 0 이면 부모의 환경을 옮긴다. *)
+      let parent_blocks = t.blocks in
+      let source =
+        if epb_env <> 0 then epb_env else rd16 t ((t.psp_seg * 16) + 0x2C)
+      in
+      let give_up code = t.blocks <- parent_blocks; fail t code; Completed in
+      match child_environment t ~source ~name:raw_name with
+      | Error code -> fail t code; Completed
+      | Ok env ->
       (* 헤더가 파일 안의 적재 모듈을 말하지 않으면(짧은 헤더, 모자란 파일,
          파일 밖 재배치 표) DOS 오류 11(잘못된 형식)로 답한다 — 이 호출만
          실패하고 부모는 그대로 산다. *)
       match loadable image with
       | Error (Header_too_short | Pages_end_in_header | File_short_by_a_page
-              | Relocations_past_file) -> fail t 11; Completed
+              | Relocations_past_file) -> give_up 11
       | Ok kind ->
-      (* 배치를 먼저 정한다 — 실패는 부모에게 즉시 돌아간다 *)
       let placement =
         match kind with
         | Exe_image m ->
           exe_child_psp t ~img_paras:m.load_paras ~minalloc:(header_u16 image 0x0A)
         | Com_image -> find_free t 0x1000
       in
-      (match placement with
-       | None ->
-         Cpu86.set_reg16 cpu 3 (largest_free t);
-         fail t 8; Completed                    (* 메모리가 모자란다 *)
-       | Some psp ->
-         (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
-         let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
-         let env_seg = rd16 t epb in
-         let tail_seg = rd16 t (epb + 4) and tail_off = rd16 t (epb + 2) in
-         let fcb1_seg = rd16 t (epb + 8) and fcb1_off = rd16 t (epb + 6) in
-         let fcb2_seg = rd16 t (epb + 12) and fcb2_off = rd16 t (epb + 10) in
+      match placement with
+      | None ->
+        t.blocks <- parent_blocks;
+        Cpu86.set_reg16 cpu 3 (largest_free t);
+        fail t error_not_enough_memory; Completed
+      | Some psp ->
          t.exec_frames <-
            {
              parent = snapshot_cpu t;
@@ -539,18 +632,18 @@ let exec_program t ~return_to =
              parent_dta = t.dta;
              parent_free_base = t.free_base;
              parent_free_top = t.free_top;
-             parent_blocks = t.blocks;
+             parent_blocks;
              parent_handles =
                List.sort (fun (a, _) (b, _) -> compare a b)
                  (Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles []);
            }
            :: t.exec_frames;
+         let env = env_word env in
          (match kind with
-          | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true t image m
-          | Com_image -> load_com ~psp_seg:psp ~child:true t image);
-         (* 커맨드라인·FCB·환경 세그먼트를 자식 PSP 에 옮긴다 *)
+          | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true ~env t image m
+          | Com_image -> load_com_at ~psp_seg:psp ~child:true ~env t image);
+         (* 커맨드라인·FCB 를 자식 PSP 에 옮긴다 *)
          let cpsp = t.psp_seg * 16 in
-         if env_seg <> 0 then wr16 t (cpsp + 0x2C) env_seg;
          let copy_dword_into dst seg off n =
            if seg <> 0 || off <> 0 then
              for i = 0 to n - 1 do
@@ -566,7 +659,7 @@ let exec_program t ~return_to =
          end;
          copy_dword_into (cpsp + 0x5C) fcb1_seg fcb1_off 12;
          copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12;
-         Control_transferred)
+         Control_transferred
 
 (* INT 27h — 옛 방식의 상주 종료. DX 는 '마지막 상주 바이트 다음
    오프셋' 이고 블록은 16바이트로 올림한 만큼(마지막 한 칸은 여유)을
