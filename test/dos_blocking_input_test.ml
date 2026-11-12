@@ -189,10 +189,11 @@ let test_deferred_trap () =
 let test_idle_clock_reaches_irq () =
   let m = machine (bios_read 0 ^ store 0x200 ^ marker ^ exit) in
   let tick_cycles = Dos_ports.cycles_per_tick m.Dos_state.ports in
+  let boot_ticks = Dos_machine.tick_count m in
   (* Two-cycle idle quanta reach the PIT deadline within this machine-step
      budget, with the remaining half available for the real ROM IRQ code. *)
   let report = Dos_machine.run_until m ~max_steps:tick_cycles
-      ~stop:(fun current -> Dos_machine.tick_count current > 0) in
+      ~stop:(fun current -> Dos_machine.tick_count current > boot_ticks) in
   check "idle clock lets ROM IRQ0 update the timer" (report.stop_reason = Dos_machine.Stop_requested);
   check "IRQ instructions count as actual guest work" (report.instructions > 2);
   check "idle time remains distinct from instructions" (report.machine_steps > report.instructions);

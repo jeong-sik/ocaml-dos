@@ -28,3 +28,8 @@ val read_key : Dos_state.t -> Dos_state.service_result
 
 val service : Dos_state.t -> bios_service -> Dos_state.service_result
 (** BIOS 서비스 하나를 실행한다. *)
+
+val set_ticks_from_clock : Dos_state.t -> unit
+(** BIOS 틱(0x46C)을 지금 시각의 시·분·초로 채우고 자정 넘김(0x470)을
+    지운다. 부팅 때 BIOS 가 RTC 를 읽어 하는 일이다(SeaBIOS
+    [clock_setup]). *)

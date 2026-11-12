@@ -414,7 +414,8 @@ let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_day <- day;
   t.epoch_hour <- hour;
   t.epoch_min <- minute;
-  t.epoch_sec <- second
+  t.epoch_sec <- second;
+  Dos_bios.set_ticks_from_clock t
 
 let attach_mouse t = t.mouse.mouse_present <- true
 

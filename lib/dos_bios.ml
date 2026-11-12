@@ -51,17 +51,57 @@ let set_ivt t v off sg =
   wr16 t (v * 4) off;
   wr16 t ((v * 4) + 2) sg
 
+(* 하루의 틱 수(SeaBIOS src/std/bda.h TICKS_PER_DAY). *)
+let ticks_per_day = 0x1800B0
+
+let le16 v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xff))
+
 (* IRQ0 에서 도는 ROM 루틴: 0x46C 틱을 올리고 INT 1Ch 사용자 훅을 부른
-   뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다. *)
+   뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다.
+
+   틱이 하루치 이상이 되면 0 으로 돌리고 0x470 을 하나 올린다(SeaBIOS
+   src/clock.c clock_update). DOS 는 INT 1Ah AH=00h 가 돌려주는 이 값을
+   보고 날짜를 넘긴다. *)
 let bios_int8 =
   "\x1e\x50"                        (* push ds; push ax *)
   ^ "\x31\xc0\x8e\xd8"              (* xor ax,ax; mov ds,ax *)
   ^ "\xa1\x6c\x04\x40\xa3\x6c\x04"  (* mov ax,[046C]; inc ax; mov [046C],ax *)
   ^ "\x75\x04"                      (* jnz +4 — 자리올림 없으면 고워드 skip *)
   ^ "\xff\x06\x6e\x04"              (* inc word [046E] *)
-  ^ "\xcd\x1c"                      (* int 1Ch — 사용자 틱 훅 *)
+  ^ "\x81\x3e\x6e\x04" ^ le16 (ticks_per_day lsr 16)     (* cmp word [046E],hi *)
+  ^ "\x72\x16"                      (* jb hook — 하루가 안 됐다 *)
+  ^ "\x77\x08"                      (* ja midnight *)
+  ^ "\x81\x3e\x6c\x04" ^ le16 (ticks_per_day land 0xffff) (* cmp word [046C],lo *)
+  ^ "\x72\x0c"                      (* jb hook *)
+  ^ "\x31\xc0"                      (* midnight: xor ax,ax *)
+  ^ "\xa3\x6c\x04\xa3\x6e\x04"      (* mov [046C],ax; mov [046E],ax *)
+  ^ "\xfe\x06\x70\x04"              (* inc byte [0470] *)
+  ^ "\xcd\x1c"                      (* hook: int 1Ch — 사용자 틱 훅 *)
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
+
+(* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
+   3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
+let pmtimer_hz = 3579545
+let pmtimer_to_pit = 3
+let pit_tick_interval = 65536
+let ms_per_second = 1000
+let ceil_div a b = (a + b - 1) / b
+
+let ticks_of_time ~hour ~minute ~second =
+  let ms = (((hour * 60) + minute) * 60 + second) * ms_per_second in
+  let pm = ceil_div (ms * pmtimer_hz) pit_tick_interval in
+  ceil_div pm (ms_per_second * pmtimer_to_pit)
+
+(* 부팅 때 BIOS 가 RTC 를 읽어 틱을 채운다(SeaBIOS src/clock.c
+   clock_setup). 자정 넘김 표시는 지운다. now_fields 의 시는 0..23 이라
+   틱은 하루를 넘지 않는다(23:59:59 가 1573025). *)
+let set_ticks_from_clock t =
+  let _, _, _, hour, minute, second = now_fields t in
+  let ticks = ticks_of_time ~hour ~minute ~second in
+  wr16 t 0x46C (ticks land 0xFFFF);
+  wr16 t 0x46E (ticks lsr 16);
+  wr8 t 0x470 0
 
 let equipment_word =
   (* bit0 디스켓 있음, bit1 코프로세서 없음(8087 미장착 — ESC 명령은
@@ -89,6 +129,7 @@ let install t =
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
   wr16 t 0x410 equipment_word;
   wr16 t 0x413 640;                 (* 기억용량 KB *)
+  set_ticks_from_clock t;
   wr8 t 0x417 0;                    (* 시프트 상태 *)
   wr8 t 0x418 0;
   wr16 t 0x41A ring_lo;
