@@ -24,20 +24,24 @@ val init_memory : Dos_state.t -> psp_seg:int -> unit
 (** 적재 직후의 메모리 소유 상태. 실기처럼 프로그램이 남은 전부를
     가진다 — AH=4Ah 로 줄여야 AH=48h 이 성공한다. *)
 
-val load_com : ?name:string -> Dos_state.t -> string -> unit
+val load_com : ?name:string -> ?tail:string -> Dos_state.t -> string -> unit
 (** COM 이미지를 루트 프로그램으로 PSP 세그 0x1000 에 싣는다. EXEC 자식은
     AH=4Bh 가 싣는다.
 
     [name] 은 C: 루트 디렉터리의 파일 이름(예: [GAME.COM])이다. 주면 환경
     블록 꼬리에 워드 1 과 [C:\GAME.COM] 을 쓴다 — C 런타임의 argv[0] 이
     이것이다. 없으면 꼬리를 쓰지 않는다. 0x500 의 환경 자리(256 바이트)를
-    넘는 이름은 [Invalid_argument]. *)
+    넘는 이름은 [Invalid_argument].
 
-val load_exe : ?name:string -> Dos_state.t -> string -> unit
+    [tail] 은 명령 이름 바로 뒤 글자들이다("GAME a" 면 [" a"]). PSP:80h 에
+    길이, 81h 부터 글자와 0Dh 를 쓴다. 없으면 빈 꼬리다. 126 바이트를
+    넘거나 CR 이 들어 있으면 아무것도 싣지 않고 [Invalid_argument]. *)
+
+val load_exe : ?name:string -> ?tail:string -> Dos_state.t -> string -> unit
 (** MZ EXE 이미지를 memtop 아래 루트 자리에 싣는다. 적재 모듈은 헤더의
     페이지 수가 정한다(MS-DOS 4.0 EXEC.ASM) — 파일 뒤에 붙은 데이터는
     싣지 않는다. 헤더가 파일 안의 모듈을 말하지 않으면 [Invalid_argument].
-    [name] 은 [load_com] 과 같다. EXEC 자식은 AH=4Bh 가 같은 규칙으로
+    [name]·[tail] 은 [load_com] 과 같다. EXEC 자식은 AH=4Bh 가 같은 규칙으로
     싣고, 환경을 따로 받는다. *)
 
 val int27 : Dos_state.t -> unit
