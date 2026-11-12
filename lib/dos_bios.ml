@@ -391,7 +391,12 @@ let mouse t =
   | 0x00 ->
     Cpu86.set_reg16 cpu 0 (if m.mouse_present then 0xFFFF else 0x0000);
     Cpu86.set_reg16 cpu 3 (if m.mouse_present then 2 else 0);
-    m.mouse_visible <- false
+    m.mouse_visible <- false;
+    m.mouse_range_x <- None;
+    m.mouse_range_y <- None;
+    List.iter
+      (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
+      [ m.mouse_presses; m.mouse_releases ]
   | 0x01 -> m.mouse_visible <- true
   | 0x02 -> m.mouse_visible <- false
   | 0x03 ->
@@ -399,8 +404,37 @@ let mouse t =
     Cpu86.set_reg16 cpu 2 m.mouse_y;
     Cpu86.set_reg16 cpu 3 m.mouse_buttons
   | 0x04 ->
-    m.mouse_x <- Cpu86.reg16 cpu 1;
-    m.mouse_y <- Cpu86.reg16 cpu 2
+    m.mouse_x <- clamp_to m.mouse_range_x (Cpu86.reg16 cpu 1);
+    m.mouse_y <- clamp_to m.mouse_range_y (Cpu86.reg16 cpu 2)
+  | (0x05 | 0x06) as fn ->
+    (* 버튼 BX 의 누름(05h)·뗌(06h) 기록. AX 는 지금 버튼 상태, BX 는 지난
+       호출 뒤 횟수, CX·DX 는 마지막 자리. 횟수는 읽으면 0 이 된다
+       (Ralf Brown INT 33/0005, 0006). 없는 버튼 번호면 AX 만 쓴다. *)
+    Cpu86.set_reg16 cpu 0 m.mouse_buttons;
+    let logs = if fn = 0x05 then m.mouse_presses else m.mouse_releases in
+    let b = Cpu86.reg16 cpu 3 in
+    if b < mouse_button_count then begin
+      let l = logs.(b) in
+      Cpu86.set_reg16 cpu 3 l.times;
+      Cpu86.set_reg16 cpu 1 l.last_x;
+      Cpu86.set_reg16 cpu 2 l.last_y;
+      l.times <- 0
+    end
+  | (0x07 | 0x08) as fn ->
+    (* 가로(07h)·세로(08h) 범위 CX..DX(Ralf Brown INT 33/0007, 0008).
+       거꾸로 주면 바꿔 쓴다(HelpPC 2.10 INT 33,7). 범위는 움직임을 가두는
+       창이라 지금 자리도 그 안으로 옮긴다. 텍스트 모드에서 셀 크기 배수로
+       내리는 일(RBIL 의 메모)은 하지 않는다. *)
+    let a = Cpu86.reg16 cpu 1 and b = Cpu86.reg16 cpu 2 in
+    let range = Some (min a b, max a b) in
+    if fn = 0x07 then begin
+      m.mouse_range_x <- range;
+      m.mouse_x <- clamp_to range m.mouse_x
+    end
+    else begin
+      m.mouse_range_y <- range;
+      m.mouse_y <- clamp_to range m.mouse_y
+    end
   | 0x0B ->
     Cpu86.set_reg16 cpu 1 (m.mouse_dx land 0xffff);
     Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);

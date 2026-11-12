@@ -110,6 +110,9 @@ let create () =
         mouse_buttons = 0; mouse_visible = false;
         mouse_dx = 0; mouse_dy = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
+        mouse_presses = Dos_state.new_button_logs ();
+        mouse_releases = Dos_state.new_button_logs ();
+        mouse_range_x = None; mouse_range_y = None;
       };
     }
   in
@@ -416,6 +419,11 @@ let attach_mouse t = t.mouse.mouse_present <- true
 
 let set_mouse t ~x ~y ~buttons =
   let m = t.mouse in
+  (* 하네스는 놓을 자리를 준다. AX=07h·08h 범위 밖이면 범위 끝에 놓고,
+     이동량과 이동 이벤트도 그 자리로 센다 — 범위 밖 자리를 거듭 줘도
+     움직이지 않은 마우스가 이벤트를 내지 않는다. *)
+  let x = Dos_state.clamp_to m.mouse_range_x x
+  and y = Dos_state.clamp_to m.mouse_range_y y in
   let moved = x <> m.mouse_x || y <> m.mouse_y in
   m.mouse_dx <- m.mouse_dx + (x - m.mouse_x);
   m.mouse_dy <- m.mouse_dy + (y - m.mouse_y);
@@ -423,6 +431,21 @@ let set_mouse t ~x ~y ~buttons =
   m.mouse_y <- y;
   let old_buttons = m.mouse_buttons in
   m.mouse_buttons <- buttons;
+  for i = 0 to Dos_state.mouse_button_count - 1 do
+    let bit = 1 lsl i in
+    let log =
+      match old_buttons land bit <> 0, buttons land bit <> 0 with
+      | false, true -> Some m.mouse_presses.(i)
+      | true, false -> Some m.mouse_releases.(i)
+      | false, false | true, true -> None
+    in
+    Option.iter
+      (fun (l : Dos_state.button_log) ->
+        l.times <- l.times + 1;
+        l.last_x <- m.mouse_x;
+        l.last_y <- m.mouse_y)
+      log
+  done;
   (* AX=0x0C 등록에 닿은 이벤트를 핸들러에 far call 로 건넨다. 비트 번호는
      실기 마우스 드라이버와 같다(Ralf Brown rb-5968): 0x01 이동,
      0x02/0x04 왼쪽 누름/뗌, 0x08/0x10 오른쪽 누름/뗌, 0x20/0x40 가운데
