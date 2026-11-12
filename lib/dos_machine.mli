@@ -19,17 +19,18 @@ val create : unit -> t
 
 (** {1 적재} *)
 
-val load_com : ?name:string -> t -> string -> unit
+val load_com : ?name:string -> ?tail:string -> t -> string -> unit
 (** COM 이미지를 PSP 세그먼트 0x1000 의 0x100 에 싣는다. CS=DS=ES=SS=PSP,
     IP=0x100, SP=0xFFFE, 스택 맨 위는 0 — RET 으로 돌아오면 PSP 의
     INT 20h 로 끝나는 실기 관례 그대로다. [name] 은 C: 루트 디렉터리의
     파일 이름이다. 주면 환경 블록 꼬리에 전체 경로를 쓴다
-    ({!Dos_dos.load_com}). *)
+    ({!Dos_dos.load_com}). [tail] 은 명령 이름 바로 뒤 글자들로 PSP:80h 의
+    명령줄 꼬리가 된다({!Dos_dos.load_com}). *)
 
-val load_exe : ?name:string -> t -> string -> unit
+val load_exe : ?name:string -> ?tail:string -> t -> string -> unit
 (** MZ EXE 를 싣는다. 재배치 워드에 로드 세그먼트를 더하고 CS:IP/SS:SP
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
-    MZ 서명이 아니면 [Invalid_argument]. [name] 은 [load_com] 과 같다. *)
+    MZ 서명이 아니면 [Invalid_argument]. [name]·[tail] 은 [load_com] 과 같다. *)
 
 val mount_file : t -> string -> string -> unit
 (** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)

@@ -158,6 +158,10 @@ dune exec --root . bin/dosboot.exe -- \
 특정 상태가 된 다음에 들어가야 하는 키는 `@` 로 묶는다. 글자만 칠
 때는 `--type`.
 
+명령줄 인자는 `--args TEXT` 로 준다. `GAME TEXT` 를 친 것처럼 PSP:80h 꼬리가
+` TEXT` 가 된다(COMMAND.COM 처럼 이름 뒤 공백부터). 환경 블록 끝의 프로그램
+이름은 `C:\` 에 파일 이름을 붙인 것이다.
+
 진단은 `--trace N`(N 스텝마다 CS:IP), `--int-trace`(INT 명령),
 `--dump ADDR,LEN`(메모리), `--save NAME=PATH`(게스트가 쓴 파일 꺼내기).
 

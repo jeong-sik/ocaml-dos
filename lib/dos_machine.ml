@@ -137,13 +137,13 @@ let create () =
    몸통은 Dos_dos 에 있다 — EXEC(AH=4Bh) 자식을 같은 코드로 싣기
    때문이다. 여기선 루트 프로그램을 싣는 얼굴만 남긴다. *)
 
-let load_com ?name t image =
+let load_com ?name ?tail t image =
   t.input_continuations <- [];
   t.console_pending <- "";
-  Dos_dos.load_com ?name t image
+  Dos_dos.load_com ?name ?tail t image
 
-let load_exe ?name t image =
-  Dos_dos.load_exe ?name t image;
+let load_exe ?name ?tail t image =
+  Dos_dos.load_exe ?name ?tail t image;
   t.input_continuations <- [];
   t.console_pending <- ""
 
