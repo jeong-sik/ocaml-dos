@@ -33,6 +33,7 @@ let accept_service t ~return_to = function
 
 let host_service t ~return_to v =
   match v with
+  | 0x00 -> Dos_dos.divide_overflow t; Control_transferred
   | 0x20 -> Dos_dos.terminate t; Control_transferred
   | 0x21 -> Dos_dos.service t ~return_to
   | 0x27 -> Dos_dos.int27 t; Control_transferred
@@ -79,7 +80,7 @@ let create () =
     (* 1990년대 DOS 게임은 286 이상에서 돌았고 Borland 컴파일러가 186
        명령을 낸다. 실칩 8086 검증은 Cpu86 쪽 스위트가 I8086 으로 따로
        돈다. *)
-    Cpu86.create ~model:Cpu86.I80186 ~read ~write
+    Cpu86.create ~model:Cpu86.I80286 ~read ~write
       ~port_in:(fun p -> Dos_ports.port_in ports p)
       ~port_out:(fun p v -> Dos_ports.port_out ports p v)
       ()

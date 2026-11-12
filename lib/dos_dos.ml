@@ -987,6 +987,17 @@ let service_immediate t =
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
+(* DOS 가 INT 0 에 거는 처리. MS-DOS 2.0 CTRLC.ASM 의 DIVOV 는 콘솔에
+   DOSMES.ASM 의 DIVMES(CR LF "Divide overflow" CR LF)를 쓰고, Ctrl-C 로
+   끊을 때와 같이 AX=4C00h 로 프로그램을 끝낸다. 종료 코드는 0 이다. DOS
+   는 이 종료의 사유를 Ctrl-C(AH=4Dh 의 AH=1)로 남기지만 이 기계는 사유를
+   따로 두지 않아 0 으로 답한다. *)
+let divide_overflow_message = "\r\nDivide overflow\r\n"
+
+let divide_overflow t =
+  String.iter (fun c -> put_char t (Char.code c) 0x07) divide_overflow_message;
+  child_exit t ~code:0 ~keep:None
+
 let rec service t ~return_to =
   match Cpu86.reg8 t.cpu 4 with
   | (0x01 | 0x07 | 0x08) as ah -> resume_input t (Read_character { echo = ah = 0x01 })

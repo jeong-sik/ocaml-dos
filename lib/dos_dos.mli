@@ -20,6 +20,10 @@ val resume_input : Dos_state.t -> Dos_state.dos_input_request -> Dos_state.servi
 val terminate : Dos_state.t -> unit
 (** INT 20h — RET 로 돌아온 프로그램의 종료. *)
 
+val divide_overflow : Dos_state.t -> unit
+(** INT 0 — DOS 의 기본 처리. 콘솔에 "Divide overflow" 를 쓰고 프로그램을
+    종료 코드 0 으로 끝낸다(MS-DOS 2.0 CTRLC.ASM 의 DIVOV). *)
+
 val init_memory : Dos_state.t -> psp_seg:int -> unit
 (** 적재 직후의 메모리 소유 상태. 실기처럼 프로그램이 남은 전부를
     가진다 — AH=4Ah 로 줄여야 AH=48h 이 성공한다. *)

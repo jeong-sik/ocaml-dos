@@ -7,6 +7,14 @@
  (libraries cpu86core))
 
 (test
+ (name cpu86_286_test)
+ (libraries cpu86core))
+
+(test
+ (name dos_divide_test)
+ (libraries dosmachine))
+
+(test
  (name dos_machine_test)
  (libraries dosmachine))
 
