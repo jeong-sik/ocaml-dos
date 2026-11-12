@@ -266,7 +266,9 @@ let port_out t p v =
         t.pit0_latched <- None
       end
     end
+  | 0x60 -> Dos_kbc.write_data t.kbc ~now:t.now v
   | 0x61 -> t.port_b <- v
+  | 0x64 -> Dos_kbc.write_command t.kbc v
   | 0x70 -> t.cmos_index <- v
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
