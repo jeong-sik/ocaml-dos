@@ -153,29 +153,45 @@ let rgb_cga2 mem =
 
 (* EGA/VGA 16색: 평면 넷의 같은 비트를 모아 색 번호를 만들고, 속성
    팔레트가 그것을 DAC 자리로 옮긴다. *)
+(* 색 번호 하나의 RGB 는 한 장 안에서 바뀌지 않는다. 점마다 DAC 을 다시
+   읽으면 640x480 한 장에 30만 번 계산한다 — 표를 한 번 만들어 쓴다. *)
+let planar_colors = 16
+let pixels_per_byte = 8
+
 let rgb_planar planes ~w ~h ~attr ~pal =
   let img = Bytes.make (w * h * 3) '\000' in
-  let bytes_per_row = w / 8 in
+  let colors = Array.init planar_colors (fun i -> rgb_of_dac pal attr.(i)) in
+  let bytes_per_row = w / pixels_per_byte in
+  let n_planes = Array.length planes in
+  let plane_bytes = Array.make n_planes 0 in
   for y = 0 to h - 1 do
     for x = 0 to w - 1 do
-      let off = ((y * bytes_per_row) + (x / 8)) land 0xffff in
-      let bit = 7 - (x mod 8) in
+      (* 여덟 점이 같은 바이트를 읽으니 그 바이트의 첫 점에서만 읽는다. *)
+      if x mod pixels_per_byte = 0 then begin
+        let off = ((y * bytes_per_row) + (x / pixels_per_byte)) land 0xffff in
+        for p = 0 to n_planes - 1 do
+          plane_bytes.(p) <- Char.code (Bytes.get planes.(p) off)
+        done
+      end;
+      let bit = 7 - (x mod pixels_per_byte) in
       let idx = ref 0 in
-      for p = 0 to Array.length planes - 1 do
-        if (Char.code (Bytes.get planes.(p) off) lsr bit) land 1 = 1 then
-          idx := !idx lor (1 lsl p)
+      for p = 0 to n_planes - 1 do
+        if (plane_bytes.(p) lsr bit) land 1 = 1 then idx := !idx lor (1 lsl p)
       done;
-      blit img ~width:w ~x ~y (rgb_of_dac pal attr.(!idx land 0x0f))
+      blit img ~width:w ~x ~y colors.(!idx land 0x0f)
     done
   done;
   Bytes.to_string img
 
 (* VGA 13h: 0xA0000 선형 320x200, DAC 은 채널당 6비트. *)
+let vga_colors = 256
+
 let rgb_vga13 mem pal =
   let width = 320 and height = 200 in
   let img = Bytes.make (width * height * 3) '\000' in
+  let colors = Array.init vga_colors (fun i -> rgb_of_dac pal i) in
   for i = 0 to (width * height) - 1 do
-    let r, g, b = rgb_of_dac pal (Char.code (Bytes.get mem (0xA0000 + i))) in
+    let r, g, b = colors.(Char.code (Bytes.get mem (0xA0000 + i))) in
     Bytes.set img (i * 3) (Char.chr r);
     Bytes.set img ((i * 3) + 1) (Char.chr g);
     Bytes.set img ((i * 3) + 2) (Char.chr b)
