@@ -81,3 +81,7 @@
 (test
  (name dos_mouse_screen_test)
  (libraries dosmachine))
+
+(test
+ (name dos_mouse_motion_test)
+ (libraries dosmachine))
