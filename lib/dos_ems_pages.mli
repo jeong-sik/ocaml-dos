@@ -47,6 +47,8 @@ type status =
   | Map_already_saved                            (** 8Dh *)
   | No_saved_map                                 (** 8Eh *)
   | Invalid_subfunction                          (** 8Fh *)
+  | Undefined_attribute                          (** 90h *)
+  | Not_supported                                (** 91h *)
   | Moved_over_source
       (** 92h. 같은 핸들 안에서 겹치는 옮기기다. 옮기기는 끝났고, 원본
           일부가 덮였다는 알림이다 *)
@@ -56,6 +58,9 @@ type status =
   | Longer_than_1mb                              (** 96h *)
   | Exchange_overlap                             (** 97h *)
   | Undefined_memory_type                        (** 98h *)
+  | Name_not_found                               (** A0h *)
+  | Name_taken                                   (** A1h: 다른 핸들이 이미 가진 이름(53h) *)
+  | Null_name                                    (** A1h: 모두 NUL 인 이름으로 찾음(54h) *)
   | Wraps_1mb                                    (** A2h *)
   | Corrupt_map                                  (** A3h *)
 
@@ -92,3 +97,22 @@ val release : Dos_state.t -> int -> (unit, status) result
 val reallocate : Dos_state.t -> int -> count:int -> (unit, status) result
 val save_map : Dos_state.t -> int -> (unit, status) result
 val restore_map : Dos_state.t -> int -> (unit, status) result
+
+val name_bytes : int
+(** 핸들 이름의 길이(8). *)
+
+val name : Dos_state.t -> int -> string
+(** 핸들의 이름. 이름이 없으면(없는 핸들도) NUL 여덟. *)
+
+val set_name : Dos_state.t -> int -> string -> (unit, status) result
+(** 이름(앞 여덟 바이트, 짧으면 NUL 로 채운다)을 붙인다. 모두 NUL 이면
+    이름을 뗀다. 다른 핸들의 이름과 여덟 바이트가 같으면 [Name_taken] 이고
+    아무것도 바뀌지 않는다. *)
+
+val find_name : Dos_state.t -> string -> (int, status) result
+(** 이름으로 핸들을 찾는다. 모두 NUL 이면 [Null_name], 없으면
+    [Name_not_found]. *)
+
+val names_ok : Dos_state.t -> bool
+(** [ems_names] 가 있는 핸들만 가리키고, 이름이 모두 여덟 바이트·모두 NUL
+    아님·서로 다름인지. 스냅숏이 저장과 복원 때 본다. *)

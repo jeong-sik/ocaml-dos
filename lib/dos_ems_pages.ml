@@ -47,6 +47,8 @@ type status =
   | Map_already_saved                            (* 8Dh *)
   | No_saved_map                                 (* 8Eh *)
   | Invalid_subfunction                          (* 8Fh *)
+  | Undefined_attribute                          (* 90h *)
+  | Not_supported                                (* 91h *)
   | Moved_over_source                            (* 92h, 옮기기는 됐다 *)
   | Past_handle_pages                            (* 93h *)
   | Conventional_overlaps_expanded               (* 94h *)
@@ -54,6 +56,9 @@ type status =
   | Longer_than_1mb                              (* 96h *)
   | Exchange_overlap                             (* 97h *)
   | Undefined_memory_type                        (* 98h *)
+  | Name_not_found                               (* A0h *)
+  | Name_taken                                   (* A1h, 53h *)
+  | Null_name                                    (* A1h, 54h *)
   | Wraps_1mb                                    (* A2h *)
   | Corrupt_map                                  (* A3h *)
 
@@ -70,6 +75,8 @@ let status_code = function
   | Map_already_saved -> 0x8D
   | No_saved_map -> 0x8E
   | Invalid_subfunction -> 0x8F
+  | Undefined_attribute -> 0x90
+  | Not_supported -> 0x91
   | Moved_over_source -> 0x92
   | Past_handle_pages -> 0x93
   | Conventional_overlaps_expanded -> 0x94
@@ -77,6 +84,8 @@ let status_code = function
   | Longer_than_1mb -> 0x96
   | Exchange_overlap -> 0x97
   | Undefined_memory_type -> 0x98
+  | Name_not_found -> 0xA0
+  | Name_taken | Null_name -> 0xA1
   | Wraps_1mb -> 0xA2
   | Corrupt_map -> 0xA3
 
@@ -209,7 +218,10 @@ let release t h =
   | Some _ ->
     forget t h ~from:0;
     if h = os_handle then Hashtbl.replace t.ems_pages h [||]
-    else Hashtbl.remove t.ems_pages h;
+    else begin
+      Hashtbl.remove t.ems_pages h;
+      Hashtbl.remove t.ems_names h
+    end;
     Ok ()
 
 (* Function 18. 늘리면 뒤에 새 페이지가 붙고, 줄이면 뒤에서 떨어진다. *)
@@ -245,3 +257,41 @@ let restore_map t h =
       Hashtbl.remove t.ems_saved h;
       Array.iteri (show t) m;
       Ok ()
+
+(* ---------- 핸들 이름(Function 20·21) ----------
+
+   이름은 여덟 바이트 그대로다. 명세는 바이트마다 00h-FFh 를 모두 허용하고,
+   짧은 이름을 NUL 로 채우는 일은 부르는 쪽에 맡긴다(Function 20). 그래서
+   "AB",0,"C" 와 "AB",0,0 은 다른 이름이고, 비교는 여덟 바이트 전부로
+   한다. DOSBox 는 찾을 때 strncmp 로 첫 NUL 에서 멈춘다 — NUL 로 채운
+   이름끼리는 둘이 같다. 모두 NUL 은 "이름 없음"이다 — 해제된 핸들의 이름이
+   그렇다(Function 6). *)
+let name_bytes = 8
+let null_name = String.make name_bytes '\000'
+let eight raw = String.sub (raw ^ null_name) 0 name_bytes
+
+let name t h = Option.value (Hashtbl.find_opt t.ems_names h) ~default:null_name
+let holder t name = Hashtbl.fold (fun k n acc -> if n = name then Some k else acc) t.ems_names None
+
+(* 다른 핸들이 이미 가진 이름이면 A1h 이고, 이름은 그대로다. *)
+let set_name t h raw =
+  let name = eight raw in
+  if not (Hashtbl.mem t.ems_pages h) then Error Invalid_handle
+  else if name = null_name then (Hashtbl.remove t.ems_names h; Ok ())
+  else
+    match holder t name with
+    | Some k when k <> h -> Error Name_taken
+    | Some _ | None -> Hashtbl.replace t.ems_names h name; Ok ()
+
+let find_name t raw =
+  let name = eight raw in
+  if name = null_name then Error Null_name
+  else Option.to_result ~none:Name_not_found (holder t name)
+
+(* 이름이 겹치면 한쪽은 [holder] 가 아니다. *)
+let names_ok t =
+  Hashtbl.fold
+    (fun h n acc ->
+      acc && Hashtbl.mem t.ems_pages h && String.length n = name_bytes && n <> null_name
+      && holder t n = Some h)
+    t.ems_names true
