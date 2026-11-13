@@ -73,3 +73,7 @@
 (test
  (name dos_gtext_test)
  (libraries dosmachine cpu86core))
+
+(test
+ (name dos_teletype_test)
+ (libraries dosmachine cpu86core))
