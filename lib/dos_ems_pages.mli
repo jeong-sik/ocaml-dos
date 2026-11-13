@@ -47,11 +47,32 @@ type status =
   | Map_already_saved                            (** 8Dh *)
   | No_saved_map                                 (** 8Eh *)
   | Invalid_subfunction                          (** 8Fh *)
+  | Moved_over_source
+      (** 92h. 같은 핸들 안에서 겹치는 옮기기다. 옮기기는 끝났고, 원본
+          일부가 덮였다는 알림이다 *)
+  | Past_handle_pages                            (** 93h *)
+  | Conventional_overlaps_expanded               (** 94h *)
+  | Offset_past_page                             (** 95h *)
+  | Longer_than_1mb                              (** 96h *)
+  | Exchange_overlap                             (** 97h *)
+  | Undefined_memory_type                        (** 98h *)
+  | Wraps_1mb                                    (** A2h *)
   | Corrupt_map                                  (** A3h *)
 
 val status_code : status -> int
 
 val free_pages : Dos_state.t -> int
+
+val frame_addr : int -> int
+(** 물리 페이지의 첫 물리 주소. *)
+
+val peek_byte : Dos_state.t -> int -> int -> int
+(** [peek_byte t h x]: 핸들 [h] 의 논리 페이지를 이어 붙였을 때 [x] 번째
+    바이트. 프레임에 떠 있는 페이지는 프레임에서 읽는다. [x] 는 핸들의
+    페이지 안이어야 한다. *)
+
+val poke_byte : Dos_state.t -> int -> int -> int -> unit
+(** [peek_byte] 의 쓰기. 페이지가 떠 있으면 떠 있는 창 모두에 쓴다. *)
 
 val target : Dos_state.t -> handle:int -> log:int -> ((int * int) option, status) result
 (** 핸들 [handle] 의 논리 페이지 [log] 를 겹칠 수 있으면 [Some (handle, log)],

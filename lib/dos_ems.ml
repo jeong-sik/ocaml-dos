@@ -202,6 +202,11 @@ let service t =
          let r = P.reallocate t dx ~count:bx in
          set_bx (match r with Ok () -> bx | Error _ -> Array.length pages);
          r)
+    | 0x57 ->
+      (match al with
+       | 0x00 -> Dos_ems_move.move_region t ~exchange:false ~seg:ds ~off:si
+       | 0x01 -> Dos_ems_move.move_region t ~exchange:true ~seg:ds ~off:si
+       | _ -> Error P.Invalid_subfunction)
     | 0x58 ->
       (match al with
        | 0x00 ->

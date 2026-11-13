@@ -47,6 +47,14 @@ type status =
   | Map_already_saved                            (* 8Dh *)
   | No_saved_map                                 (* 8Eh *)
   | Invalid_subfunction                          (* 8Fh *)
+  | Moved_over_source                            (* 92h, 옮기기는 됐다 *)
+  | Past_handle_pages                            (* 93h *)
+  | Conventional_overlaps_expanded               (* 94h *)
+  | Offset_past_page                             (* 95h *)
+  | Longer_than_1mb                              (* 96h *)
+  | Exchange_overlap                             (* 97h *)
+  | Undefined_memory_type                        (* 98h *)
+  | Wraps_1mb                                    (* A2h *)
   | Corrupt_map                                  (* A3h *)
 
 let status_code = function
@@ -62,6 +70,14 @@ let status_code = function
   | Map_already_saved -> 0x8D
   | No_saved_map -> 0x8E
   | Invalid_subfunction -> 0x8F
+  | Moved_over_source -> 0x92
+  | Past_handle_pages -> 0x93
+  | Conventional_overlaps_expanded -> 0x94
+  | Offset_past_page -> 0x95
+  | Longer_than_1mb -> 0x96
+  | Exchange_overlap -> 0x97
+  | Undefined_memory_type -> 0x98
+  | Wraps_1mb -> 0xA2
   | Corrupt_map -> 0xA3
 
 let free_handle t =
@@ -123,6 +139,28 @@ let show t phys target =
        Bytes.blit (page_of t page) 0 t.mem (frame_addr phys) page_bytes);
     t.ems_mapped.(phys) <- target
   end
+
+(* ---------- 핸들 안의 바이트 ----------
+
+   57h 는 한 핸들의 논리 페이지를 이어 붙인 바이트 열을 본다. [x] 번째
+   바이트는 논리 페이지 [x / page_bytes] 의 [x mod page_bytes] 자리다.
+   그 페이지가 프레임에 떠 있으면 프레임이 최신 사본이라 거기서 읽고,
+   떠 있는 창 모두에 쓴다. 매핑은 그대로다(Function 24: "The current
+   mapping context is maintained"). *)
+let windows t page =
+  List.filter (fun q -> t.ems_mapped.(q) = Some page) (List.init frame_pages Fun.id)
+
+let peek_byte t h x =
+  let page = (h, x / page_bytes) and o = x mod page_bytes in
+  match windows t page with
+  | q :: _ -> rd8 t (frame_addr q + o)
+  | [] -> Char.code (Bytes.get (page_of t page) o)
+
+let poke_byte t h x v =
+  let page = (h, x / page_bytes) and o = x mod page_bytes in
+  match windows t page with
+  | [] -> Bytes.set (page_of t page) o (Char.chr (v land 0xff))
+  | qs -> List.iter (fun q -> wr8 t (frame_addr q + o) v) qs
 
 (* 핸들 [h] 의 [from] 번부터 뒤 페이지가 사라진다. 프레임과 저장된 매핑에서
    그 페이지를 뗀다. 프레임 바이트는 되저장하지 않는다 — 갈 곳이 없다.
