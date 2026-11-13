@@ -70,9 +70,25 @@ let free_handle t =
   in
   go 0
 
+let invalid_function = 1
 let too_many_open_files = 4
 let access_denied = 5
 let invalid_handle = 6
+
+(* The disk AH=36h describes: clusters of 4 sectors of 512 bytes, 8192 of
+   them, 4096 free. The files live in memory, so the free count stays the
+   same however much is written. A write that needs more new clusters
+   than are free fills the disk instead. *)
+let bytes_per_sector = 512
+let sectors_per_cluster = 4
+let cluster_bytes = bytes_per_sector * sectors_per_cluster
+let free_clusters = 0x1000
+let total_clusters = 0x2000
+let clusters bytes = (bytes + cluster_bytes - 1) / cluster_bytes
+
+(* A file position is the dword [sf_position]: AH=42h adds with ADD/ADC
+   and stores the sum without looking at its sign (HANDLE.ASM $LSEEK). *)
+let position_mask = 0xFFFF_FFFF
 
 (* A device's system file table entry has size 0: devices are open ended
    (MS-DOS 4.0 DOS/MKNODE.ASM). AH=42h from the end lands on the offset. *)
@@ -795,11 +811,11 @@ let service_immediate t =
   | 0x33 -> Cpu86.set_reg8 cpu 2 0          (* Ctrl-Break 검사 꺼짐 *)
   | 0x36 ->
     (* 남은 디스크 공간: 섹터/클러스터, 가용 클러스터, 섹터 크기,
-       전체 클러스터. 마운트 표는 메모리 위라 넉넉한 값을 답한다. *)
-    Cpu86.set_reg16 cpu 0 4;
-    Cpu86.set_reg16 cpu 3 0x1000;
-    Cpu86.set_reg16 cpu 1 512;
-    Cpu86.set_reg16 cpu 2 0x2000
+       전체 클러스터. AH=40h 가 디스크가 찼는지 볼 때도 같은 값을 쓴다. *)
+    Cpu86.set_reg16 cpu 0 sectors_per_cluster;
+    Cpu86.set_reg16 cpu 3 free_clusters;
+    Cpu86.set_reg16 cpu 1 bytes_per_sector;
+    Cpu86.set_reg16 cpu 2 total_clusters
   | 0x39 | 0x3A | 0x3B ->
     (* 디렉터리가 없는 모델이다. 조용한 성공 대신 '경로 없음' 으로
        답한다 — 성공으로 속이면 게스트가 그 뒤를 헛돈다. *)
@@ -865,30 +881,27 @@ let service_immediate t =
        if n = 0 then begin Cpu86.set_reg16 cpu 0 0; ok t end
        else device_unmodelled t dev
      | Some ({ target = File { data; _ }; _ } as hd) ->
-         let chunk = Bytes.create n in
+       let len = Bytes.length !data in
+       (* CX = 0 sets the file's length to the position, shorter or
+          longer (DISK3.ASM WRTEOF). A gap a write leaves reads as 0. *)
+       let new_len = if n = 0 then hd.pos else max len (hd.pos + n) in
+       if clusters new_len - clusters len > free_clusters then
+         (* No room: nothing is written, AX = 0 and CF stays clear
+            (DISK3.ASM WRTERR). *)
+         Cpu86.set_reg16 cpu 0 0
+       else begin
+         (* A new buffer each time: the mount table and snapshots may
+            hold the old one. *)
+         let next = Bytes.make new_len '\000' in
+         Bytes.blit !data 0 next 0 (min len new_len);
          for i = 0 to n - 1 do
-           Bytes.set chunk i (Char.chr (rd8 t (src + i)))
+           Bytes.set next (hd.pos + i) (Char.chr (rd8 t (src + i)))
          done;
-         let len = Bytes.length !data in
-         let grown =
-           if hd.pos + n <= len then begin
-             let copy = Bytes.copy !data in
-             Bytes.blit chunk 0 copy hd.pos n;
-             copy
-           end
-           else begin
-             let head = Bytes.sub !data 0 (min hd.pos len) in
-             let gap =
-               if hd.pos > len then Bytes.make (hd.pos - len) '\000'
-               else Bytes.empty
-             in
-             Bytes.concat Bytes.empty [ head; gap; chunk ]
-           end
-         in
-         data := grown;
+         data := next;
          hd.pos <- hd.pos + n;
-         Cpu86.set_reg16 cpu 0 n;
-         ok t)
+         Cpu86.set_reg16 cpu 0 n
+       end;
+       ok t)
   | 0x41 ->
     let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
     if Hashtbl.mem t.host_files name then begin
@@ -899,29 +912,30 @@ let service_immediate t =
   | 0x42 ->
     let h = Cpu86.reg16 cpu 3 in
     let off32 = (Cpu86.reg16 cpu 1 lsl 16) lor Cpu86.reg16 cpu 2 in
+    (* The handle is checked before the method (CheckOwner, then CMP AL,2). *)
     (match Hashtbl.find_opt t.handles h with
-     | None -> fail t 6
+     | None -> fail t invalid_handle
      | Some hd ->
-       let signed =
-         if off32 >= 0x80000000 then off32 - 0x100000000 else off32 in
        let size =
          match hd.target with
          | File { data; _ } -> Bytes.length !data
          | Device _ -> device_size
        in
-       let newpos =
+       let origin =
          match Cpu86.reg8 cpu 0 with
-         | 0 -> signed
-         | 1 -> hd.pos + signed
-         | _ -> size + signed
+         | 0 -> Some 0
+         | 1 -> Some hd.pos
+         | 2 -> Some size
+         | _ -> None
        in
-       if newpos < 0 then fail t 6
-       else begin
-         hd.pos <- newpos;
-         Cpu86.set_reg16 cpu 0 (newpos land 0xffff);
-         Cpu86.set_reg16 cpu 2 ((newpos lsr 16) land 0xffff);
-         ok t
-       end)
+       (match origin with
+        | None -> fail t invalid_function
+        | Some base ->
+          let newpos = (base + off32) land position_mask in
+          hd.pos <- newpos;
+          Cpu86.set_reg16 cpu 0 (newpos land 0xffff);
+          Cpu86.set_reg16 cpu 2 (newpos lsr 16);
+          ok t))
   | 0x43 ->
     let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
     if Hashtbl.mem t.host_files name then begin

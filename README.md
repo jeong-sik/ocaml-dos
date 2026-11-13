@@ -71,8 +71,10 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup — 0~4번 CON·AUX·PRN도 같은 표에 있어 46h로 파일에
   돌리고 닫을 수 있다. AUX·PRN에 실제 바이트를 읽고 쓰면 포트와
-  INT 24h가 없어 `Unsupported`로 멈춘다), FCB, findfirst/findnext,
-  메모리 할당(48h/49h/4Ah),
+  INT 24h가 없어 `Unsupported`로 멈춘다. 위치는 32비트로 돈다. 0바이트
+  쓰기는 파일 길이를 위치에 맞춘다. 한 번의 쓰기가 36h가 말하는 빈
+  클러스터(8MB)보다 많이 늘리면 디스크가 찬 것으로 답한다), FCB,
+  findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
   읽기·쓰기, IOCTL(4400h 장치 정보 — 부팅 때 여는 CON·AUX·PRN 포함,

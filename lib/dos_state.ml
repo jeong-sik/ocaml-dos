@@ -215,11 +215,15 @@ let seg_off t sreg reg = physical (Cpu86.seg t.cpu sreg) (Cpu86.reg16 t.cpu reg)
 (* Copies [len] bytes of [src] into guest memory at physical [dst], wrapping
    at 1MB like [wr8]. A buffer that starts near the top of memory continues
    at physical 0 instead of raising. *)
+(* A read at or past a file's end copies 0 bytes from an offset past the
+   source, which Bytes.blit refuses even for length 0. *)
 let blit_to_mem t src src_off dst len =
-  let dst = dst land phys_mask in
-  let first = min len (phys_mask + 1 - dst) in
-  Bytes.blit src src_off t.mem dst first;
-  if len > first then Bytes.blit src (src_off + first) t.mem 0 (len - first)
+  if len > 0 then begin
+    let dst = dst land phys_mask in
+    let first = min len (phys_mask + 1 - dst) in
+    Bytes.blit src src_off t.mem dst first;
+    if len > first then Bytes.blit src (src_off + first) t.mem 0 (len - first)
+  end
 
 (* DS:DX 의 ASCIIZ — INT 21h 파일명 계열이 쓴다. *)
 let asciiz_at t base =
