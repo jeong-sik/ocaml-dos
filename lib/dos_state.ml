@@ -6,7 +6,6 @@
    같은 키를 같은 순서로 넣으면 같은 화면이 나온다. *)
 
 let vram_base = 0xB8000
-let rows = 25
 
 (* 4.77MHz — IBM PC 의 CPU 클럭. 사이클을 초로 바꾸는 유일한 환산비다. *)
 let cpu_hz = 4_772_727
@@ -160,6 +159,7 @@ type t = {
 (* 화면의 열 수는 모드가 정한다 — 40 열 화면을 80 으로 계산하면 커서와
    스크롤이 한 줄씩 어긋난다. *)
 let cols t = max 1 (Dos_video.text_cols t.video)
+let rows t = Dos_video.text_rows t.video
 
 let rd8 t a = Char.code (Bytes.get t.mem (a land 0xfffff))
 let wr8 t a v = Bytes.set t.mem (a land 0xfffff) (Char.chr (v land 0xff))
@@ -274,7 +274,7 @@ let get_cursor t = (rd8 t 0x450, rd8 t 0x451)   (* (열, 행) *)
 
 let set_cursor t col row =
   let w = cols t in
-  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows - 1) row) in
+  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows t - 1) row) in
   wr8 t 0x450 col;
   wr8 t 0x451 row;
   let linear = (row * w) + col in
@@ -288,9 +288,56 @@ let cell_addr t r c = vram_base + (((r * cols t) + c) * 2)
 let read_cell t r c = rd16 t (cell_addr t r c)
 let write_cell t r c v = wr16 t (cell_addr t r c) v
 
+(* ---------- 그래픽 모드의 글자 ----------
+
+   그래픽 모드에서 BIOS 와 DOS 의 글자 출력은 글꼴 표의 점을 화면에
+   찍는다. 글꼴 표는 게스트 메모리에 있고 벡터로 찾는다. VGA BIOS 는
+   모드를 세울 때 INT 43h 를 그 모드의 글자 높이 표로 돌려 둔다. CGA
+   모드(4~6)는 128 이상 글자를 INT 1Fh 의 8x8 표에서 찾는다. 프로그램이
+   벡터를 자기 표로 바꾸면 그 글꼴로 그린다(DOSBox int10_char.cpp
+   WriteChar 와 같다). *)
+
+let font_vector = 0x43
+let cga_high_font_vector = 0x1F
+let cga_high_first = 0x80
+
+let graphics t =
+  match Dos_video.kind t.video with
+  | Dos_video.Text -> false
+  | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar | Dos_video.Linear256 -> true
+
+let vector_address t v = (rd16 t ((v * 4) + 2) lsl 4) + rd16 t (v * 4)
+
+let glyph t ch =
+  let height = Dos_video.char_height t.video in
+  let base =
+    match Dos_video.kind t.video with
+    | (Dos_video.Cga4 | Dos_video.Cga2) when ch >= cga_high_first ->
+      vector_address t cga_high_font_vector + ((ch - cga_high_first) * height)
+    | Dos_video.Text | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar
+    | Dos_video.Linear256 ->
+      vector_address t font_vector + (ch * height)
+  in
+  fun line -> rd8 t (base + line)
+
+(* 글자의 바탕: 256색 모드는 주어진 색(AH=09h 의 BH)이다. 그 밖의 모드는
+   0 이고, XOR 쓰기면 XOR 0 이라 바탕이 그대로 남는다. *)
+let glyph_background t ~fg ~back256 =
+  match Dos_video.kind t.video with
+  | Dos_video.Linear256 -> back256
+  | Dos_video.Text | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar ->
+    fg land Dos_video.xor_pixel
+
+let write_glyph t ~col ~row ch ~fg ~bg =
+  Dos_gtext.draw t.video ~glyph:(glyph t (ch land 0xff)) ~col ~row ~fg ~bg
+
 (* 창 스크롤 — INT 10h AH=06/07 과 teletype 의 줄 넘침이 함께 쓴다.
-   [lines]=0 은 창 전체를 지운다. *)
+   [lines]=0 은 창 전체를 지운다. 그래픽 모드에서 [attr] 는 빈 행을 채울
+   색이다. *)
 let scroll_window t ~up ~lines ~top ~left ~bottom ~right ~attr =
+  if graphics t then
+    Dos_gtext.scroll t.video ~up ~lines ~top ~left ~bottom ~right ~fill:attr
+  else
   let blank = (attr lsl 8) lor 0x20 in
   let lines = if lines = 0 then bottom - top + 1 else lines in
   if up then
@@ -321,13 +368,17 @@ let put_char t ch attr =
    | 0x09 -> col := min (cols t - 1) ((!col + 8) / 8 * 8)
    | 0x07 -> ()                       (* 벨 — 소리는 내지 않는다 *)
    | _ ->
-     write_cell t !row !col ((attr lsl 8) lor (ch land 0xff));
+     if graphics t then
+       write_glyph t ~col:!col ~row:!row ch ~fg:attr
+         ~bg:(glyph_background t ~fg:attr ~back256:0)
+     else write_cell t !row !col ((attr lsl 8) lor (ch land 0xff));
      incr col;
      if !col >= cols t then begin col := 0; incr row end);
-  if !row >= rows then begin
-    scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows - 1)
-      ~right:(cols t - 1) ~attr;
-    row := rows - 1
+  if !row >= rows t then begin
+    (* 그래픽 모드에서 새 행은 검정으로 채운다. *)
+    scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows t - 1)
+      ~right:(cols t - 1) ~attr:(if graphics t then 0 else attr);
+    row := rows t - 1
   end;
   set_cursor t !col !row
 
