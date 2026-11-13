@@ -67,7 +67,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   12h 메모리, 16h 키보드, 1Ah 시각, 33h 마우스. ROM F000:FA6E 에 IBM
   BIOS 표준 자리의 8x8 글꼴(0x20-0x7E)이 실려 있다 — 그래픽 모드에서
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
-  최상위 비트가 왼쪽 점인 IBM 순서다
+  최상위 비트가 왼쪽 점인 IBM 순서다. 텍스트 화면 그림은 CP437 256자를
+  모두 그린다 — 상자 선·블록·악센트 글자는 font8x8(Public Domain)에서,
+  웃는 얼굴·카드 무늬·화살표 같은 40자는 이 저장소에서 그렸다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
