@@ -221,6 +221,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_ports` | 하드웨어 포트 — PIT, PIC, DAC, CRTC, 스피커 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/16h/1Ah/33h |
+| `Dos_mouse_space` | 마우스 가상 화면 — 비디오 모드마다 좌표 넓이와 한 칸의 크기(CuteMouse 표) |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
