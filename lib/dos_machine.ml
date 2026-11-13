@@ -52,7 +52,13 @@ let service_status_mask t v =
 let create ?(speed = Dos_ports.pc_speed) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~speed ~mem ~video in
+  (* CMOS 시계는 기계의 시각을 읽는다. 기계는 포트 뒤에 만들어지므로
+     시계는 아래에서 잇는다. *)
+  let wall_clock =
+    ref (fun () -> invalid_arg "Dos_machine: CMOS clock read before the machine exists")
+  in
+  let cmos = Dos_cmos.create ~clock:(fun () -> !wall_clock ()) in
+  let ports = Dos_ports.create ~speed ~mem ~video ~cmos in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
@@ -115,6 +121,11 @@ let create ?(speed = Dos_ports.pc_speed) () =
   in
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
+  wall_clock :=
+    (fun () ->
+      let year, month, day, hour, minute, second = Dos_state.now_fields t in
+      { Dos_cmos.year; month; day; weekday = Dos_state.day_of_week (year, month, day);
+        hour; minute; second });
   Dos_bios.install t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in

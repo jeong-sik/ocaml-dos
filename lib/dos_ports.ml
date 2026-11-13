@@ -87,7 +87,7 @@ type t = {
   mutable cga_status : bool;
   mutable mode_control : int;           (** 0x3D8 *)
   mutable color_select : int;           (** 0x3D9 *)
-  mutable cmos_index : int;
+  cmos : Dos_cmos.t;  (** 포트 70h·71h *)
   (* OPL2 — 감지 계약만 지닌다(FMDRV.COM 실측). 소리는 없다. *)
   mutable opl_reg : int;                (** 0x388 로 고른 레지스터 *)
   mutable opl_t1_count : int;           (** 레지스터 02h *)
@@ -123,7 +123,7 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
-let create ~speed ~mem ~video =
+let create ~speed ~mem ~video ~cmos =
   {
     mem;
     video;
@@ -147,7 +147,7 @@ let create ~speed ~mem ~video =
     cga_status = false;
     mode_control = 0x29;
     color_select = 0;
-    cmos_index = 0;
+    cmos;
     opl_reg = 0;
     opl_t1_count = 0;
     opl_t2_count = 0;
@@ -224,8 +224,8 @@ let port_in t p =
     let refresh = (t.now / at_speed t refresh_toggle_cycles) land 1 in
     (t.port_b land 0xEF) lor (refresh lsl 4)
   | 0x64 -> 0x14                     (* 출력 버퍼 빔, 입력 버퍼 빔 *)
-  | 0x70 -> t.cmos_index
-  | 0x71 -> 0x00
+  | 0x70 -> Dos_cmos.index t.cmos
+  | 0x71 -> Dos_cmos.read t.cmos ~now:t.now ~cpu_hz:(cpu_hz t)
   (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
      통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측). *)
   | 0x201 -> 0x00
@@ -310,7 +310,8 @@ let port_out t p v =
       end
     end
   | 0x61 -> t.port_b <- v
-  | 0x70 -> t.cmos_index <- v
+  | 0x70 -> Dos_cmos.select t.cmos v
+  | 0x71 -> Dos_cmos.write t.cmos v
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
   | 0x3C8 -> t.dac_write_index <- v; t.dac_phase <- 0
@@ -382,7 +383,7 @@ let write_state w t =
         speed; now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
         pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
-        mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
+        mode_control; color_select; cmos; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
   in
   let put what r v = C.put w ~what r v in
@@ -411,7 +412,7 @@ let write_state w t =
   C.put_bool w cga_status;
   put "mode_control" C.byte mode_control;
   put "color_select" C.byte color_select;
-  put "cmos_index" C.byte cmos_index;
+  Dos_cmos.write_state w cmos;
   put "opl_reg" C.byte opl_reg;
   put "opl_t1_count" C.byte opl_t1_count;
   put "opl_t2_count" C.byte opl_t2_count;
@@ -449,7 +450,7 @@ let read_state r t =
   t.cga_status <- C.get_bool r;
   t.mode_control <- get "mode_control" C.byte;
   t.color_select <- get "color_select" C.byte;
-  t.cmos_index <- get "cmos_index" C.byte;
+  Dos_cmos.read_state r t.cmos;
   t.opl_reg <- get "opl_reg" C.byte;
   t.opl_t1_count <- get "opl_t1_count" C.byte;
   t.opl_t2_count <- get "opl_t2_count" C.byte;

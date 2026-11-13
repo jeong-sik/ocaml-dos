@@ -14,7 +14,8 @@ let check name got want =
 let () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let t = Dos_ports.create ~speed:Dos_ports.pc_speed ~mem ~video in
+  let t = Dos_ports.create ~speed:Dos_ports.pc_speed ~mem ~video
+      ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test")) in
   let write reg dat =
     Dos_ports.port_out t 0x388 reg;
     Dos_ports.port_out t 0x389 dat
