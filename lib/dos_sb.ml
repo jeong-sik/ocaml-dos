@@ -41,12 +41,23 @@ let undocumented_answer = 0x00
 
 let length_of lo hi = 1 + lo + (hi lsl 8)
 
+(* What one DMA byte holds: one 8-bit sample, or the ADPCM codes of 2, 3
+   or 4 samples. DOSBox takes ADPCM bytes at the sample rate over that
+   many (dma.mul); the reference byte of 75h, 77h, 17h and the auto-init
+   forms is the block's first byte and takes its turn like the rest. *)
+type format = Pcm8 | Adpcm4 | Adpcm26 | Adpcm2
+
+let formats = [| Pcm8; Adpcm4; Adpcm26; Adpcm2 |]
+let format_index = function Pcm8 -> 0 | Adpcm4 -> 1 | Adpcm26 -> 2 | Adpcm2 -> 3
+let samples_per_byte = function Pcm8 -> 1 | Adpcm4 -> 2 | Adpcm26 -> 3 | Adpcm2 -> 4
+
 (* What a command asks of the DSP once its parameter bytes are in. *)
 type request =
   | Direct_dac            (* 10h: the sample goes nowhere *)
-  | Dma_once of int       (* 14h: a block of this many bytes *)
+  | Dma_once of format * int  (* 14h, 74h-77h, 16h, 17h: a block of this many bytes *)
   | High_speed_once       (* 91h: one block of the 48h length *)
-  | Dma_auto              (* 1Ch, 90h *)
+  | Dma_auto of format    (* 1Ch, 90h, 7Dh, 7Fh, 1Fh: blocks of the 48h length *)
+  | Midi_uart             (* 34h, 35h: every later byte is MIDI out, until a reset *)
   | Direct_adc            (* 20h *)
   | Time_constant of int  (* 40h *)
   | Block_size of int     (* 48h *)
@@ -75,9 +86,19 @@ type decoder =
 let decode b =
   match b with
   | 0x10 -> Needs_one (fun _ -> Direct_dac)
-  | 0x14 -> Needs_two (fun lo hi -> Dma_once (length_of lo hi))
+  (* 15h: DOSBox plays it as 14h ("Wari hack"). *)
+  | 0x14 | 0x15 -> Needs_two (fun lo hi -> Dma_once (Pcm8, length_of lo hi))
+  | 0x74 | 0x75 -> Needs_two (fun lo hi -> Dma_once (Adpcm4, length_of lo hi))
+  | 0x76 | 0x77 -> Needs_two (fun lo hi -> Dma_once (Adpcm26, length_of lo hi))
+  | 0x16 | 0x17 -> Needs_two (fun lo hi -> Dma_once (Adpcm2, length_of lo hi))
   | 0x91 -> Ready High_speed_once
-  | 0x1C | 0x90 -> Ready Dma_auto
+  | 0x1C | 0x90 -> Ready (Dma_auto Pcm8)
+  | 0x7D -> Ready (Dma_auto Adpcm4)
+  | 0x7F -> Ready (Dma_auto Adpcm26)
+  | 0x1F -> Ready (Dma_auto Adpcm2)
+  (* 86Box: 34h (poll) and 35h (IRQ) enter UART mode; 36h and 37h, the
+     time-stamp forms, do nothing there. *)
+  | 0x34 | 0x35 -> Ready Midi_uart
   | 0x20 -> Ready Direct_adc
   | 0x40 -> Needs_one (fun tc -> Time_constant tc)
   | 0x48 -> Needs_two (fun lo hi -> Block_size (length_of lo hi))
@@ -94,8 +115,7 @@ let decode b =
   | 0xE8 -> Ready Test_read
   | 0xF2 -> Ready Trigger_irq
   | 0xF8 -> Ready Undocumented_zero
-  | 0x15 | 0x16 | 0x17 | 0x24 | 0x41 | 0x42 | 0x74 | 0x75 | 0x76 | 0x77 ->
-    Needs_two (fun _ _ -> Unmodelled)
+  | 0x24 | 0x41 | 0x42 -> Needs_two (fun _ _ -> Unmodelled)
   | 0x38 | 0xE2 -> Needs_one (fun _ -> Unmodelled)
   | _ -> Ready Unmodelled
 
@@ -109,9 +129,10 @@ type pending =
 type reset = Running | Held | Releasing of int  (* AAh at this cycle *)
 
 type block = {
-  left : int;           (* bytes still to take in this block *)
-  auto : bool;          (* another block follows this one *)
-  queued : int option;  (* a single block waiting behind this one *)
+  left : int;                     (* bytes still to take in this block *)
+  format : format;
+  auto : bool;                    (* another block follows this one *)
+  queued : (format * int) option; (* a single block waiting behind this one *)
 }
 
 type playback = Idle | Playing of block * int (* next byte at this cycle *) | Paused of block
@@ -128,14 +149,17 @@ type t = {
   mutable block_length : int;
   mutable speaker : bool;
   mutable test_register : int;
+  mutable uart : bool;                 (* MIDI UART: 22Ch bytes are MIDI out *)
 }
 
 let create () =
   { reset = Running; answers = []; last_answer = ready_byte; pending = No_command;
     playback = Idle; timers = []; irq_high = false; time_constant = default_time_constant;
-    block_length = default_block; speaker = false; test_register = 0 }
+    block_length = default_block; speaker = false; test_register = 0;
+    uart = false }
 
-let byte_cycles t = cycles_of_us (256 - t.time_constant)
+let sample_us t = 256 - t.time_constant
+let byte_cycles t format = cycles_of_us (sample_us t * samples_per_byte format)
 
 (* DOSBox DspBufSize: a full buffer drops the answer. *)
 let answer_capacity = 64
@@ -155,40 +179,46 @@ let reset_dsp t =
   t.irq_high <- false;
   t.time_constant <- default_time_constant;
   t.block_length <- default_block;
-  t.speaker <- false
+  t.speaker <- false;
+  t.uart <- false
 
 (* A new transfer drops an unacknowledged IRQ (DOSBox dsp_do_dma_transfer). *)
-let start_single t ~now length =
+let start_single t ~now format length =
   t.irq_high <- false;
+  let queued = Some (format, length) in
   match t.playback with
   | Playing (({ auto = true; _ } as b), next) ->
-    t.playback <- Playing ({ b with auto = false; queued = Some length }, next)
-  | Paused ({ auto = true; _ } as b) ->
-    t.playback <- Paused { b with auto = false; queued = Some length }
+    t.playback <- Playing ({ b with auto = false; queued }, next)
+  | Paused ({ auto = true; _ } as b) -> t.playback <- Paused { b with auto = false; queued }
   | Idle | Playing ({ auto = false; _ }, _) | Paused { auto = false; _ } ->
-    t.playback <- Playing ({ left = length; auto = false; queued = None }, now + byte_cycles t)
+    t.playback <-
+      Playing ({ left = length; format; auto = false; queued = None }, now + byte_cycles t format)
 
-let start_auto t ~now =
+let start_auto t ~now format =
   t.irq_high <- false;
-  t.playback <- Playing ({ left = t.block_length; auto = true; queued = None }, now + byte_cycles t)
+  t.playback <-
+    Playing
+      ( { left = t.block_length; format; auto = true; queued = None },
+        now + byte_cycles t format )
 
 let run t ~now req =
   match req with
   | Direct_dac | Unmodelled -> ()
-  | Dma_once length -> start_single t ~now length
-  | High_speed_once -> start_single t ~now t.block_length
-  | Dma_auto -> start_auto t ~now
+  | Dma_once (format, length) -> start_single t ~now format length
+  | High_speed_once -> start_single t ~now Pcm8 t.block_length
+  | Dma_auto format -> start_auto t ~now format
+  | Midi_uart -> t.uart <- true
   | Direct_adc -> answer t adc_silence
   | Time_constant tc -> t.time_constant <- tc
   | Block_size length -> t.block_length <- length
-  | Silence length -> add_timer t (now + (length * byte_cycles t))
+  | Silence length -> add_timer t (now + (length * byte_cycles t Pcm8))
   | Halt ->
     (match t.playback with
      | Playing (b, _) -> t.playback <- Paused b
      | Idle | Paused _ -> ())
   | Continue ->
     (match t.playback with
-     | Paused b -> t.playback <- Playing (b, now + byte_cycles t)
+     | Paused b -> t.playback <- Playing (b, now + byte_cycles t b.format)
      | Idle | Playing _ -> ())
   | Speaker_on -> t.speaker <- true
   | Speaker_off -> t.speaker <- false
@@ -207,7 +237,10 @@ let run t ~now req =
   | Trigger_irq -> add_timer t (now + cycles_of_us trigger_delay_us)
   | Undocumented_zero -> answer_alone t undocumented_answer
 
+(* In UART mode the byte goes to MIDI out, which has no device here. *)
 let write t ~now b =
+  if t.uart then ()
+  else
   match t.pending with
   | No_command ->
     (match decode b with
@@ -268,7 +301,7 @@ let due_at t =
    auto-init block, or nothing. *)
 let next_block t b =
   match b.queued, b.auto with
-  | Some length, _ -> Some { left = length; auto = false; queued = None }
+  | Some (format, length), _ -> Some { left = length; format; auto = false; queued = None }
   | None, true -> Some { b with left = t.block_length }
   | None, false -> None
 
@@ -297,13 +330,15 @@ let advance t ~now ~dma ~mem =
             byte goes the moment it does, not in a burst for the wait. *)
          t.playback <- Playing (b, now)
        | Dos_dma.Byte _ | Dos_dma.No_data _ ->
-         let next = next + byte_cycles t in
+         (* The next byte's time is its own block's byte time. *)
          let left = b.left - 1 in
-         if left > 0 then t.playback <- Playing ({ b with left }, next)
+         if left > 0 then t.playback <- Playing ({ b with left }, next + byte_cycles t b.format)
          else begin
            raise_irq ();
            t.playback <-
-             (match next_block t b with Some nb -> Playing (nb, next) | None -> Idle)
+             (match next_block t b with
+              | Some nb -> Playing (nb, next + byte_cycles t nb.format)
+              | None -> Idle)
          end;
          take ())
     | Playing _ | Idle | Paused _ -> ()
@@ -316,18 +351,30 @@ module C = Dos_snap_codec
 let block_r = C.range 1 0x10000
 let cycle = C.count
 
-let put_block w { left; auto; queued } =
+let format_r = C.range 0 (Array.length formats - 1)
+let put_format w f = C.put w ~what:"SB format" format_r (format_index f)
+let get_format r = formats.(C.get r ~what:"SB format" format_r)
+
+let put_block w { left; format; auto; queued } =
   C.put w ~what:"SB block left" block_r left;
+  put_format w format;
   C.put_bool w auto;
   match queued with
   | None -> C.put_bool w false
-  | Some n -> C.put_bool w true; C.put w ~what:"SB queued block" block_r n
+  | Some (f, n) -> C.put_bool w true; put_format w f; C.put w ~what:"SB queued block" block_r n
 
 let get_block r =
   let left = C.get r ~what:"SB block left" block_r in
+  let format = get_format r in
   let auto = C.get_bool r in
-  let queued = if C.get_bool r then Some (C.get r ~what:"SB queued block" block_r) else None in
-  { left; auto; queued }
+  let queued =
+    if C.get_bool r then begin
+      let f = get_format r in
+      Some (f, C.get r ~what:"SB queued block" block_r)
+    end
+    else None
+  in
+  { left; format; auto; queued }
 
 let put_list w ~what r l =
   C.put w ~what:(what ^ " count") C.count (List.length l);
@@ -377,7 +424,7 @@ let playback_tag = C.range 0 2
    snapshot carries it. *)
 let write_state w
     { reset; answers; last_answer; pending; playback; timers; irq_high; time_constant;
-      block_length; speaker; test_register } =
+      block_length; speaker; test_register; uart } =
   (match reset with
    | Running -> C.put w ~what:"SB reset" reset_tag 0
    | Held -> C.put w ~what:"SB reset" reset_tag 1
@@ -397,7 +444,8 @@ let write_state w
   C.put w ~what:"SB time constant" C.byte time_constant;
   C.put w ~what:"SB block length" block_r block_length;
   C.put_bool w speaker;
-  C.put w ~what:"SB test register" C.byte test_register
+  C.put w ~what:"SB test register" C.byte test_register;
+  C.put_bool w uart
 
 let read_state r t =
   t.reset <-
@@ -420,4 +468,5 @@ let read_state r t =
   t.time_constant <- C.get r ~what:"SB time constant" C.byte;
   t.block_length <- C.get r ~what:"SB block length" block_r;
   t.speaker <- C.get_bool r;
-  t.test_register <- C.get r ~what:"SB test register" C.byte
+  t.test_register <- C.get r ~what:"SB test register" C.byte;
+  t.uart <- C.get_bool r

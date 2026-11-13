@@ -168,8 +168,8 @@ let test_parameters () =
   check_answers "10h swallows one byte" r [];
   cmd r [ 0x20 ];
   check_answers "then commands parse again" r [ 0x7F ];
-  cmd r [ 0x74; 0x20; 0x20; 0x20 ];
-  check_answers "74h (ADPCM, unmodelled) swallows two" r [ 0x7F ];
+  cmd r [ 0x24; 0x20; 0x20; 0x20 ];
+  check_answers "24h (DMA input, unmodelled) swallows two" r [ 0x7F ];
   cmd r [ 0x38; 0x20; 0x20 ];
   check_answers "38h (MIDI, unmodelled) swallows one" r [ 0x7F ];
   cmd r [ 0x30; 0x20 ];
@@ -445,6 +445,90 @@ let test_default_handler () =
   check_int "it kept AX" (Dos_state.rd16 m (base + 0x200)) 0x1234;
   check_int "it left the tick alone" (Dos_state.rd16 m 0x46C) tick
 
+(* ADPCM: a byte holds 2 (4-bit), 3 (2.6-bit) or 4 (2-bit) samples, so it
+   takes that many sample times. *)
+let irq_steps_every r dt steps =
+  List.filter_map
+    (fun i -> if advance_to r (r.now + dt) then Some i else None)
+    (List.init steps (fun i -> i + 1))
+
+let test_adpcm_once () =
+  List.iter
+    (fun (code, per_byte, name) ->
+      let r = rig () in
+      setup_dma r 3;
+      set_rate r;
+      cmd r [ code; 0x02; 0x00 ];
+      let dt = us ((256 - tc) * per_byte) in
+      check_int (name ^ ": first byte") (Dos_sb.due_at r.sb) (r.now + dt);
+      check (name ^ ": IRQ after three bytes") (irq_steps_every r dt 3 = [ 3 ]);
+      check (name ^ ": then idle") (Dos_sb.due_at r.sb = max_int))
+    [ (0x74, 2, "74h 4-bit"); (0x75, 2, "75h 4-bit ref"); (0x76, 3, "76h 2.6-bit");
+      (0x77, 3, "77h 2.6-bit ref"); (0x16, 4, "16h 2-bit"); (0x17, 4, "17h 2-bit ref");
+      (0x15, 1, "15h as 14h") ]
+
+let test_adpcm_auto () =
+  List.iter
+    (fun (code, per_byte, name) ->
+      let r = rig () in
+      setup_dma ~mode:0x59 r 2;
+      set_rate r;
+      cmd r [ 0x48; 0x01; 0x00; code ];
+      let dt = us ((256 - tc) * per_byte) in
+      check (name ^ ": IRQ every two bytes") (irq_steps_every r dt 2 = [ 2 ]);
+      ignore (inp r status_port);
+      check (name ^ ": again") (irq_steps_every r dt 2 = [ 2 ]))
+    [ (0x7D, 2, "7Dh"); (0x7F, 3, "7Fh"); (0x1F, 4, "1Fh") ]
+
+let test_midi_uart () =
+  List.iter
+    (fun code ->
+      let r = rig () in
+      cmd r [ code; 0xE1; 0x14; 0x00; 0x00; 0x90 ];
+      check_answers (Printf.sprintf "%02Xh: later bytes are MIDI, not commands" code) r [];
+      check (Printf.sprintf "%02Xh: no DMA from MIDI bytes" code) (Dos_sb.due_at r.sb = max_int);
+      out r reset_port 1;
+      out r reset_port 0;
+      ignore (advance_to r (r.now + us 20));
+      ignore (read_answers r);
+      cmd r [ 0xE1 ];
+      check_answers (Printf.sprintf "%02Xh: a reset leaves UART mode" code) r [ 0x02; 0x01 ])
+    [ 0x34; 0x35 ];
+  let r = rig () in
+  cmd r [ 0x36; 0xE1 ];
+  check_answers "36h stays in command mode" r [ 0x02; 0x01 ]
+
+let test_adpcm_snapshot () =
+  let r = rig () in
+  setup_dma r 4;
+  set_rate r;
+  cmd r [ 0x76; 0x03; 0x00 ];
+  let dt = us ((256 - tc) * 3) in
+  ignore (advance_to r (r.now + dt));
+  cmd r [ 0x34 ];
+  let w = Dos_snap_codec.writer () in
+  Dos_sb.write_state w r.sb;
+  let copy = { r with sb = Dos_sb.create () } in
+  Dos_sb.read_state (Dos_snap_codec.reader (Dos_snap_codec.contents w)) copy.sb;
+  check "restored ADPCM block keeps its byte time" (irq_steps_every copy dt 3 = [ 3 ]);
+  cmd copy [ 0xE1 ];
+  check_answers "restored UART mode" copy []
+
+let test_adpcm_pause_and_queue () =
+  let r = rig () in
+  setup_dma r 4;
+  set_rate r;
+  cmd r [ 0x74; 0x03; 0x00; 0xD0; 0xD4 ];
+  check_int "D4h resumes at the ADPCM byte time" (Dos_sb.due_at r.sb) (r.now + us ((256 - tc) * 2));
+  let r = rig () in
+  setup_dma ~mode:0x59 r 2;
+  set_rate r;
+  cmd r [ 0x48; 0x01; 0x00; 0x1C; 0x16; 0x01; 0x00 ];
+  check "the PCM auto block ends first" (irq_steps r 2 = [ 2 ]);
+  ignore (inp r status_port);
+  check_int "the queued 2-bit block takes four sample times a byte"
+    (Dos_sb.due_at r.sb - r.now) (us ((256 - tc) * 4))
+
 let () =
   test_power_on ();
   test_reset ();
@@ -460,6 +544,11 @@ let () =
   test_silence ();
   test_time_constant ();
   test_snapshot ();
+  test_adpcm_once ();
+  test_adpcm_auto ();
+  test_midi_uart ();
+  test_adpcm_snapshot ();
+  test_adpcm_pause_and_queue ();
   test_machine_without_card ();
   test_machine_fm_alias ();
   test_machine_guest ();
