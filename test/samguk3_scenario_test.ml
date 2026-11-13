@@ -3,7 +3,10 @@
    scenario, one player as 유비, the settings, and the strategy map at
    189년 봄 1월 with 평원 asking for a command. Then the game saves to slot
    1, and a second machine, booted with the save file the first one wrote,
-   loads slot 1 from the title menu and comes back to the same turn.
+   loads slot 1 from the title menu and comes back to the same turn. The
+   loaded game then attacks 8. 북해: 유비, 관우 and 장비 go out, are placed
+   on the battle map, and the battle is left to the AI (8. 위임) until the
+   month ends and the war goes on into 189년 2월.
 
    Each stage waits for a picture, not for a step count. The pictures are
    regions of the 640x480 mode 12h frame, recorded once from this run; a
@@ -27,6 +30,14 @@ let press what keys = Dos_scenario.Press { what; keys; budget = key_budget }
    question puts the cursor nearer, so it gets a narrower region. *)
 let prompt_line = region 160 390 300 24
 let short_prompt = region 160 390 180 24
+let tiny_prompt = region 160 390 120 24
+
+(* The battle map's side panel: the city fought over and the month. *)
+let battle_panel = region 540 50 90 50
+
+(* The AI fights a battle out day by day; ten days of one month took 160M
+   machine steps. *)
+let battle_budget = 400_000_000
 
 let save_file = "SANGOKU3.SAV"
 
@@ -43,10 +54,16 @@ let to_title_menu =
     press "키보드로" [ "enter" ];
     wait "타이틀 메뉴" (region 200 165 240 75) "f972cdb6e3cba6fcb06162d52a0c2171" ]
 
+(* The question is typed out a letter at a time, and a key pressed before
+   it ends only skips the typing: after a load, a 1 meant for 1. 군사 went
+   there and the Enter after it fell on an empty prompt. The region ends at
+   x 404; the text ends at 399 and the cursor starts at 408. *)
 let first_turn =
   [ wait "189년 봄 1월" (region 16 392 120 24) "2ea57895fe7931423f3c4acb5f0e2a08";
     wait "평원 정보 (인구 370000, 금 2300, 병사 9500)" (region 20 165 210 215)
-      "34a746fc60816308473894096042ec4c" ]
+      "34a746fc60816308473894096042ec4c";
+    wait "유비님, 6.평원에 명령을(0-9)?" (region 160 390 245 24)
+      "220d20f86071aa3ead114ec923e9a892" ]
 
 let new_game =
   to_title_menu
@@ -108,6 +125,41 @@ let play m ~name steps =
   | Ok n -> Printf.printf "samguk3 %s: %d machine steps, %.1f s\n%!" name n (Unix.gettimeofday () -. t0)
   | Error f -> fail_with_frame m ~name (Dos_scenario.failure_to_string f)
 
+let attack_bukhae =
+  [ press "1. 군사" [ "1"; "enter" ];
+    wait "군사: 무엇을 하겠습니까(1-9)" short_prompt "4a35704059cebfee719fd1676602baef";
+    press "4. 전쟁" [ "4"; "enter" ];
+    wait "어느 곳으로 쳐들어가겠습니까(1-60)" short_prompt "20bcdd7d1a3fab0fa90c0c704d8cb493";
+    press "8. 북해" [ "8"; "enter" ];
+    wait "누구를 보내겠습니까(1-3)" short_prompt "8321dbd4b2381db120db4694d427903b";
+    (* Each officer, then his troops: 1. 보병. An empty Enter ends the list. *)
+    press "유비·관우·장비, 모두 보병"
+      [ "1"; "enter"; "1"; "enter"; "2"; "enter"; "1"; "enter"; "3"; "enter"; "1"; "enter"; "enter" ];
+    wait "금을 얼마나 가지고 가겠습니까" short_prompt "27b7ed57d9a7267b2cd65b8b0cea1caf";
+    press "금 0, 군량 20000" [ "0"; "enter"; "2"; "0"; "0"; "0"; "0"; "enter" ];
+    wait "쳐들어가겠습니까(Y/N)" tiny_prompt "26c64e7311d8d83845b2e3c8648e8028";
+    press "Y" [ "y" ];
+    wait "전장: 8 북해, 189년 1월" battle_panel "996179b29797e5586bc4b48e62a668c2";
+    wait "유비를 배치해 주세요" (region 300 360 200 40) "3c65fe8b74b996c2c264a13cae810509";
+    (* 0 places the officer under the cursor; digits move it on the hex
+       grid (2 down, 1 down-left). The cell below 관우 is not open. *)
+    press "유비·관우·장비 배치" [ "0"; "2"; "0"; "1"; "0" ];
+    wait "누가 군량을 가져 갑니까(1-3)" (region 110 300 300 30) "cc1b3b8810294397939f095e8a0eb07d";
+    press "유비가 군량을" [ "1"; "enter" ];
+    wait "전투 명령(1-9)" (region 325 290 170 55) "354891a0723d04960d63da6194d4caba";
+    (* The question under the menu is typed out a letter at a time, like the
+       first turn's. A digit pressed before it ends only skips the typing:
+       with IRQ0 counted from the count write (#71) the 8 went there and the
+       battle waited for orders on day 1. x 325..428 stops before the cursor
+       at 432. *)
+    wait "유비님, 명령을(1-9)?" (region 325 350 104 40) "56e20b46494745218776b16612dda797";
+    (* A battle menu opens on its digit alone; an Enter after it would close
+       the menu again. *)
+    press "8. 위임, Y" [ "8"; "y" ];
+    Dos_scenario.Wait_for
+      { what = "189년 2월, 북해 전쟁이 이어진다"; region = battle_panel;
+        digest = "7f05bd71b88cd4d1b50185bab098cd8b"; budget = battle_budget } ]
+
 let () =
   match Sys.getenv_opt "SAMGUK3_DIR" with
   | None -> print_endline "samguk3 scenario: SAMGUK3_DIR unset, skipped"
@@ -122,4 +174,4 @@ let () =
      | Some saved ->
        Printf.printf "samguk3 save: %s %d bytes, %s -> %s\n%!" save_file (String.length saved)
          (Digest.to_hex (Digest.string original)) (Digest.to_hex (Digest.string saved));
-       play (boot ~save:saved dir) ~name:"load" load_slot_1)
+       play (boot ~save:saved dir) ~name:"load-and-battle" (load_slot_1 @ attack_bukhae))
