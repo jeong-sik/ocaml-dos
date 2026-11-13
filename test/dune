@@ -69,3 +69,7 @@
 (test
  (name dos_mouse_callback_test)
  (libraries dosmachine))
+
+(test
+ (name dos_mpu401_test)
+ (libraries dosmachine))
