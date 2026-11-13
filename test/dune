@@ -1,30 +1,28 @@
-(test
- (name cpu86_test)
+; 의존이 같은 테스트는 한 스탠자에 둔다. 이름은 한 줄에 하나씩, 이름순이다.
+; 두 PR 이 서로 다른 자리에 이름을 더하면 git 이 충돌 없이 합친다.
+
+(tests
+ (names
+  cpu86_m1_test
+  cpu86_test)
  (libraries cpu86core))
 
-(test
- (name cpu86_m1_test)
- (libraries cpu86core))
-
-(test
- (name dos_machine_test)
- (libraries dosmachine))
-
-(test
- (name dos_blocking_input_test)
- (libraries dosmachine))
-
-(test
- (name dos_console_input_test)
- (libraries dosmachine))
-
-(test
- (name dos_exe_test)
- (libraries dosmachine))
-
-(test
- (name dos_fcb_test)
- (libraries dosmachine))
+(tests
+ (names
+  dos_blocking_input_test
+  dos_console_input_test
+  dos_ems_test
+  dos_exe_test
+  dos_exec_test
+  dos_fcb_test
+  dos_machine_test
+  dos_mouse_callback_test
+  dos_opl_test
+  dos_snapshot_test
+  dos_surface_test
+  dos_video_test
+  zzt_run_test)
+ (libraries dosmachine cpu86core dos_core_identity unix))
 
 (test
  (name cpu86_vtest)
@@ -32,40 +30,8 @@
  (libraries cpu86core unix yojson))
 
 (test
- (name dos_surface_test)
- (libraries dosmachine))
-
-(test
- (name zzt_run_test)
- (libraries dosmachine))
-
-(test
- (name dos_video_test)
- (libraries dosmachine))
-
-(test
- (name dos_exec_test)
- (libraries dosmachine cpu86core))
-
-(test
- (name dos_opl_test)
- (libraries dosmachine))
-
-(test
- (name dos_ems_test)
- (libraries dosmachine))
-
-(test
  (name core_identity_test)
  (deps
   (glob_files %{project_root}/lib/*.ml)
   (glob_files %{project_root}/lib/*.mli))
  (libraries dos_core_identity core_digest))
-
-(test
- (name dos_snapshot_test)
- (libraries dosmachine dos_core_identity unix))
-
-(test
- (name dos_mouse_callback_test)
- (libraries dosmachine))
