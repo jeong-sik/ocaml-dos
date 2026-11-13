@@ -272,10 +272,10 @@ let set_mode t m ~clear =
   t.cga_color_select <- 0x30;
   if clear then
     match spec m with
-    | Text, _, _, cols ->
-      (* 글자는 공백, 속성은 흰 글자 검은 바탕 *)
-      let cells = cols * text_rows in
-      for i = 0 to cells - 1 do
+    | Text, _, _, _ ->
+      (* 글자는 공백, 속성은 흰 글자 검은 바탕. 쪽 여덟 장이 든 창 전체를
+         지운다(SeaBIOS stdvgamodes.c clear_screen 이 32KB 를 0720h 로). *)
+      for i = 0 to (text_window / 2) - 1 do
         Bytes.set t.mem (cga_base + (i * 2)) ' ';
         Bytes.set t.mem (cga_base + (i * 2) + 1) '\007'
       done

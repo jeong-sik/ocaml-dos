@@ -265,54 +265,134 @@ let day_of_week (y, m, d) =
   days := !days + d - 1;
   (!days + 2) mod 7
 
-(* ---------- 커서와 화면 ---------- *)
+(* ---------- 쪽·커서·화면 ---------- *)
 
-(* 커서의 진실 원천은 BDA 0x450/0x451 이다(실기 BIOS 와 같다). CRTC
-   레지스터도 같은 값으로 맞춰 둔다 — 두 벌로 갈라지면 게스트가 직접
-   CRTC 를 읽을 때 딴 자리를 본다. *)
-let get_cursor t = (rd8 t 0x450, rd8 t 0x451)   (* (열, 행) *)
+(* 텍스트 화면은 쪽 여덟 장을 가진다. BIOS 는 쪽마다 커서를 따로 두고
+   (BDA 0x450 + 2 × 쪽), 보이는 쪽(0x462)의 커서만 CRTC 에도 쓴다(SeaBIOS
+   vgabios.c set_cursor_pos). 커서의 진실 원천은 BDA 다. CRTC 를 같이
+   맞춰 두지 않으면 게스트가 CRTC 를 직접 읽을 때 딴 자리를 본다. 쪽
+   번호가 0-7 밖이면 커서를 바꾸지 않고, 읽으면 (0, 0) 이다. *)
+let active_page t = rd8 t Dos_ports.bda_active_page
+let cursor_slot page = Dos_ports.bda_cursor_pos + (2 * page)
 
-let set_cursor t col row =
-  let w = cols t in
-  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows - 1) row) in
-  wr8 t 0x450 col;
-  wr8 t 0x451 row;
-  let linear = (row * w) + col in
-  Dos_ports.port_out t.ports 0x3D4 0x0E;
-  Dos_ports.port_out t.ports 0x3D5 (linear lsr 8);
-  Dos_ports.port_out t.ports 0x3D4 0x0F;
-  Dos_ports.port_out t.ports 0x3D5 (linear land 0xff)
+(* 쪽 [page] 의 (r, c) 칸이 0xB800 세그먼트 안에서 차지하는 오프셋.
+   BIOS 는 B800:오프셋 으로 쓰므로 오프셋이 16비트에서 돈다(SeaBIOS
+   vgafb.c text_address). 쪽 크기는 모드를 세울 때 BDA 0x44C 에 적힌다. *)
+let segment_mask = 0xFFFF
 
-let cell_addr t r c = vram_base + (((r * cols t) + c) * 2)
+let page_offset t ~page r c =
+  ((rd16 t Dos_ports.bda_page_size * page) + (((r * cols t) + c) * 2)) land segment_mask
 
-let read_cell t r c = rd16 t (cell_addr t r c)
-let write_cell t r c v = wr16 t (cell_addr t r c) v
+(* 쪽 하나의 바이트 수(SeaBIOS vgabios.c calc_page_size). 텍스트는 칸마다
+   두 바이트를 2KB 로, 16색·256색은 화면 점 수 / 8 을 8KB 로 올린다. CGA
+   는 16KB 다. *)
+let text_page_align = 0x800
+let graphics_page_align = 0x2000
+let cga_page_size = 0x4000
+let dots_per_plane_byte = 8
+let round_up n unit = (n + unit - 1) / unit * unit
+
+let page_size_of t =
+  match Dos_video.kind t.video with
+  | Dos_video.Text -> round_up (cols t * rows * 2) text_page_align
+  | Dos_video.Cga4 | Dos_video.Cga2 -> cga_page_size
+  | Dos_video.Planar | Dos_video.Linear256 ->
+    let w, h = Dos_video.dims t.video in
+    round_up (w * h / dots_per_plane_byte) graphics_page_align
+
+(* 쪽 오프셋(바이트)을 CRTC 시작 주소로 바꾸는 비율. SeaBIOS stdvga.c
+   stdvga_set_displaystart 가 오프셋 × stdvga_vram_ratio / 4 를 쓴다. *)
+let display_ratio = function
+  | Dos_video.Text | Dos_video.Cga4 -> 2
+  | Dos_video.Cga2 | Dos_video.Planar -> 4
+  | Dos_video.Linear256 -> 1
+let display_ratio_unit = 4
+
+(* 모드를 세운 뒤: 쪽 크기를 다시 적고, 0 쪽을 보이며, 쪽 여덟 장의
+   커서를 (0,0)으로 둔다(SeaBIOS vgabios.c vga_set_mode). *)
+let reset_pages t =
+  wr16 t Dos_ports.bda_page_size (page_size_of t);
+  wr16 t Dos_ports.bda_page_start 0;
+  wr8 t Dos_ports.bda_active_page 0;
+  for page = 0 to Dos_ports.page_count - 1 do wr16 t (cursor_slot page) 0 done
+
+let get_cursor_on t ~page =
+  if page < Dos_ports.page_count then (rd8 t (cursor_slot page), rd8 t (cursor_slot page + 1))
+  else (0, 0)
+
+let set_cursor_on t ~page col row =
+  if page < Dos_ports.page_count then begin
+    let w = cols t in
+    let col = max 0 (min (w - 1) col) and row = max 0 (min (rows - 1) row) in
+    wr8 t (cursor_slot page) col;
+    wr8 t (cursor_slot page + 1) row;
+    if page = active_page t then begin
+      let linear = page_offset t ~page row col / 2 in
+      Dos_ports.port_out t.ports 0x3D4 0x0E;
+      Dos_ports.port_out t.ports 0x3D5 (linear lsr 8);
+      Dos_ports.port_out t.ports 0x3D4 0x0F;
+      Dos_ports.port_out t.ports 0x3D5 (linear land 0xff)
+    end
+  end
+
+(* 쪽을 말하지 않는 길(teletype, INT 21h 출력, AH=06h/07h)은 보이는 쪽을 쓴다. *)
+(* INT 10h AH=05h — 보이는 쪽 바꾸기(SeaBIOS vgabios.c set_active_page).
+   CRTC 시작 주소를 그 쪽 처음으로 옮기고, BDA 에 쪽 번호와 시작 오프셋을
+   적고, 그 쪽의 커서를 CRTC 에 쓴다. 0-7 밖이면 아무것도 하지 않는다. *)
+let select_page t page =
+  if page < Dos_ports.page_count then begin
+    let off = page_offset t ~page 0 0 in
+    let start = off * display_ratio (Dos_video.kind t.video) / display_ratio_unit in
+    Dos_ports.port_out t.ports 0x3D4 0x0C;
+    Dos_ports.port_out t.ports 0x3D5 ((start lsr 8) land 0xff);
+    Dos_ports.port_out t.ports 0x3D4 0x0D;
+    Dos_ports.port_out t.ports 0x3D5 (start land 0xff);
+    wr16 t Dos_ports.bda_page_start off;
+    wr8 t Dos_ports.bda_active_page page;
+    let col, row = get_cursor_on t ~page in
+    set_cursor_on t ~page col row
+  end
+
+let get_cursor t = get_cursor_on t ~page:(active_page t)   (* (열, 행) *)
+let set_cursor t col row = set_cursor_on t ~page:(active_page t) col row
+
+let cell_addr t ~page r c = vram_base + page_offset t ~page r c
+let read_cell_on t ~page r c = rd16 t (cell_addr t ~page r c)
+let write_cell_on t ~page r c v = wr16 t (cell_addr t ~page r c) v
+let read_cell t r c = read_cell_on t ~page:(active_page t) r c
+let write_cell t r c v = write_cell_on t ~page:(active_page t) r c v
 
 (* 창 스크롤 — INT 10h AH=06/07 과 teletype 의 줄 넘침이 함께 쓴다.
-   [lines]=0 은 창 전체를 지운다. *)
-let scroll_window t ~up ~lines ~top ~left ~bottom ~right ~attr =
+   [lines]=0 은 창 전체를 지운다. 창의 아래·오른쪽 끝은 화면 안으로
+   자른다(SeaBIOS vgabios.c verify_scroll). 자르지 않으면 다음 쪽을
+   덮는다. *)
+let scroll_window_on t ~page ~up ~lines ~top ~left ~bottom ~right ~attr =
+  let bottom = min bottom (rows - 1) and right = min right (cols t - 1) in
   let blank = (attr lsl 8) lor 0x20 in
   let lines = if lines = 0 then bottom - top + 1 else lines in
+  let read r c = read_cell_on t ~page r c and write r c v = write_cell_on t ~page r c v in
   if up then
     for r = top to bottom do
       for c = left to right do
         let src = r + lines in
-        write_cell t r c (if src > bottom then blank else read_cell t src c)
+        write r c (if src > bottom then blank else read src c)
       done
     done
   else
     for r = bottom downto top do
       for c = left to right do
         let src = r - lines in
-        write_cell t r c (if src < top then blank else read_cell t src c)
+        write r c (if src < top then blank else read src c)
       done
     done
 
-(* 글자 하나 찍기 — INT 10h teletype 과 INT 21h 출력이 공유한다.
-   마지막 줄을 넘으면 화면을 한 줄 올린다. 넘침을 클램프로 막으면
+let scroll_window t = scroll_window_on t ~page:(active_page t)
+
+(* 글자 하나 찍기 — INT 10h teletype·AH=13h 와 INT 21h 출력이 공유한다.
+   마지막 줄을 넘으면 그 쪽을 한 줄 올린다. 넘침을 클램프로 막으면
    글자가 마지막 칸에 계속 덮어써져 출력이 통째로 사라진다. *)
-let put_char t ch attr =
-  let col, row = get_cursor t in
+let put_char_on t ~page ch attr =
+  let col, row = get_cursor_on t ~page in
   let col = ref col and row = ref row in
   (match ch with
    | 0x0D -> col := 0
@@ -321,15 +401,17 @@ let put_char t ch attr =
    | 0x09 -> col := min (cols t - 1) ((!col + 8) / 8 * 8)
    | 0x07 -> ()                       (* 벨 — 소리는 내지 않는다 *)
    | _ ->
-     write_cell t !row !col ((attr lsl 8) lor (ch land 0xff));
+     write_cell_on t ~page !row !col ((attr lsl 8) lor (ch land 0xff));
      incr col;
      if !col >= cols t then begin col := 0; incr row end);
   if !row >= rows then begin
-    scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows - 1)
+    scroll_window_on t ~page ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows - 1)
       ~right:(cols t - 1) ~attr;
     row := rows - 1
   end;
-  set_cursor t !col !row
+  set_cursor_on t ~page !col !row
+
+let put_char t ch attr = put_char_on t ~page:(active_page t) ch attr
 
 let put_string t s attr = String.iter (fun c -> put_char t (Char.code c) attr) s
 

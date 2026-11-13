@@ -21,6 +21,16 @@ val create : mem:Bytes.t -> video:Dos_video.t -> t
     넘긴다. CRTC 커서 레지스터(0x0A/0x0B/0x0E/0x0F)를 쓰면 어댑터가 받은
     뒤 BDA 를 맞춘다. *)
 
+val bda_page_size : int
+val bda_page_start : int
+val bda_cursor_pos : int
+val bda_active_page : int
+val page_count : int
+(** BIOS 데이터 영역에서 쪽 크기(0x44C), 보이는 쪽의 시작 오프셋(0x44E),
+    쪽 여덟 장의 커서(0x450 + 2 × 쪽: 열, 행), 보이는 쪽 번호(0x462).
+    게스트가 CRTC 커서 레지스터를 쓰면 이 모듈이 보이는 쪽의 커서 칸을
+    맞춘다. BIOS 도 같은 자리를 쓴다. *)
+
 val set_now : t -> int -> unit
 (** 현재 CPU 누적 사이클. 기계가 매 스텝 알려준다. *)
 
