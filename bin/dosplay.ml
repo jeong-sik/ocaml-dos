@@ -4,9 +4,9 @@
    끝낸다.
 
    기계는 벽시계에 맞춰 돈다: 흐른 시간만큼의 CPU 사이클(4.77MHz)을
-   돌리고, 화면은 그 사이에 초당 [--fps] 번까지 그린다. 그리기가 늦어도
-   게스트 시간은 밀리지 않는다. 호스트가 에뮬레이션 자체를 못 따라가면
-   느려질 뿐 빨라지지는 않는다. 바뀐 프레임만 보낸다. *)
+   돌리고, 화면은 그 사이에 초당 [--fps] 번까지 그린다. 터미널이 늦으면
+   프레임을 건너뛸 뿐 게스트 시간은 밀리지 않는다. 호스트가 에뮬레이션
+   자체를 못 따라가면 느려질 뿐 빨라지지는 않는다. 바뀐 프레임만 보낸다. *)
 
 let read_file path =
   let ic = open_in_bin path in
@@ -62,13 +62,73 @@ let raw_mode saved =
     Unix.c_icanon = false; c_echo = false; c_isig = false; c_ixon = false;
     c_icrnl = false; c_vmin = 0; c_vtime = 0 }
 
+(* ---------- 쓰기 ---------- *)
+
+(* 터미널이 프레임을 늦게 받아 가면 쓰기가 막힌다. 막힌 동안에도 게스트는
+   돌아야 하므로 stdout 을 비차단으로 두고 루프마다 쓸 수 있는 만큼만 쓴다.
+   Kitty 그래픽은 한 그림의 청크 사이에 다른 그래픽 이스케이프를 넣지 못하게
+   하므로 쓰고 있던 그림은 끝까지 쓴다. 쓰는 동안에는 새 프레임을 만들지
+   않는다 — 프레임을 만드는 일이 비싸서, 만들어 놓고 버리면 그만큼 게스트와
+   쓰기가 함께 굶는다. 늦은 터미널은 프레임을 건너뛸 뿐 게스트 시간은 밀리지
+   않는다.
+
+   쓰기를 domain 에 맡기면 이 에뮬레이터에서는 오히려 느려진다: 놀고 있는
+   domain 하나만 있어도 minor GC 마다 domain 끼리 멈춰 맞추느라 게스트 5초가
+   0.95초에서 3.2초로 늘었다(release, 텍스트 화면 틱 루프). *)
+
+type frame = { rgb : string; width : int; height : int; cols : int; rows : int }
+
+type output = {
+  mutable pending : string;  (** 쓰고 있는 그림의 이스케이프 *)
+  mutable pos : int;
+  mutable image_id : int;  (** 화면에 있는 그림의 id *)
+  mutable sent : int;
+}
+
+let output () = { pending = ""; pos = 0; image_id = 2; sent = 0 }
+
+let writing o = o.pos < String.length o.pending
+
+(* 그림 id 둘을 번갈아 쓴다: 새 그림을 올린 뒤 옛 그림을 지우면 깜빡이지
+   않는다. *)
+let encode o { rgb; width; height; cols; rows } =
+  let id = if o.image_id = 1 then 2 else 1 in
+  o.pending <-
+    "\027[H" ^ Dosterm.image ~id ~width ~height ~cols ~rows rgb ^ Dosterm.delete_image o.image_id;
+  o.pos <- 0;
+  o.image_id <- id;
+  o.sent <- o.sent + 1
+
+(* stdout 이 받는 만큼 쓴다. *)
+let rec pump o =
+  if writing o then
+    match Unix.single_write_substring Unix.stdout o.pending o.pos (String.length o.pending - o.pos) with
+    | n ->
+      o.pos <- o.pos + n;
+      pump o
+    | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINTR), _, _) -> ()
+
+let post o f =
+  encode o f;
+  pump o
+
+(* 끝낼 때 쓰던 그림을 마저 쓴다. stdout 이 다시 차단 모드여야 한다. *)
+let finish o =
+  if writing o then
+    ignore
+      (Unix.write_substring Unix.stdout o.pending o.pos (String.length o.pending - o.pos))
+
 (* 터미널을 게임용으로 바꾸고 [f] 를 부른 뒤 되돌린다. 되돌리다 난 예외가
-   [f] 의 예외를 덮지 않게 여기서 삼킨다. *)
-let with_terminal f =
+   [f] 의 예외를 덮지 않게 여기서 삼킨다. 비차단 모드는 셸과 같은 터미널
+   파일에 걸리므로 반드시 푼다. *)
+let with_terminal o f =
   let saved = Unix.tcgetattr Unix.stdin in
   Unix.tcsetattr Unix.stdin Unix.TCSANOW (raw_mode saved);
   out enter_terminal;
+  Unix.set_nonblock Unix.stdout;
   Fun.protect f ~finally:(fun () ->
+      (try Unix.clear_nonblock Unix.stdout with Unix.Unix_error _ -> ());
+      (try finish o with Unix.Unix_error _ -> ());
       (try out leave_terminal with Sys_error _ -> ());
       try Unix.tcsetattr Unix.stdin Unix.TCSANOW saved with Unix.Unix_error _ -> ())
 
@@ -95,9 +155,9 @@ type state = {
   mutable tail : string;
   mutable tail_age : int;
   mutable buttons : int;
-  mutable image_id : int;
   mutable box : int * int;  (** 그림이 차지한 픽셀 *)
   mutable last : string;
+  mutable last_digest : int;
   mutable redraw : bool;
   mutable quit : bool;
   mutable unmapped : int;
@@ -144,25 +204,27 @@ let run_to st target =
     st.guest_cycles <- st.guest_cycles + Dos_machine.step st.m
   done
 
-let draw st =
-  let rgb = Dos_machine.frame_rgb st.m in
-  if st.redraw || rgb <> st.last then begin
-    let width, height = Dos_machine.frame_dims st.m in
-    let cell_w, cell_h = cell st in
-    let cols, rows = Dosterm.fit ~cols:st.cols ~rows:st.rows ~cell_w ~cell_h in
-    let id = if st.image_id = 1 then 2 else 1 in
-    out
-      ("\027[H" ^ Dosterm.image ~id ~width ~height ~cols ~rows rgb
-     ^ Dosterm.delete_image st.image_id);
-    st.image_id <- id;
-    st.box <- (cols * cell_w, rows * cell_h);
-    st.last <- rgb;
-    st.redraw <- false
+(* 프레임을 만드는 일([frame_rgb])은 비싸다. 터미널이 앞 그림을 다 받았고
+   프레임 지문이 바뀌었을 때만 만든다. 앞의 것과 다를 때만 보낸다. *)
+let draw st o =
+  let digest = Dos_machine.frame_digest st.m in
+  if (not (writing o)) && (st.redraw || digest <> st.last_digest) then begin
+    st.last_digest <- digest;
+    let rgb = Dos_machine.frame_rgb st.m in
+    if st.redraw || rgb <> st.last then begin
+      let width, height = Dos_machine.frame_dims st.m in
+      let cell_w, cell_h = cell st in
+      let cols, rows = Dosterm.fit ~cols:st.cols ~rows:st.rows ~cell_w ~cell_h in
+      post o { rgb; width; height; cols; rows };
+      st.box <- (cols * cell_w, rows * cell_h);
+      st.last <- rgb;
+      st.redraw <- false
+    end
   end
 
 (* 돌린 시간(벽시계 초)을 돌려준다. [origin] 은 게스트 사이클 0 에 해당하는
    벽시계다. 버린 빚만큼 뒤로 민다. *)
-let play st =
+let play st o =
   let frame = 1.0 /. float_of_int st.fps in
   let start = Unix.gettimeofday () in
   let origin = ref start in
@@ -176,11 +238,18 @@ let play st =
     run_to st (cycles_at now);
     let now = Unix.gettimeofday () in
     if now >= !next_draw then begin
-      draw st;
+      draw st o;
       next_draw := Float.max (!next_draw +. frame) now
     end;
+    pump o;
+    (* 다음 그리기까지 잔다. 키가 오거나, 쓰던 그림을 터미널이 더 받을 수
+       있게 되면 일찍 깬다. *)
     let now = Unix.gettimeofday () in
-    if !next_draw > now then Unix.sleepf (!next_draw -. now)
+    if !next_draw > now then
+      let writes = if writing o then [ Unix.stdout ] else [] in
+      match Unix.select [ Unix.stdin ] writes [] (!next_draw -. now) with
+      | _ -> ()
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> ()
   done;
   Unix.gettimeofday () -. start
 
@@ -229,15 +298,16 @@ let () =
   if !mouse then Dos_machine.attach_mouse m;
   let st =
     { m; fps = max 1 !fps; cols = default_cols; rows = default_rows; area = None;
-      tail = ""; tail_age = 0; buttons = 0; image_id = 2; box = (0, 0); last = "";
+      tail = ""; tail_age = 0; buttons = 0; box = (0, 0); last = ""; last_digest = 0;
       redraw = true; quit = false; unmapped = 0; guest_cycles = 0 }
   in
-  let wall = with_terminal (fun () -> play st) in
+  let o = output () in
+  let wall = with_terminal o (fun () -> play st o) in
   if Dos_machine.exited m then
     Printf.eprintf "program exited with code %d\n" (Dos_machine.exit_code m)
   else prerr_endline "stopped with F12";
   (* 게스트 시간이 벽시계보다 많이 짧으면 이 호스트가 실시간을 못 따라갔다. *)
-  Printf.eprintf "guest time %.2fs, wall time %.2fs\n"
-    (float_of_int st.guest_cycles /. float_of_int cpu_hz) wall;
+  Printf.eprintf "guest time %.2fs, wall time %.2fs, frames sent %d\n"
+    (float_of_int st.guest_cycles /. float_of_int cpu_hz) wall o.sent;
   if st.unmapped > 0 then
     Printf.eprintf "%d key(s) had no BIOS word and were dropped\n" st.unmapped
