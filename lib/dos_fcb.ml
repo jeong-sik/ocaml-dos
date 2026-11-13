@@ -13,6 +13,8 @@ let name = 0x01
 let extent = 0x0C
 let record_size = 0x0E
 let file_size = 0x10
+let date = 0x14
+let time = 0x16
 let next_record = 0x20
 let random_record = 0x21
 

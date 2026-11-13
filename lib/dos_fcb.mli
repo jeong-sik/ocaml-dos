@@ -8,6 +8,8 @@ val name : int
 val extent : int
 val record_size : int
 val file_size : int
+val date : int
+val time : int
 val next_record : int
 val random_record : int
 

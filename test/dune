@@ -77,3 +77,7 @@
 (test
  (name dos_fcb_names_test)
  (libraries dosmachine))
+
+(test
+ (name dos_fcb_write_test)
+ (libraries dosmachine))

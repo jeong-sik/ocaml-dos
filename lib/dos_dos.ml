@@ -519,23 +519,118 @@ let fcb_name t fcb =
 let fcb_ok = 0
 let fcb_error = 0xFF
 
-(* FCBIO 의 읽기 결과 — FEOF 1, FTRIM 2. 레코드 일부만 읽으면 둘 다다. *)
-type fcb_read = Read_full | Read_eof | Read_partial
+(* FCBIO 의 결과 — FEOF 1, FTRIM 2. 레코드 일부만 읽으면 둘 다다. *)
+type fcb_result = Done | End_of_file | Partial_record
 
-let fcb_read_code = function Read_full -> 0 | Read_eof -> 1 | Read_partial -> 3
+let fcb_result_code = function Done -> 0 | End_of_file -> 1 | Partial_record -> 3
 
-(* 한 레코드를 DTA 로 옮긴다. 레코드 일부만 남았으면 나머지 칸을 0 으로
-   채운다 (FCBIO 의 Blank). *)
-let read_record t data ~off ~record_size =
-  let take = max 0 (min record_size (Bytes.length data - off)) in
-  if take = 0 then Read_eof
-  else begin
-    blit_to_mem t data off t.dta take;
-    for i = take to record_size - 1 do wr8 t (t.dta + i) 0 done;
-    if take < record_size then Read_partial else Read_full
-  end
+(* FCBIO2.ASM 의 FCBOp 비트를 나눈 것 *)
+type fcb_where =
+  | Sequential      (* 14h·15h: 블록과 다음 레코드에서, 나아간다 *)
+  | Random_record   (* 21h·22h: 랜덤 레코드에서, 나아가지 않는다 *)
+  | Random_block    (* 27h·28h: 랜덤 레코드에서 CX 개, 랜덤 레코드도 나아간다 *)
+
+type fcb_dir = Fcb_read | Fcb_write
 
 let fcb_at t = Dos_fcb.locate t (seg_off t 3 2)
+
+(* DOS 날짜·시각 워드 (Date16): 연도-1980 7비트·월 4·일 5, 시 5·분 6·초/2 5 *)
+let dos_date_epoch = 1980
+let date16 t =
+  let y, m, d, h, mi, s = now_fields t in
+  (((y - dos_date_epoch) lsl 9) lor (m lsl 5) lor d, (h lsl 11) lor (mi lsl 5) lor (s / 2))
+
+let set_fcb_size t fcb n =
+  wr16 t (fcb + Dos_fcb.file_size) (n land 0xffff);
+  wr16 t (fcb + Dos_fcb.file_size + 2) ((n lsr 16) land 0xffff)
+
+let fcb_size t fcb =
+  rd16 t (fcb + Dos_fcb.file_size) lor (rd16 t (fcb + Dos_fcb.file_size + 2) lsl 16)
+
+let stamp_fcb t fcb =
+  let date, time = date16 t in
+  wr16 t (fcb + Dos_fcb.date) date;
+  wr16 t (fcb + Dos_fcb.time) time
+
+(* [off] 부터 [count] 레코드를 DTA 로. 마지막 레코드가 덜 찼으면 나머지를
+   0 으로 채우고 한 레코드로 센다 (FCBIO 의 TryBlank). *)
+let fcb_read_records t data ~off ~record_size ~count =
+  let take = max 0 (min (count * record_size) (Bytes.length data - off)) in
+  if take > 0 then blit_to_mem t data off t.dta take;
+  let whole = take / record_size in
+  if take mod record_size <> 0 then begin
+    for i = take to ((whole + 1) * record_size) - 1 do wr8 t (t.dta + i) 0 done;
+    (whole + 1, Partial_record)
+  end
+  else (whole, if whole < count then End_of_file else Done)
+
+(* DTA 의 [count] 레코드를 [off] 에 쓴 새 버퍼. 0 레코드면 파일 길이를
+   [off] 로 맞춘다 (DOS_Write 의 0 바이트 쓰기). 열 때 받은 버퍼는 마운트
+   표의 것과 같으므로 고치지 않고 새로 만든다. *)
+let fcb_write_records t data ~off ~record_size ~count =
+  let n = count * record_size in
+  let len = if n = 0 then off else max (Bytes.length data) (off + n) in
+  let out = Bytes.make len '\000' in
+  Bytes.blit data 0 out 0 (min len (Bytes.length data));
+  for i = 0 to n - 1 do Bytes.set out (off + i) (Char.chr (rd8 t (t.dta + i))) done;
+  out
+
+(* FCBIO2.ASM FCBIO. 순차 위치는 [fcbs] 의 바이트 위치에서 읽고, 블록과
+   다음 레코드는 그와 맞춰 쓴다. *)
+let fcb_io t ~dir ~where =
+  let fcb = fcb_at t in
+  let record_size = Dos_fcb.record_size_of t fcb in
+  let count =
+    match where with
+    | Random_block -> Cpu86.reg16 t.cpu 1
+    | Sequential | Random_record -> 1
+  in
+  let start =
+    match where with
+    | Sequential -> Dos_fcb.current t fcb
+    | Random_record | Random_block -> Dos_fcb.random t fcb ~record_size
+  in
+  Dos_fcb.set_current t fcb start;
+  let report_count n =
+    match where with
+    | Random_block -> Cpu86.set_reg16 t.cpu 1 n
+    | Sequential | Random_record -> ()
+  in
+  match Hashtbl.find_opt t.fcbs fcb with
+  | None ->
+    report_count 0;
+    Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some (data, pos) ->
+    let off =
+      match where with
+      | Sequential -> pos
+      | Random_record | Random_block -> start * record_size
+    in
+    let moved, result, data =
+      match dir with
+      | Fcb_read ->
+        let moved, result = fcb_read_records t data ~off ~record_size ~count in
+        (moved, result, data)
+      | Fcb_write ->
+        let out = fcb_write_records t data ~off ~record_size ~count in
+        set_fcb_size t fcb (Bytes.length out);
+        stamp_fcb t fcb;
+        (count, Done, out)
+    in
+    let next = start + moved in
+    (match where with
+     | Sequential ->
+       Hashtbl.replace t.fcbs fcb (data, off + (moved * record_size));
+       Dos_fcb.set_current t fcb next
+     | Random_record -> Hashtbl.replace t.fcbs fcb (data, off)
+     | Random_block ->
+       Hashtbl.replace t.fcbs fcb (data, next * record_size);
+       Dos_fcb.set_current t fcb next;
+       Dos_fcb.store_random t fcb next
+         ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit));
+    report_count moved;
+    Cpu86.set_reg8 t.cpu 0 (fcb_result_code result)
+
 
 (* 0Fh. DOS 는 블록만 0 으로 지우고 다음 레코드는 건드리지 않는다. 이
    기계는 순차 위치를 [fcbs] 에 따로 두므로, 둘이 어긋나지 않게 다음
@@ -547,47 +642,32 @@ let fcb_open t =
     Hashtbl.replace t.fcbs fcb (data, 0);
     wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
     wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
-    wr16 t (fcb + Dos_fcb.file_size) (Bytes.length data land 0xffff);
-    wr16 t (fcb + Dos_fcb.file_size + 2) ((Bytes.length data lsr 16) land 0xffff);
+    set_fcb_size t fcb (Bytes.length data);
     Dos_fcb.set_current t fcb 0;
     Cpu86.set_reg8 t.cpu 0 fcb_ok
   | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
 
+(* 10h. 쓴 FCB 면 바이트를 FCB 의 파일 크기까지 마운트 표에 되돌린다.
+   열 때 받은 버퍼 그대로면(쓰지 않았으면) 표를 건드리지 않는다 — DOS 도
+   쓰지 않은 파일의 디렉터리 항목은 고치지 않는다. 그사이 파일이
+   지워졌으면 AL=FF 다 ($FCB_Close: 파일을 찾지 못함). *)
 let fcb_close t =
-  Hashtbl.remove t.fcbs (fcb_at t);
-  Cpu86.set_reg8 t.cpu 0 fcb_ok
-
-(* 14h. 끝에 닿으면 위치를 옮기지 않는다. 일부만 읽어도 한 레코드 나아간다. *)
-let fcb_seq_read t =
   let fcb = fcb_at t in
-  let record_size = Dos_fcb.record_size_of t fcb in
-  let record = Dos_fcb.current t fcb in
-  match Hashtbl.find_opt t.fcbs fcb with
-  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
-  | Some (data, pos) ->
-    let result = read_record t data ~off:pos ~record_size in
-    let moved =
-      match result with
-      | Read_eof -> 0
-      | Read_full | Read_partial -> 1
-    in
-    Hashtbl.replace t.fcbs fcb (data, pos + (moved * record_size));
-    Dos_fcb.set_current t fcb (record + moved);
-    Cpu86.set_reg8 t.cpu 0 (fcb_read_code result)
-
-(* 21h. 블록과 다음 레코드를 랜덤 레코드로 맞추고 나아가지 않는다 — 다음
-   14h 는 같은 레코드를 읽는다. *)
-let fcb_random_read t =
-  let fcb = fcb_at t in
-  let record_size = Dos_fcb.record_size_of t fcb in
-  let record = Dos_fcb.random t fcb ~record_size in
-  Dos_fcb.set_current t fcb record;
-  match Hashtbl.find_opt t.fcbs fcb with
-  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
-  | Some (data, _) ->
-    let off = record * record_size in
-    Hashtbl.replace t.fcbs fcb (data, off);
-    Cpu86.set_reg8 t.cpu 0 (fcb_read_code (read_record t data ~off ~record_size))
+  let code =
+    match Hashtbl.find_opt t.fcbs fcb with
+    | None -> fcb_ok
+    | Some (data, _) ->
+      Hashtbl.remove t.fcbs fcb;
+      let name = String.uppercase_ascii (fcb_name t fcb) in
+      (match Hashtbl.find_opt t.host_files name with
+       | None -> fcb_error
+       | Some current when current == data -> fcb_ok
+       | Some _ ->
+         Hashtbl.replace t.host_files name
+           (Bytes.sub data 0 (min (Bytes.length data) (fcb_size t fcb)));
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
 
 (* 23h. 레코드 크기 0 은 128 로 셈하되 고쳐 쓰지 않는다. *)
 let fcb_file_size t =
@@ -710,6 +790,30 @@ let fcb_rename t =
       (match fcb_sources t addr pattern with
        | [] -> fcb_error
        | found -> go found)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 16h. 있으면 비우고 없으면 만든다. '?' 가 든 이름은 만들 수 없다
+   (MKNODE: 이름이 없고 메타 문자가 있으면 경로 에러). 볼륨 레이블을 만드는
+   확장 FCB 는 이 기계에 레이블이 없어 거절한다. *)
+let fcb_create t =
+  let addr = seg_off t 3 2 in
+  let fcb = Dos_fcb.locate t addr in
+  let code =
+    match fcb_pattern_at t (fcb + Dos_fcb.name) with
+    | Some fields
+      when (not (String.contains fields '?'))
+           && Dos_fcb.search_attribute t addr land attr_volume_id = 0 ->
+      let empty = Bytes.empty in
+      Hashtbl.replace t.host_files (name_of_fcb_fields fields) empty;
+      Hashtbl.replace t.fcbs fcb (empty, 0);
+      wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
+      wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
+      set_fcb_size t fcb 0;
+      stamp_fcb t fcb;
+      Dos_fcb.set_current t fcb 0;
+      fcb_ok
+    | Some _ | None -> fcb_error
   in
   Cpu86.set_reg8 t.cpu 0 code
 
@@ -1128,8 +1232,13 @@ let service_immediate t =
   | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
   | 0x0F -> fcb_open t
   | 0x10 -> fcb_close t
-  | 0x14 -> fcb_seq_read t
-  | 0x21 -> fcb_random_read t
+  | 0x14 -> fcb_io t ~dir:Fcb_read ~where:Sequential
+  | 0x15 -> fcb_io t ~dir:Fcb_write ~where:Sequential
+  | 0x16 -> fcb_create t
+  | 0x21 -> fcb_io t ~dir:Fcb_read ~where:Random_record
+  | 0x22 -> fcb_io t ~dir:Fcb_write ~where:Random_record
+  | 0x27 -> fcb_io t ~dir:Fcb_read ~where:Random_block
+  | 0x28 -> fcb_io t ~dir:Fcb_write ~where:Random_block
   | 0x23 -> fcb_file_size t
   | 0x24 -> fcb_set_random t
   | 0x13 -> fcb_delete t
