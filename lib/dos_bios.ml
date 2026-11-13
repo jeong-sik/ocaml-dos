@@ -50,6 +50,12 @@ let bios_int8 =
    커서를 그 가운데로. 드라이버가 상주할 때, 00h·21h 리셋, INT 10h 모드
    세우기가 부른다(HelpPC 2.10 INT 33,0: "mouse is positioned to screen
    center", "max width and height are set to maximum for video mode"). *)
+(* 드라이버가 커서를 옮기면(04h, 화면 맞추기) 움직임 나머지를 버린다 —
+   CuteMouse 의 rounderr 를 setpos_04 와 setupvideo 가 지운다. *)
+let clear_mickey_carry m =
+  m.mouse_carry_x <- 0;
+  m.mouse_carry_y <- 0
+
 let mouse_fit_screen t =
   let m = t.mouse in
   let space = Dos_mouse_space.current t.mem in
@@ -57,7 +63,8 @@ let mouse_fit_screen t =
   m.mouse_range_y <- Dos_mouse_space.range_y space;
   let x, y = Dos_mouse_space.center space in
   m.mouse_x <- x;
-  m.mouse_y <- y
+  m.mouse_y <- y;
+  clear_mickey_carry m
 
 let equipment_word =
   (* bit0 디스켓 있음, bit1 코프로세서 없음(8087 미장착 — ESC 명령은
@@ -420,6 +427,9 @@ let mouse_driver_version = 0x0705
 let mouse_irq_ps2 = 0  (* RBIL INT 33/0024: CL = 0 은 PS/2 *)
 let mouse_enabled = 0  (* AX=26h BX: 0 이면 드라이버가 켜져 있다 *)
 
+(* 13h·1Ah 의 DX 0 은 기본 문턱이다(RBIL INT 33/0013 "0000h = default of 64") *)
+let double_speed_of dx = if dx = 0 then default_motion.double_speed else dx
+
 (* 00h 와 21h 가 함께 되돌리는 드라이버 상태. HelpPC 2.10 INT 33,0: 커서를
    숨기고 모양을 기본으로 하고, 사용자 핸들러 마스크를 0 으로 하고, 범위를
    모드 최대로 한다. 마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이
@@ -434,6 +444,7 @@ let reset_mouse_driver t =
   m.mouse_handler_mask <- 0;
   m.mouse_dx <- 0;
   m.mouse_dy <- 0;
+  m.mouse_motion <- default_motion;
   mouse_fit_screen t;
   List.iter
     (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
@@ -467,7 +478,34 @@ let mouse t =
     Cpu86.set_reg16 cpu 3 m.mouse_buttons
   | 0x04 ->
     m.mouse_x <- clamp_to m.mouse_range_x (Cpu86.reg16 cpu 1);
-    m.mouse_y <- clamp_to m.mouse_range_y (Cpu86.reg16 cpu 2)
+    m.mouse_y <- clamp_to m.mouse_range_y (Cpu86.reg16 cpu 2);
+    clear_mickey_carry m
+  | 0x0F ->
+    (* DEFINE MICKEY/PIXEL RATIO: CX·DX 는 8 화소당 미키. 하나라도 0 이면
+       무시한다(CuteMouse sensitivity_0F, DOSBox-X Mouse_SetMickeyPixelRate). *)
+    let cx = Cpu86.reg16 cpu 1 and dx = Cpu86.reg16 cpu 2 in
+    if cx <> 0 && dx <> 0 then
+      m.mouse_motion <- { m.mouse_motion with mickeys_x = cx; mickeys_y = dx }
+  | 0x13 ->
+    (* DEFINE DOUBLE-SPEED THRESHOLD: DX, 0 이면 64(RBIL INT 33/0013) *)
+    m.mouse_motion <- { m.mouse_motion with double_speed = double_speed_of (Cpu86.reg16 cpu 2) }
+  | 0x1A ->
+    (* SET MOUSE SENSITIVITY: BX·CX 감도, DX 문턱(RBIL INT 33/001A). 감도가
+       1..100 밖이면 그 축은 그대로다(CuteMouse senscalc). 문턱은 13h 와
+       같은 값이다 — CuteMouse 는 두 배 속도를 두지 않아 RBIL 을 따른다. *)
+    let speed now v = if v >= lowest_speed && v <= highest_speed then v else now in
+    let mo = m.mouse_motion in
+    m.mouse_motion <-
+      { mo with
+        speed_x = speed mo.speed_x (Cpu86.reg16 cpu 3);
+        speed_y = speed mo.speed_y (Cpu86.reg16 cpu 1);
+        double_speed = double_speed_of (Cpu86.reg16 cpu 2) }
+  | 0x1B ->
+    (* RETURN MOUSE SENSITIVITY: BX·CX 감도, DX 문턱 *)
+    let mo = m.mouse_motion in
+    Cpu86.set_reg16 cpu 3 mo.speed_x;
+    Cpu86.set_reg16 cpu 1 mo.speed_y;
+    Cpu86.set_reg16 cpu 2 mo.double_speed
   | (0x05 | 0x06) as fn ->
     (* 버튼 BX 의 누름(05h)·뗌(06h) 기록. AX 는 지금 버튼 상태, BX 는 지난
        호출 뒤 횟수, CX·DX 는 마지막 자리. 횟수는 읽으면 0 이 된다

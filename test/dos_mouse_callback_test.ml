@@ -161,11 +161,12 @@ let test_ranges () =
   checki "set_mouse x clamped" mouse.Dos_state.mouse_x 104;
   checki "set_mouse y clamped" mouse.Dos_state.mouse_y 48;
   checki "mickeys count the clamped move (x)" mouse.Dos_state.mouse_dx 0;
-  checki "mickeys count the clamped move (y)" mouse.Dos_state.mouse_dy 40;
+  (* 세로는 8 화소당 16 미키(0Fh 기본값)라 40 화소가 80 미키다 *)
+  checki "mickeys count the clamped move (y)" mouse.Dos_state.mouse_dy 80;
   checki "the press is logged where the cursor is"
     mouse.Dos_state.mouse_presses.(0).Dos_state.last_y 48;
   Dos_machine.set_mouse m ~x:600 ~y:600 ~buttons:1;
-  checki "out of range again: no more mickeys" mouse.Dos_state.mouse_dy 40;
+  checki "out of range again: no more mickeys" mouse.Dos_state.mouse_dy 80;
   (* the snapshot carries ranges and logs *)
   let bytes = save_exn m in
   let r = restore_exn bytes in
@@ -247,7 +248,8 @@ let () =
   checki "press: CX = x" (peek_word m 0x144) 104;
   checki "press: DX = y" (peek_word m 0x146) 48;
   checki "press: SI = dx from the center" (peek_word m 0x148) ((104 - center_x) land 0xffff);
-  checki "press: DI = dy from the center" (peek_word m 0x14a) ((48 - center_y) land 0xffff);
+  checki "press: DI = dy from the center, 16 mickeys per 8 pixels"
+    (peek_word m 0x14a) ((2 * (48 - center_y)) land 0xffff);
   (* 이동량 소비: 호출이 si/di 를 가져가면 뒤이은 AX=0x0B 는 0 이다. *)
   let m = Dos_machine.create () in
   Dos_machine.load_com m (guest ~mask:0x0002 ~tail:tail_mickeys ());

@@ -112,6 +112,7 @@ let create () =
         mouse_graphics_cursor = Dos_state.Default_arrow;
         mouse_text_cursor = Dos_state.default_text_cursor;
         mouse_dx = 0; mouse_dy = 0;
+        mouse_motion = Dos_state.default_motion; mouse_carry_x = 0; mouse_carry_y = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
         mouse_presses = Dos_state.new_button_logs ();
         mouse_releases = Dos_state.new_button_logs ();
@@ -430,8 +431,16 @@ let set_mouse t ~x ~y ~buttons =
   let x = Dos_state.clamp_to m.mouse_range_x x
   and y = Dos_state.clamp_to m.mouse_range_y y in
   let moved = x <> m.mouse_x || y <> m.mouse_y in
-  m.mouse_dx <- m.mouse_dx + (x - m.mouse_x);
-  m.mouse_dy <- m.mouse_dy + (y - m.mouse_y);
+  let motion = m.mouse_motion in
+  let mdx, carry_x =
+    Dos_state.mickeys_of_pixels ~per_8:motion.mickeys_x ~carry:m.mouse_carry_x (x - m.mouse_x)
+  and mdy, carry_y =
+    Dos_state.mickeys_of_pixels ~per_8:motion.mickeys_y ~carry:m.mouse_carry_y (y - m.mouse_y)
+  in
+  m.mouse_dx <- m.mouse_dx + mdx;
+  m.mouse_dy <- m.mouse_dy + mdy;
+  m.mouse_carry_x <- carry_x;
+  m.mouse_carry_y <- carry_y;
   m.mouse_x <- x;
   m.mouse_y <- y;
   (* 게임에 알리는 좌표는 칸 단위다 — 버튼 기록과 핸들러 인자도 03h 와 같다
