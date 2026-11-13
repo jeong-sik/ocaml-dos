@@ -450,6 +450,19 @@ let reset_mouse_driver t =
     (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
     [ m.mouse_presses; m.mouse_releases ]
 
+(* 0Bh·27h: 지난 읽기 뒤 미키를 CX·DX 로 주고 0 으로 한다 *)
+let take_mickeys cpu m =
+  Cpu86.set_reg16 cpu 1 (m.mouse_dx land 0xffff);
+  Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);
+  m.mouse_dx <- 0;
+  m.mouse_dy <- 0
+
+(* 0Ch·14h: CX 마스크, ES:DX 루틴을 사용자 핸들러로 건다 *)
+let register_handler cpu m =
+  m.mouse_handler_mask <- Cpu86.reg16 cpu 1;
+  m.mouse_handler_seg <- Cpu86.seg cpu 0;
+  m.mouse_handler_off <- Cpu86.reg16 cpu 2
+
 let mouse t =
   let cpu = t.cpu in
   let m = t.mouse in
@@ -535,11 +548,28 @@ let mouse t =
       m.mouse_range_y <- range;
       m.mouse_y <- clamp_to range m.mouse_y
     end
-  | 0x0B ->
-    Cpu86.set_reg16 cpu 1 (m.mouse_dx land 0xffff);
-    Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);
-    m.mouse_dx <- 0;
-    m.mouse_dy <- 0
+  | 0x0B -> take_mickeys cpu m
+  | 0x27 ->
+    (* GET SCREEN/CURSOR MASKS AND MICKEY COUNTS(RBIL INT 33/0027): AX·BX 는
+       0Ah 텍스트 커서 — 소프트웨어면 두 마스크, 하드웨어면 시작·끝 스캔 줄
+       (v7.02+, CuteMouse cursor_27 의 startscan·endscan). CX·DX 는 0Bh 처럼
+       미키를 가져간다. *)
+    let first, second =
+      match m.mouse_text_cursor with
+      | Software_text { screen_mask; cursor_mask } -> (screen_mask, cursor_mask)
+      | Hardware_text { first_line; last_line } -> (first_line, last_line)
+    in
+    Cpu86.set_reg16 cpu 0 first;
+    Cpu86.set_reg16 cpu 3 second;
+    take_mickeys cpu m
+  | 0x31 ->
+    (* GET CURRENT MINIMUM/MAXIMUM VIRTUAL COORDINATES(RBIL INT 33/0031):
+       07h·08h 범위. AX·BX 가 가로·세로 아래 끝, CX·DX 가 위 끝이다. *)
+    let x_lo, x_hi = m.mouse_range_x and y_lo, y_hi = m.mouse_range_y in
+    Cpu86.set_reg16 cpu 0 x_lo;
+    Cpu86.set_reg16 cpu 3 y_lo;
+    Cpu86.set_reg16 cpu 1 x_hi;
+    Cpu86.set_reg16 cpu 2 y_hi
   | 0x09 ->
     (* 그래픽 커서: BX·CX 핫스폿, ES:DX 마스크 서른두 워드. 오프셋은
        세그먼트 안에서 돈다. 돌려주는 값은 없다. *)
@@ -589,9 +619,18 @@ let mouse t =
     (* DEFINE INTERRUPT SUBROUTINE PARAMETERS — CX 마스크, ES:DX 루틴.
        돌려주는 값은 없다(Ralf Brown rb-5968: Return 없음). AX 를 건드리면
        없는 규약을 지어내는 것이니 저장만 한다. *)
-    m.mouse_handler_mask <- Cpu86.reg16 cpu 1;
-    m.mouse_handler_seg <- Cpu86.seg cpu 0;
-    m.mouse_handler_off <- Cpu86.reg16 cpu 2
+    register_handler cpu m
+  | 0x14 ->
+    (* EXCHANGE INTERRUPT SUBROUTINES(RBIL INT 33/0014): 0Ch 처럼 걸고, 앞
+       등록의 마스크를 CX, 루틴을 ES:DX 로 돌려준다(CuteMouse exchangeUIR_14,
+       DOSBox-X). 마스크는 0Ch 가 받은 워드 그대로다. *)
+    let old_mask = m.mouse_handler_mask
+    and old_seg = m.mouse_handler_seg
+    and old_off = m.mouse_handler_off in
+    register_handler cpu m;
+    Cpu86.set_reg16 cpu 1 old_mask;
+    Cpu86.set_seg cpu 0 old_seg;
+    Cpu86.set_reg16 cpu 2 old_off
   | _ -> ()
 
 (* ---------- 묶음 ---------- *)

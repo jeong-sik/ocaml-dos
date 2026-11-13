@@ -85,3 +85,7 @@
 (test
  (name dos_mouse_motion_test)
  (libraries dosmachine))
+
+(test
+ (name dos_mouse_exchange_test)
+ (libraries dosmachine))
