@@ -115,6 +115,7 @@ let create () =
         mouse_dx = 0; mouse_dy = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
       };
+      on_unserved = (fun _ ~vector:_ ~ax:_ -> ());
     }
   in
   on_ring_poll :=
@@ -403,6 +404,8 @@ let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
 let mem_write t a v = wr8 t a v
 let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
+
+let on_unserved t f = t.on_unserved <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video

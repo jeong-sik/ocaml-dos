@@ -191,6 +191,12 @@ val mem_write : t -> int -> int -> unit
 (** 물리 주소 한 바이트 쓰기({!mem_read} 의 짝). 하네스가 게스트 RAM 에
     상태를 주입하는 용도. 값은 하위 8비트로 잘린다. *)
 
+val on_unserved : t -> (Dos_state.unserved -> vector:int -> ax:int -> unit) -> unit
+(** 이 기계가 받지 못한 INT 호출을 알려 줄 관찰자를 건다. 기계 동작은 그대로다.
+    [No_function] 은 호스트 서비스(21h·10h·16h·1Ah·33h)에 그 기능 갈래가 없을
+    때, [Iret_stub] 은 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔을 때다.
+    [ax] 는 호출 순간의 AX 다. *)
+
 val tick_count : t -> int
 (** BIOS 타이머 틱(0x40:0x6C). 18.2Hz 가 기본이고 게스트가 PIT 분주비를
     바꾸면 그만큼 빨라진다. *)

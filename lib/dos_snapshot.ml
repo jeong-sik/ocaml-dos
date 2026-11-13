@@ -247,7 +247,8 @@ let write_payload w t =
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
         epoch_min; epoch_sec; ems_pages; ems_mapped;
-        mouse } = t
+        mouse;
+        on_unserved = _ (* a host observer, not machine state *) } = t
   in
   let put what r v = C.put w ~what r v in
   let { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted;
