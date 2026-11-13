@@ -31,3 +31,6 @@ val rgb_planar :
 
 val rgb_vga13 : Bytes.t -> (int * int * int) array -> string
 (** VGA 13h 화면(0xA0000 선형)을 320x200 RGB 로. *)
+
+val rgb_solid : width:int -> height:int -> (int * int * int) array -> string
+(** 화면을 끈 동안의 그림: 모든 점이 DAC 0 번 색이다. *)

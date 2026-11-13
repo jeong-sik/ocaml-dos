@@ -152,6 +152,27 @@ let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
 
+(* EGA/VGA BIOS 데이터: 0x487 은 EGA 기타 정보(bit 0 = 커서 모양 흉내 끔),
+   0x488 은 스위치, 0x489 는 VGA 모드 세우기 깃발(bit 7·4 = 200·400 주사선,
+   bit 3 = 기본 팔레트 싣기 끔). 비트 자리는 DOSBox-staging int10.cpp 와
+   같다. SeaBIOS 1231h 는 0x487 bit 3 을 바꾸지만 정작 그쪽 모드 세우기는
+   0x489 bit 3 을 본다. *)
+let bda_ega_misc = 0x487
+let bda_switches = 0x488
+let bda_vga_flags = 0x489
+let ega_misc_no_cursor_emulation = 0x01
+let vga_flag_200_lines = 0x80
+let vga_flag_400_lines = 0x10
+let vga_flag_keep_palette = 0x08
+let switches_kept = 0xF0
+let switches_cga_emulation = 0x08
+let switches_ega_enhanced = 0x09
+let alt_select_done = 0x12
+
+let set_bda_bit t addr bit on =
+  let v = rd8 t addr in
+  wr8 t addr (if on then v lor bit else v land lnot bit)
+
 let video t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 and al = Cpu86.reg8 cpu 0 in
@@ -163,7 +184,7 @@ let video t =
     (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
        AL bit7(화면 보존)과는 상관없다. 막는 길은 BDA 0x489 bit3
        (기본 팔레트 싣기 금지, AX=1200h BL=31h 가 켜는 비트) 하나다. *)
-    if rd8 t 0x489 land 0x08 = 0 then Dos_ports.reset_dac t.ports;
+    if rd8 t bda_vga_flags land vga_flag_keep_palette = 0 then Dos_ports.reset_dac t.ports;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
     wr8 t 0x484 (rows - 1);
@@ -282,12 +303,35 @@ let video t =
       Cpu86.set_reg8 cpu 2 (rows - 1)
     end
   | 0x12 ->
-    (* 대체 선택: BL=10h 이면 EGA/VGA 정보. BH=0(컬러), BL=3(256KB) *)
-    if Cpu86.reg8 cpu 3 = 0x10 then begin
-      Cpu86.set_reg8 cpu 7 0;
-      Cpu86.set_reg8 cpu 3 3;
-      Cpu86.set_reg16 cpu 1 0
-    end
+    (* 대체 선택. BL=10h 는 EGA/VGA 정보: BH=0(컬러), BL=3(256KB).
+       BL=30h·31h·34h·36h 는 받으면 AL=12h, AL 이 범위 밖이면 AL=0 이다
+       (RBIL INT 10/AH=12h BL=30h~36h). 그 밖의 BL 은 AL 을 두고 돌아간다. *)
+    let al_in n f = if al > n then Cpu86.set_reg8 cpu 0 0 else (f (); Cpu86.set_reg8 cpu 0 alt_select_done) in
+    (match Cpu86.reg8 cpu 3 with
+     | 0x10 ->
+       Cpu86.set_reg8 cpu 7 0;
+       Cpu86.set_reg8 cpu 3 3;
+       Cpu86.set_reg16 cpu 1 0
+     | 0x30 ->
+       (* 다음 모드 세우기의 텍스트 주사선 수. BDA 만 바꾼다 — 텍스트 그림은
+          늘 8x8 글자를 세로로 두 배 늘린 400 줄이다. *)
+       al_in 2 (fun () ->
+           let flags = rd8 t bda_vga_flags land lnot (vga_flag_200_lines lor vga_flag_400_lines) in
+           let lines, switches =
+             match al with
+             | 0 -> (vga_flag_200_lines, switches_cga_emulation)
+             | 1 -> (0, switches_ega_enhanced)
+             | _ -> (vga_flag_400_lines, switches_ega_enhanced)
+           in
+           wr8 t bda_vga_flags (flags lor lines);
+           wr8 t bda_switches ((rd8 t bda_switches land switches_kept) lor switches))
+     | 0x31 ->
+       al_in 1 (fun () -> set_bda_bit t bda_vga_flags vga_flag_keep_palette (al = 1))
+     | 0x34 ->
+       (* 커서 모양 바꾸기(AH=01h)는 이 비트와 상관없이 CRTC 에 그대로 쓴다. *)
+       al_in 1 (fun () -> set_bda_bit t bda_ega_misc ega_misc_no_cursor_emulation (al = 1))
+     | 0x36 -> al_in 1 (fun () -> Dos_video.set_screen_blanked t.video (al = 1))
+     | _ -> ())
   | 0x13 ->
     (* 문자열 쓰기: ES:BP=문자열, CX=길이, DH/DL=시작 행/열,
        AL bit0=커서 갱신, bit1=속성이 문자열 안에 섞여 있음 *)

@@ -91,6 +91,18 @@ let set_attr_palette t i v = if i >= 0 && i < attr_count then t.attr.(i) <- v
 let cga_color_select t = t.cga_color_select
 let set_cga_color_select t v = t.cga_color_select <- v land 0xff
 
+(* 시퀀서 1 번(clocking mode)의 bit 5 가 서면 화면을 그리지 않는다. 그동안
+   화면 전체가 DAC 0 번 색이다(RBIL INT 10/AH=12h BL=36h). 모드를 세우면
+   시퀀서가 0 으로 돌아가 다시 켜진다. *)
+let seq_clocking_mode = 1
+let seq_screen_off = 0x20
+
+let screen_blanked t = t.seq.(seq_clocking_mode) land seq_screen_off <> 0
+let set_screen_blanked t off =
+  let v = t.seq.(seq_clocking_mode) in
+  t.seq.(seq_clocking_mode) <-
+    (if off then v lor seq_screen_off else v land lnot seq_screen_off)
+
 let set_mode t m ~clear =
   t.mode <- m;
   t.gc_index <- 0;
