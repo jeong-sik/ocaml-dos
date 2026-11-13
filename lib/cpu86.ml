@@ -87,6 +87,8 @@ let set_reg8 t n v =
 let seg t n = t.segs.(n)
 let set_seg t n v = t.segs.(n) <- v land 0xffff
 let dump_ip t = t.ip
+let bus_read t a = t.read a
+let bus_write t a v = t.write a v
 let set_ip t v = t.ip <- v land 0xffff
 
 let flags t =
