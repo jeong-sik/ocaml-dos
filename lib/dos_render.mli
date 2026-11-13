@@ -23,11 +23,7 @@ val rgb_cga4 : Bytes.t -> mode:int -> color_select:int -> string
 val rgb_cga2 : Bytes.t -> string
 (** CGA 640x200 2색(모드 6). *)
 
-val rgb_planar :
-  Bytes.t array -> w:int -> h:int -> attr:int array ->
-  pal:(int * int * int) array -> string
-(** EGA/VGA 16색. 평면 넷의 같은 비트가 색 번호를 만들고, [attr] 이
-    그것을 DAC 자리로 옮긴다. *)
-
 val rgb_indexed : Bytes.t -> (int * int * int) array -> string
-(** 화면 순서로 늘어선 256색 번호를 RGB 로. 바이트 하나가 점 하나다. *)
+(** 화면 순서로 늘어선 DAC 자리를 RGB 로. 바이트 하나가 점 하나다.
+    16색({!Dos_video.screen16})과 256색({!Dos_video.screen256})이 같이
+    쓴다. *)

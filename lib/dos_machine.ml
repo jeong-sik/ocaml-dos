@@ -382,10 +382,7 @@ let frame_rgb t =
     Dos_render.rgb_cga4 t.mem ~mode:(Dos_video.mode t.video)
       ~color_select:(Dos_video.cga_color_select t.video)
   | Dos_video.Cga2 -> Dos_render.rgb_cga2 t.mem
-  | Dos_video.Planar ->
-    let w, h = Dos_video.dims t.video in
-    Dos_render.rgb_planar (Dos_video.planes t.video) ~w ~h
-      ~attr:(Dos_video.attr_palette t.video) ~pal
+  | Dos_video.Planar -> Dos_render.rgb_indexed (Dos_video.screen16 t.video) pal
   | Dos_video.Linear256 -> Dos_render.rgb_indexed (Dos_video.screen256 t.video) pal
 
 let frame_ppm t =
