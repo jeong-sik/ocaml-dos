@@ -49,10 +49,10 @@ let service_status_mask t v =
   | 0x21, _ -> Cpu86.f_carry
   | _ -> 0
 
-let create () =
+let create ?(speed = Dos_ports.pc_speed) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~mem ~video in
+  let ports = Dos_ports.create ~speed ~mem ~video in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)

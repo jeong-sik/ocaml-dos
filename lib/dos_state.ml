@@ -8,9 +8,6 @@
 let vram_base = 0xB8000
 let rows = 25
 
-(* 4.77MHz — IBM PC 의 CPU 클럭. 사이클을 초로 바꾸는 유일한 환산비다. *)
-let cpu_hz = 4_772_727
-
 (* DOS 핸들 표(JFT). 실기 DOS 는 PSP 마다 20칸짜리 표(PSP:18h, 크기는
    PSP:32h)를 두고, 0-4 는 stdin/stdout/stderr/stdaux/stdprn 이 이미
    차지한다. AH=3Ch/3Dh/45h 는 가장 낮은 빈 칸 번호를 돌려주고, 빈 칸이
@@ -234,7 +231,7 @@ let days_in_month y m =
   | 4 | 6 | 9 | 11 -> 30
   | _ -> if (y mod 4 = 0 && y mod 100 <> 0) || y mod 400 = 0 then 29 else 28
 
-let elapsed_seconds t = Cpu86.cycles t.cpu / cpu_hz
+let elapsed_seconds t = Cpu86.cycles t.cpu / Dos_ports.cpu_hz t.ports
 
 (* 기준 시각 + 경과. 윤년까지 세되 달력 라이브러리는 쓰지 않는다 —
    게스트가 보는 건 DOS 의 날짜 필드뿐이다. *)
