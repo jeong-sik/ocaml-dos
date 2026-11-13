@@ -107,7 +107,10 @@ let create () =
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
            키보드 모드로 강제한다(전투 배치 같은 마우스 UI 잠김). *)
         mouse_present = true; mouse_x = 0; mouse_y = 0;
-        mouse_buttons = 0; mouse_visible = false;
+        mouse_buttons = 0;
+        mouse_cursor_flag = Dos_state.cursor_flag_after_reset;
+        mouse_graphics_cursor = Dos_state.Default_arrow;
+        mouse_text_cursor = Dos_state.default_text_cursor;
         mouse_dx = 0; mouse_dy = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
         mouse_presses = Dos_state.new_button_logs ();
