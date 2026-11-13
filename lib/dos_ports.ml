@@ -33,6 +33,7 @@ type t = {
   mutable pit0_latched : int option;
   mutable pit0_access : int;            (** 1=lo 2=hi 3=lo/hi *)
   pic : Dos_pic.t;
+  dma : Dos_dma.t;                      (** 포트 00h-0Fh 와 페이지 레지스터 *)
   kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
   (* VGA DAC *)
   pal : (int * int * int) array;
@@ -95,6 +96,7 @@ let create ~mem ~video =
     pit0_latched = None;
     pit0_access = 3;
     pic = Dos_pic.create ();
+    dma = Dos_dma.create ();
     kbc = Dos_kbc.create ();
     pal = Array.init dac_entries default_vga_pal;
     dac_write_index = 0;
@@ -133,6 +135,7 @@ let reset_dac t =
 let set_now t n = t.now <- n
 let palette t = t.pal
 let pic t = t.pic
+let dma t = t.dma
 let kbc t = t.kbc
 let speaker_on t = t.port_b land 0x03 = 0x03
 
@@ -157,6 +160,9 @@ let sync_cursor_to_bda t =
 
 let port_in t p =
   match Dos_video.port_in t.video p with
+  | Some v -> v
+  | None ->
+  match Dos_dma.port_in t.dma p with
   | Some v -> v
   | None ->
   match p land 0xffff with
@@ -237,6 +243,7 @@ let port_in t p =
 let port_out t p v =
   let v = v land 0xff in
   if Dos_video.port_out t.video p v then ()
+  else if Dos_dma.port_out t.dma p v then ()
   else
   match p land 0xffff with
   | 0x20 -> Dos_pic.write_command t.pic v
@@ -336,7 +343,7 @@ let dac_phase_r = C.range 0 2
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
-        pit0_access; pic; kbc; pal; dac_write_index; dac_read_index;
+        pit0_access; pic; dma; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; crtc_index; crtc; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
@@ -351,6 +358,7 @@ let write_state w t =
    | Some v -> C.put_bool w true; put "pit0_latched" C.word v);
   put "pit0_access" pit_access pit0_access;
   Dos_pic.write_state w pic;
+  Dos_dma.write_state w dma;
   Dos_kbc.write_state w kbc;
   put "DAC size" C.count (Array.length pal);
   Array.iter
@@ -384,6 +392,7 @@ let read_state r t =
   t.pit0_latched <- (if C.get_bool r then Some (get "pit0_latched" C.word) else None);
   t.pit0_access <- get "pit0_access" pit_access;
   Dos_pic.read_state r t.pic;
+  Dos_dma.read_state r t.dma;
   Dos_kbc.read_state r t.kbc;
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri

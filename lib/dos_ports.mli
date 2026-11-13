@@ -1,4 +1,4 @@
-(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), 키보드
+(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), DMA({!Dos_dma}), 키보드
     컨트롤러({!Dos_kbc}), VGA DAC, CRTC, PC 스피커, CGA 상태 레지스터.
 
     이 포트들이 무엇을 돌려주는지가 게임의 진행 조건이 된다. 고정값을
@@ -32,6 +32,9 @@ val cycles_per_tick : t -> int
 
 val pic : t -> Dos_pic.t
 (** 포트 0x20·0x21 의 인터럽트 컨트롤러. 기계가 IRQ 를 올리고 고른다. *)
+
+val dma : t -> Dos_dma.t
+(** 포트 00h-0Fh 와 81h·82h·83h·87h 의 DMA 컨트롤러. 장치가 바이트를 당겨 간다. *)
 
 val kbc : t -> Dos_kbc.t
 (** 포트 0x60·0x64 의 키보드 컨트롤러. *)
