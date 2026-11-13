@@ -73,3 +73,7 @@
 (test
  (name dos_vga256_test)
  (libraries dosmachine))
+
+(test
+ (name dos_planar_scan_test)
+ (libraries dosmachine))

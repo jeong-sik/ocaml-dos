@@ -151,26 +151,7 @@ let rgb_cga2 mem =
   done;
   Bytes.to_string img
 
-(* EGA/VGA 16색: 평면 넷의 같은 비트를 모아 색 번호를 만들고, 속성
-   팔레트가 그것을 DAC 자리로 옮긴다. *)
-let rgb_planar planes ~w ~h ~attr ~pal =
-  let img = Bytes.make (w * h * 3) '\000' in
-  let bytes_per_row = w / 8 in
-  for y = 0 to h - 1 do
-    for x = 0 to w - 1 do
-      let off = ((y * bytes_per_row) + (x / 8)) land 0xffff in
-      let bit = 7 - (x mod 8) in
-      let idx = ref 0 in
-      for p = 0 to Array.length planes - 1 do
-        if (Char.code (Bytes.get planes.(p) off) lsr bit) land 1 = 1 then
-          idx := !idx lor (1 lsl p)
-      done;
-      blit img ~width:w ~x ~y (rgb_of_dac pal attr.(!idx land 0x0f))
-    done
-  done;
-  Bytes.to_string img
-
-(* 256색: 화면 순서로 늘어선 색 번호, DAC 은 채널당 6비트. *)
+(* 그래픽: 화면 순서로 늘어선 DAC 자리, DAC 은 채널당 6비트. *)
 let rgb_indexed indices pal =
   let n = Bytes.length indices in
   let img = Bytes.make (n * 3) '\000' in

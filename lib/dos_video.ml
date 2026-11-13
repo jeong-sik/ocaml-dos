@@ -67,15 +67,43 @@ let underline_dword = 0x40           (* 14h: dword 주소 *)
 let mode_byte = 0x40                 (* 17h: 1 = byte, 0 = word *)
 let mode_wrap_ma15 = 0x20            (* 17h: word 모드에서 MA15 를 0번 비트로 *)
 
-(* 13h 의 CRTC 부팅값. SeaBIOS vgasrc/stdvgamodes.c 의 crtc_13 이다. *)
+(* 그래픽 모드의 CRTC 부팅값. SeaBIOS vgasrc/stdvgamodes.c 의 crtc_0d,
+   crtc_0e, crtc_0f(0Fh·10h), crtc_11(11h·12h), crtc_13 이다. 이 값에서
+   나오는 크기가 모드표의 크기와 같다. *)
+let crtc_mode0d =
+  [| 0x2D; 0x27; 0x28; 0x90; 0x2B; 0x80; 0xBF; 0x1F;
+     0x00; 0xC0; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00;
+     0x9C; 0x8E; 0x8F; 0x14; 0x00; 0x96; 0xB9; 0xE3;
+     0xFF |]
+
+let crtc_mode0e =
+  [| 0x5F; 0x4F; 0x50; 0x82; 0x54; 0x80; 0xBF; 0x1F;
+     0x00; 0xC0; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00;
+     0x9C; 0x8E; 0x8F; 0x28; 0x00; 0x96; 0xB9; 0xE3;
+     0xFF |]
+
+let crtc_mode0f =
+  [| 0x5F; 0x4F; 0x50; 0x82; 0x54; 0x80; 0xBF; 0x1F;
+     0x00; 0x40; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00;
+     0x83; 0x85; 0x5D; 0x28; 0x0F; 0x63; 0xBA; 0xE3;
+     0xFF |]
+
+let crtc_mode11 =
+  [| 0x5F; 0x4F; 0x50; 0x82; 0x54; 0x80; 0x0B; 0x3E;
+     0x00; 0x40; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00;
+     0xEA; 0x8C; 0xDF; 0x28; 0x00; 0xE7; 0x04; 0xE3;
+     0xFF |]
+
 let crtc_mode13 =
   [| 0x5F; 0x4F; 0x50; 0x82; 0x54; 0x80; 0xBF; 0x1F;
      0x00; 0x41; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00;
      0x9C; 0x8E; 0x8F; 0x28; 0x40; 0x96; 0xB9; 0xA3;
      0xFF |]
 
-(* 256색에서 글자 클록 하나가 네 점을 낸다 — 평면 넷에서 한 바이트씩. *)
-let pixels_per_char = 4
+(* 글자 클록 하나가 내는 점 수. 16색은 평면 넷의 같은 바이트에서 여덟
+   점을, 256색은 평면마다 한 바이트씩 네 점을 낸다. *)
+let dots_16 = 8
+let dots_256 = 4
 
 (* BIOS 가 13h 의 점을 찍는 줄 너비(INT 10h AH=0Ch/0Dh). CRTC 가 무엇을
    보여 주든 BIOS 는 0xA0000 + y*320 + x 에 쓴다. *)
@@ -120,6 +148,16 @@ let spec = function
   | _ -> (Text, 640, 400, 80)
 
 let kind_of_mode m = let k, _, _, _ = spec m in k
+
+(* 모드를 세울 때 CRTC 에 싣는 표. 텍스트와 CGA 모드의 화면은 CRTC 를
+   거치지 않고 모드표에서 그리므로 표를 싣지 않는다. *)
+let crtc_table = function
+  | 0x0D -> Some crtc_mode0d
+  | 0x0E -> Some crtc_mode0e
+  | 0x0F | 0x10 -> Some crtc_mode0f
+  | 0x11 | 0x12 -> Some crtc_mode11
+  | 0x13 -> Some crtc_mode13
+  | _ -> None
 let boot_mode = 3
 
 let create ~mem =
@@ -149,12 +187,12 @@ let create ~mem =
 let mode t = t.mode
 let kind t = t.kind
 
-(* 256색 화면의 크기는 CRTC 가 정한다. 가로는 표시 끝 글자 수에 4 를 곱한
-   값이다. 세로는 표시 줄 수(0x12, overflow 의 bit1 이 8번째, bit6 이 9번째
+(* 그래픽 화면의 크기는 CRTC 가 정한다. 가로는 표시 끝 글자 수에 글자당
+   점 수([dots])를 곱한 값이다. 세로는 표시 줄 수(0x12, overflow 의 bit1 이 8번째, bit6 이 9번째
    비트)를 한 행이 차지하는 줄 수로 나눈 값이다. 행 하나는 0x09 의 아래 다섯
    비트 + 1 줄이고, bit7(scan doubling)이 서 있으면 그 두 배다. 13h 부팅값은
    320x200 이고, Mode X 는 세로 레지스터를 바꿔 320x240 을 만든다. *)
-let crtc_dims t =
+let crtc_dims t ~dots =
   let r i = t.crtc.(i) in
   let o = r crtc_overflow in
   let lines =
@@ -167,12 +205,13 @@ let crtc_dims t =
   let per_row =
     ((msl land max_scan_rows) + 1) * (if msl land max_scan_double <> 0 then 2 else 1)
   in
-  ((r crtc_h_display_end + 1) * pixels_per_char, max 1 (lines / per_row))
+  ((r crtc_h_display_end + 1) * dots, max 1 (lines / per_row))
 
 let dims t =
   match spec t.mode with
-  | Linear256, _, _, _ -> crtc_dims t
-  | (Text | Cga4 | Cga2 | Planar), w, h, _ -> (w, h)
+  | Planar, _, _, _ -> crtc_dims t ~dots:dots_16
+  | Linear256, _, _, _ -> crtc_dims t ~dots:dots_256
+  | (Text | Cga4 | Cga2), w, h, _ -> (w, h)
 let text_cols t = let _, _, _, c = spec t.mode in c
 let planes t = t.planes
 let attr_palette t = t.attr
@@ -194,11 +233,7 @@ let set_mode t m ~clear =
   t.seq.(seq_map_mask) <- 0x0F;
   t.gc.(gc_bit_mask) <- 0xFF;
   t.seq.(seq_memory_mode) <- memory_mode_of t.kind;
-  (* CRTC 는 13h 에서만 화면의 꼴을 정한다. 다른 모드의 크기는 모드표에서
-     오므로 그 모드의 CRTC 표는 싣지 않는다. *)
-  (match t.kind with
-   | Linear256 -> Array.blit crtc_mode13 0 t.crtc 0 crtc_count
-   | Text | Cga4 | Cga2 | Planar -> ());
+  Option.iter (fun table -> Array.blit table 0 t.crtc 0 crtc_count) (crtc_table m);
   Array.iteri (fun i _ -> t.attr.(i) <- (if i < 16 then i else 0)) t.attr;
   t.cga_color_select <- 0x30;
   if clear then
@@ -389,6 +424,13 @@ let reset_attr_flip t = t.attr_is_data <- false
 let cga_row_addr y = cga_base + (if y land 1 = 0 then 0 else 0x2000)
                      + ((y / 2) * 80)
 
+(* BIOS 가 16색 점을 찍는 한 줄의 바이트 수 — 모드표의 가로를 8 로 나눈
+   값이다. CRTC 의 크기나 행 간격을 바꿔도 BIOS 는 같은 자리에 쓴다.
+   SeaBIOS 는 줄 너비를 CRTC 13h 에서 구한다(vgafb.c gfx_planar,
+   stdvga.c stdvga_get_linelength). 그래서 행 간격을 바꾼 뒤 AH=0Ch 를
+   부르는 프로그램에서만 둘이 다르다. *)
+let bios_line_16 t = let _, w, _, _ = spec t.mode in w / dots_16
+
 let put_pixel t ~x ~y ~color =
   match kind t with
   | Text -> ()
@@ -408,8 +450,7 @@ let put_pixel t ~x ~y ~color =
     in
     Bytes.set t.mem a (Char.chr nv)
   | Planar ->
-    let w, _ = dims t in
-    let off = ((y * (w / 8)) + (x / 8)) land 0xffff in
+    let off = ((y * bios_line_16 t) + (x / 8)) land 0xffff in
     let bit = 1 lsl (7 - (x mod 8)) in
     for p = 0 to plane_count - 1 do
       let old = Char.code (Bytes.get t.planes.(p) off) in
@@ -423,7 +464,7 @@ let put_pixel t ~x ~y ~color =
        마스크가 고른 평면에 간다. *)
     mem_write t (planar_base + (((y * bios_line_256) + x) land 0xffff)) color
 
-(* ---------- 256색 화면 ---------- *)
+(* ---------- 그래픽 화면 ---------- *)
 
 (* CRTC 의 주소 카운터(MA)가 평면 주소가 되는 방식(FreeVGA CRTC 14h·17h).
    14h bit6(dword)이 서 있으면 MA 를 두 비트 민다. 아니면 17h bit6 이
@@ -442,33 +483,65 @@ let start_address t = (t.crtc.(crtc_start_high) lsl 8) lor t.crtc.(crtc_start_lo
    [scan_address] 가 곱한다. *)
 let row_stride t = t.crtc.(crtc_offset) * 2
 
-(* 화면에 보이는 256색 점들을 위에서 아래로, 왼쪽에서 오른쪽으로 [f] 에
+(* CRTC 가 화면을 훑는 차례대로 글자 하나가 읽는 평면 주소를 [f] 에
    넘긴다. 행 y 는 MA = 시작 주소 + y × [row_stride] 에서 시작하고, 글자
-   하나가 평면 0-3 의 같은 자리에서 네 점을 낸다. split screen(line
-   compare)과 픽셀 패닝은 모델에 없다. *)
-let iter256 t f =
-  let w, h = crtc_dims t in
+   하나가 MA 를 하나 늘린다. 한 행의 글자 수는 가로를 [dots] 로 나눈
+   값이다. split screen(line compare)과 픽셀 패닝은 모델에 없다. *)
+let scan_chars t ~dots f =
+  let w, h = crtc_dims t ~dots in
   let address = scan_address t in
   let start = start_address t and stride = row_stride t in
   for y = 0 to h - 1 do
     let row = start + (y * stride) in
-    for x = 0 to w - 1 do
-      f (Char.code (Bytes.get t.planes.(x land 3) (address (row + (x lsr 2)))))
+    for c = 0 to (w / dots) - 1 do
+      f (address (row + c))
     done
   done
 
-let screen256 t =
-  let w, h = crtc_dims t in
+let plane_byte t p a = Char.code (Bytes.get t.planes.(p) a)
+
+(* 16색 점의 색 번호: 네 평면에서 같은 비트를 모은다(bit p = 평면 p). *)
+let color16 t a bit =
+  let c = ref 0 in
+  for p = 0 to plane_count - 1 do
+    if (plane_byte t p a lsr bit) land 1 = 1 then c := !c lor (1 lsl p)
+  done;
+  !c
+
+(* 화면에 보이는 점들을 위에서 아래로, 왼쪽에서 오른쪽으로 [f] 에 넘긴다.
+   256색은 글자 하나가 평면 0-3 에서 한 바이트씩, 네 점을 낸다. *)
+let iter256 t f =
+  scan_chars t ~dots:dots_256 (fun a ->
+      for p = 0 to plane_count - 1 do f (plane_byte t p a) done)
+
+(* 16색은 글자 하나가 여덟 점을 내고, 왼쪽 점이 바이트의 최상위 비트다. *)
+let iter16 t f =
+  scan_chars t ~dots:dots_16 (fun a ->
+      for bit = dots_16 - 1 downto 0 do f (color16 t a bit) done)
+
+let collect t ~dots iter =
+  let w, h = crtc_dims t ~dots in
   let out = Bytes.create (w * h) in
   let i = ref 0 in
-  iter256 t (fun c -> Bytes.set out !i (Char.chr c); incr i);
+  iter (fun c -> Bytes.set out !i (Char.chr c); incr i);
   out
+
+let screen256 t = collect t ~dots:dots_256 (iter256 t)
+
+(* 속성 컨트롤러가 색 번호 0-15 를 DAC 자리로 옮긴다. *)
+let screen16 t = collect t ~dots:dots_16 (fun f -> iter16 t (fun c -> f t.attr.(c)))
 
 (* 지금 모드가 실제로 그리는 메모리의 지문. 화면이 멈췄는지 보는 데
    쓴다 — 픽셀을 다 만들어 비교하는 것보다 훨씬 싸고, 모드마다 어느
    메모리가 화면인지는 여기만 안다. 충돌해도 손해는 "안 변했다고 잘못
    읽는" 것뿐이라 64비트가 필요 없다. *)
 let digest_step h b = ((h * 31) + b) land 0x3FFFFFFFFFFFFFF
+
+(* 16색 글자 하나의 여덟 점은 평면 넷의 같은 자리 네 바이트에서 나온다.
+   그 네 바이트를 한 값으로 묶어 지문에 넣으면 점을 만들지 않아도 된다. *)
+let char_planes t a =
+  plane_byte t 0 a lor (plane_byte t 1 a lsl 8) lor (plane_byte t 2 a lsl 16)
+  lor (plane_byte t 3 a lsl 24)
 
 let screen_digest t =
   let h = ref 0 in
@@ -480,9 +553,7 @@ let screen_digest t =
   (match spec t.mode with
    | Text, _, _, cols -> over t.mem cga_base (cols * 25 * 2)
    | (Cga4 | Cga2), _, _, _ -> over t.mem cga_base 0x4000
-   | Planar, w, ht, _ ->
-     let len = min plane_size (w / 8 * ht) in
-     Array.iter (fun p -> over p 0 len) t.planes
+   | Planar, _, _, _ -> scan_chars t ~dots:dots_16 (fun a -> h := digest_step !h (char_planes t a))
    | Linear256, _, _, _ -> iter256 t (fun c -> h := digest_step !h c));
   !h
 
@@ -497,8 +568,7 @@ let get_pixel t ~x ~y =
     let a = cga_row_addr y + (x / 8) in
     (Char.code (Bytes.get t.mem a) lsr (7 - (x mod 8))) land 1
   | Planar ->
-    let w, _ = dims t in
-    let off = ((y * (w / 8)) + (x / 8)) land 0xffff in
+    let off = ((y * bios_line_16 t) + (x / 8)) land 0xffff in
     let bit = 7 - (x mod 8) in
     let c = ref 0 in
     for p = 0 to plane_count - 1 do
@@ -514,11 +584,12 @@ let get_pixel t ~x ~y =
     else Char.code (Bytes.get t.planes.(t.gc.(gc_read_map) land 3) off)
 
 let screen_pixel t ~x ~y =
+  let ma ~dots = start_address t + (y * row_stride t) + (x / dots) in
   match kind t with
-  | Linear256 ->
-    let ma = start_address t + (y * row_stride t) + (x lsr 2) in
-    Char.code (Bytes.get t.planes.(x land 3) (scan_address t ma))
-  | Text | Cga4 | Cga2 | Planar -> get_pixel t ~x ~y
+  | Linear256 -> plane_byte t (x land 3) (scan_address t (ma ~dots:dots_256))
+  | Planar ->
+    color16 t (scan_address t (ma ~dots:dots_16)) (dots_16 - 1 - (x mod dots_16))
+  | Text | Cga4 | Cga2 -> get_pixel t ~x ~y
 
 (* ---------- snapshot ---------- *)
 
