@@ -18,25 +18,49 @@ let cpu_hz = 4_772_727
    밖이면 AX=6 (invalid handle). 출처: Ralf Brown's Interrupt List,
    INT 21h AH=3Ch/3Dh/45h/46h, 그리고 PSP 형식 표. AH=67h(표 늘리기)는 아직
    모델 밖이라 표는 20칸 고정이다. *)
-let first_file_handle = 5
 let max_handles = 20
 
 (* 이 기계의 드라이브는 C: 하나다(0 = A:). *)
 let default_drive = 2
 
-(* [data] is shared: every handle opened on the same [hname] (through
-   [Dos_dos.open_handle], not [dup]) points at the same ref, so a write
-   through one is a read through the other -- real DOS keeps one file on
-   disk regardless of how many times it is open. [pos] is each handle's
-   own, since two independent opens read and write at their own offsets.
-   [dup] (AH=45h/46h) instead shares the whole record under a second
-   number, [pos] included -- that is a different number naming the same
-   open file, not a second open. *)
+(* The devices SYSINIT opens at boot (MS-DOS 4.0 BIOS/SYSINIT1.ASM). *)
+type standard_device =
+  | Con
+  | Aux
+  | Prn
+
+let device_name = function Con -> "CON" | Aux -> "AUX" | Prn -> "PRN"
+
+(* What a handle names. A file's [data] is shared: every handle opened on
+   the same [hname] (through [Dos_dos.open_handle], not [dup]) points at
+   the same ref, so a write through one is a read through the other --
+   real DOS keeps one file on disk regardless of how many times it is
+   open. *)
+type target =
+  | File of { hname : string; data : Bytes.t ref }
+  | Device of standard_device
+
+(* One open, as DOS keeps it in a system file table entry. [pos] is each
+   open's own, since two independent opens read and write at their own
+   offsets; a device has one too, which only AH=42h moves. [dup]
+   (AH=45h/46h) instead shares the whole record under a second number,
+   [pos] included -- that is a different number naming the same open,
+   not a second open. *)
 type handle = {
-  hname : string;
-  data : Bytes.t ref;
+  target : target;
   mutable pos : int;
 }
+
+(* The table a program starts with. SYSINIT opens CON once for reading
+   and writing and duplicates it to 1 and 2, so the three share one
+   record; it opens AUX for reading and writing as 3 and PRN write-only
+   as 4. Without these, C runtimes stop at their first write with
+   invalid handle (6). *)
+let standard_handles () =
+  let con = { target = Device Con; pos = 0 } in
+  [ (0, con); (1, con); (2, con);
+    (3, { target = Device Aux; pos = 0 });
+    (4, { target = Device Prn; pos = 0 }) ]
 
 (* INT 33h AX=0x0C 로 건 마우스 이벤트 핸들러의 등록. [mouse_handler_mask]
    0 은 미등록 — 마스크가 0 이면 주소가 남아 있어도 부르지 않는다. 세 값은
@@ -121,7 +145,7 @@ type t = {
   video : Dos_video.t;
   host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
   handles : (int, handle) Hashtbl.t;
-        (** 핸들 번호 [first_file_handle] .. [max_handles - 1] 만 쓴다 *)
+        (** 핸들 번호 0 .. [max_handles - 1]. [standard_handles] 로 시작한다 *)
   open_files : (string, Bytes.t ref) Hashtbl.t;
         (** 이름 하나가 지금 열려 있는 동안의 공유 버퍼. [handles] 의 어떤
             항목도, [exec_frames] 의 어떤 부모 핸들도 그 이름을 더는 물지

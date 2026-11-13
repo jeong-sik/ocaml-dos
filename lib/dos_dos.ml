@@ -59,21 +59,39 @@ let matches_pattern ~pattern ~name =
 
 (* ---------- 열린 파일 ---------- *)
 
-let is_console h = h >= 0 && h <= 2
-
 (* 가장 낮은 빈 번호 — 실기 DOS 가 JFT 에서 첫 빈 칸을 고르는 것과 같다.
-   닫은 번호는 다시 쓰이고, 표가 차면 None (DOS 오류 4). 규칙은
-   Dos_state.max_handles 주석. *)
+   닫은 번호는 다시 쓰이고(표준 핸들 0-4 도), 표가 차면 None (DOS 오류 4).
+   규칙은 Dos_state.max_handles 주석. *)
 let free_handle t =
   let rec go h =
     if h >= max_handles then None
     else if Hashtbl.mem t.handles h then go (h + 1)
     else Some h
   in
-  go first_file_handle
+  go 0
 
 let too_many_open_files = 4
+let access_denied = 5
 let invalid_handle = 6
+
+(* A device's system file table entry has size 0: devices are open ended
+   (MS-DOS 4.0 DOS/MKNODE.ASM). AH=42h from the end lands on the offset. *)
+let device_size = 0
+
+let names_file name hd =
+  match hd.target with
+  | File f -> f.hname = name
+  | Device _ -> false
+
+(* AUX and PRN reach the serial and parallel ports through BIOS INT 14h
+   and INT 17h, and a port with nothing on it ends in the critical error
+   handler, INT 24h. This machine models none of the three, so it stops
+   here instead of answering for them. *)
+let device_unmodelled t dev =
+  raise
+    (Cpu86.Unsupported
+       (Printf.sprintf "INT 21h AH=%02Xh on %s needs INT 14h/17h and INT 24h"
+          (Cpu86.reg8 t.cpu 4) (device_name dev)))
 
 (* [name]을 아직 물고 있는 핸들이 있는지 — 살아있는 [t.handles] 뿐 아니라
    EXEC 로 잠든 부모 핸들(자식이 실행되는 동안은 [t.handles] 밖에 있다)도
@@ -82,9 +100,9 @@ let invalid_handle = 6
    open 이 이미 지워진 공유 버퍼를 못 찾고 새로 하나 만들어, 부모가
    복귀했을 때 둘이 다시 갈라진다. *)
 let name_still_claimed t name =
-  Hashtbl.fold (fun _ hd acc -> acc || hd.hname = name) t.handles false
+  Hashtbl.fold (fun _ hd acc -> acc || names_file name hd) t.handles false
   || List.exists
-       (fun (f : exec_frame) -> List.exists (fun (_, hd) -> hd.hname = name) f.parent_handles)
+       (fun (f : exec_frame) -> List.exists (fun (_, hd) -> names_file name hd) f.parent_handles)
        t.exec_frames
 
 (* [name]이 지금 열려 있으면 그 공유 버퍼를, 아니면 [seed]로 새로 만든
@@ -98,26 +116,32 @@ let shared_buffer t name seed =
     Hashtbl.replace t.open_files name buf;
     buf
 
-let open_handle t name data =
+(* The new handle and the buffer it shares with every open of [name]. *)
+let open_handle t name seed =
   match free_handle t with
   | None -> None
   | Some h ->
-    Hashtbl.replace t.handles h { hname = name; data = shared_buffer t name data; pos = 0 };
-    Some h
+    let data = shared_buffer t name seed in
+    Hashtbl.replace t.handles h { target = File { hname = name; data }; pos = 0 };
+    Some (h, data)
 
 (* 닫을 때 마운트 표로 되돌린다 — 저장한 파일을 같은 세션에서 다시
    열 수 있어야 게임의 세이브/로드가 성립한다. 공유 버퍼는 같은 이름의
    다른 핸들이 남아 있으면(부모의 잠든 자리 포함) 그대로 두고, 아무도
-   안 남았을 때만 지운다 — 다음 open 이 다시 [host_files] 에서 시작하게. *)
+   안 남았을 때만 지운다 — 다음 open 이 다시 [host_files] 에서 시작하게.
+   장치는 표에서 빠지기만 한다. *)
 let close_handle t h =
   match Hashtbl.find_opt t.handles h with
   | None -> false
   | Some hd ->
     Hashtbl.remove t.handles h;
-    if hd.hname <> "" then begin
-      Hashtbl.replace t.host_files hd.hname !(hd.data);
-      if not (name_still_claimed t hd.hname) then Hashtbl.remove t.open_files hd.hname
-    end;
+    (match hd.target with
+     | File { hname; data } ->
+       if hname <> "" then begin
+         Hashtbl.replace t.host_files hname !data;
+         if not (name_still_claimed t hname) then Hashtbl.remove t.open_files hname
+       end
+     | Device _ -> ());
     true
 
 (* ---------- 메모리 할당 ---------- *)
@@ -786,15 +810,13 @@ let service_immediate t =
     else begin
       match open_handle t name Bytes.empty with
       | None -> fail t too_many_open_files
-      | Some h ->
+      | Some (h, data) ->
         Hashtbl.replace t.host_files name Bytes.empty;
         (* [open_handle] joins a buffer already shared by another live
            handle on [name] instead of seeding a fresh empty one -- create
            truncates regardless, so force it empty here too, visible to
            whoever else already has [name] open. *)
-        (match Hashtbl.find_opt t.handles h with
-         | Some hd -> hd.data := Bytes.empty
-         | None -> ());
+        data := Bytes.empty;
         Cpu86.set_reg16 cpu 0 h;
         ok t
     end
@@ -803,7 +825,7 @@ let service_immediate t =
     (match Hashtbl.find_opt t.host_files name with
      | Some data ->
        (match open_handle t name data with
-        | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
+        | Some (h, _) -> Cpu86.set_reg16 cpu 0 h; ok t
         | None -> fail t too_many_open_files)
      | None -> fail t 2)
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
@@ -819,53 +841,43 @@ let service_immediate t =
           ok t
         | None -> fail t too_many_open_files)
      | None -> fail t invalid_handle)
+  (* $Dup2 (MS-DOS 4.0 DOS/HANDLE.ASM) closes CX first and ignores how
+     that went, then checks CX and BX. So BX = CX closes the handle and
+     answers 6, and a bad BX still closes CX. *)
   | 0x46 ->
+    let target = Cpu86.reg16 cpu 1 in
+    ignore (close_handle t target);
     (match Hashtbl.find_opt t.handles (Cpu86.reg16 cpu 3) with
-     | Some hd ->
-       let target = Cpu86.reg16 cpu 1 in
-       if target >= max_handles then fail t invalid_handle
-       else begin Hashtbl.replace t.handles target hd; ok t end
-     | None -> fail t invalid_handle)
-  | 0x3F ->
-    let h = Cpu86.reg16 cpu 3 in
-    let want = Cpu86.reg16 cpu 1 in
-    let dst = seg_off t 3 2 in
-    (match Hashtbl.find_opt t.handles h with
-       | None -> fail t 6
-       | Some hd ->
-         let take = min want (max 0 (Bytes.length !(hd.data) - hd.pos)) in
-         blit_to_mem t !(hd.data) hd.pos dst take;
-         hd.pos <- hd.pos + take;
-         Cpu86.set_reg16 cpu 0 take;
-         ok t)
+     | Some hd when target < max_handles -> Hashtbl.replace t.handles target hd; ok t
+     | Some _ | None -> fail t invalid_handle)
   | 0x40 ->
     let h = Cpu86.reg16 cpu 3 in
     let n = Cpu86.reg16 cpu 1 in
     let src = seg_off t 3 2 in
-    if is_console h then begin
-      (* 실기 DOS 는 부팅 때 stdin/stdout/stderr 를 열어 준다 — 없으면
-         런타임이 잘못된 핸들(6)로 즉사한다(실측). *)
-      for i = 0 to n - 1 do put_char t (rd8 t (src + i)) 0x07 done;
-      Cpu86.set_reg16 cpu 0 n;
-      ok t
-    end
-    else
-      (match Hashtbl.find_opt t.handles h with
-       | None -> fail t 6
-       | Some hd ->
+    (match Hashtbl.find_opt t.handles h with
+     | None -> fail t invalid_handle
+     | Some { target = Device Con; _ } ->
+       for i = 0 to n - 1 do put_char t (rd8 t (src + i)) 0x07 done;
+       Cpu86.set_reg16 cpu 0 n;
+       ok t
+     | Some { target = Device ((Aux | Prn) as dev); _ } ->
+       (* A count of 0 never reaches the device (DISK.ASM WRTDEV). *)
+       if n = 0 then begin Cpu86.set_reg16 cpu 0 0; ok t end
+       else device_unmodelled t dev
+     | Some ({ target = File { data; _ }; _ } as hd) ->
          let chunk = Bytes.create n in
          for i = 0 to n - 1 do
            Bytes.set chunk i (Char.chr (rd8 t (src + i)))
          done;
-         let len = Bytes.length !(hd.data) in
+         let len = Bytes.length !data in
          let grown =
            if hd.pos + n <= len then begin
-             let copy = Bytes.copy !(hd.data) in
+             let copy = Bytes.copy !data in
              Bytes.blit chunk 0 copy hd.pos n;
              copy
            end
            else begin
-             let head = Bytes.sub !(hd.data) 0 (min hd.pos len) in
+             let head = Bytes.sub !data 0 (min hd.pos len) in
              let gap =
                if hd.pos > len then Bytes.make (hd.pos - len) '\000'
                else Bytes.empty
@@ -873,7 +885,7 @@ let service_immediate t =
              Bytes.concat Bytes.empty [ head; gap; chunk ]
            end
          in
-         hd.data := grown;
+         data := grown;
          hd.pos <- hd.pos + n;
          Cpu86.set_reg16 cpu 0 n;
          ok t)
@@ -892,7 +904,11 @@ let service_immediate t =
      | Some hd ->
        let signed =
          if off32 >= 0x80000000 then off32 - 0x100000000 else off32 in
-       let size = Bytes.length !(hd.data) in
+       let size =
+         match hd.target with
+         | File { data; _ } -> Bytes.length !data
+         | Device _ -> device_size
+       in
        let newpos =
          match Cpu86.reg8 cpu 0 with
          | 0 -> signed
@@ -971,6 +987,29 @@ let service_immediate t =
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
+(* AH=3Fh. CON waits for a line; a file answers at once. PRN was opened
+   write-only, and DOS_READ (DISK.ASM) checks the access mode before the
+   count, so even 0 bytes from PRN is error 5. *)
+let read_handle t =
+  let cpu = t.cpu in
+  let destination = seg_off t 3 2 and length = Cpu86.reg16 cpu 1 in
+  match Hashtbl.find_opt t.handles (Cpu86.reg16 cpu 3) with
+  | None -> fail t invalid_handle; Completed
+  | Some { target = Device Con; _ } ->
+    if length = 0 || t.console_pending <> "" then return_console_bytes t ~destination ~length
+    else resume_input t (Read_console_line { destination; length; line = { text = ""; echo_widths = [] } })
+  | Some { target = Device Prn; _ } -> fail t access_denied; Completed
+  | Some { target = Device Aux; _ } ->
+    if length = 0 then begin Cpu86.set_reg16 cpu 0 0; ok t; Completed end
+    else device_unmodelled t Aux
+  | Some ({ target = File { data; _ }; _ } as hd) ->
+    let take = min length (max 0 (Bytes.length !data - hd.pos)) in
+    blit_to_mem t !data hd.pos destination take;
+    hd.pos <- hd.pos + take;
+    Cpu86.set_reg16 cpu 0 take;
+    ok t;
+    Completed
+
 let rec service t ~return_to =
   match Cpu86.reg8 t.cpu 4 with
   | (0x01 | 0x07 | 0x08) as ah -> resume_input t (Read_character { echo = ah = 0x01 })
@@ -988,10 +1027,7 @@ let rec service t ~return_to =
        Cpu86.set_reg8 t.cpu 4 sub_fn;
        service t ~return_to
      | _ -> Cpu86.set_reg8 t.cpu 0 0; Completed)
-  | 0x3F when is_console (Cpu86.reg16 t.cpu 3) ->
-    let destination = seg_off t 3 2 and length = Cpu86.reg16 t.cpu 1 in
-    if length = 0 || t.console_pending <> "" then return_console_bytes t ~destination ~length
-    else resume_input t (Read_console_line { destination; length; line = { text = ""; echo_widths = [] } })
+  | 0x3F -> read_handle t
   | 0x4B -> exec_program t ~return_to
   | 0x00 -> terminate t; Control_transferred
   | 0x4C -> child_exit t ~code:(Cpu86.reg8 t.cpu 0) ~keep:None; Control_transferred
