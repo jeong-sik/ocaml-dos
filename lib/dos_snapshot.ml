@@ -23,8 +23,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
    console bytes are carried explicitly.
    7: the CRTC registers move from the ports to the video adapter, and
-   mode 13h's screen lives in the four planes instead of RAM at 0xA0000. *)
-let format_version = 7
+   mode 13h's screen lives in the four planes instead of RAM at 0xA0000.
+   8: text modes load their CRTC table and the text screen follows the
+   CRTC start address and offset. A format 7 machine in a text mode holds
+   zero CRTC registers, which would now draw every row from row 0. *)
+let format_version = 8
 
 let digest_hex_len = 32
 let checksum_len = 16

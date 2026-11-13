@@ -5,16 +5,17 @@ val cp437 : string array
 (** 코드 페이지 437 의 256 글자를 UTF-8 로. 0x00-0x1F 와 0x7F 는 제어
     문자가 아니라 그림 문자로 읽는다. *)
 
-val text_ascii : Bytes.t -> cols:int -> string
-(** 텍스트 VRAM 을 개행 포함 ASCII 그리드로. ASCII 밖 글자는 공백이
+val text_ascii : Bytes.t -> cols:int -> cell:(row:int -> col:int -> int) -> string
+(** 텍스트 화면을 개행 포함 ASCII 그리드로. [cell] 은 칸의 글자 바이트
+    주소다({!Dos_video.text_cell}). ASCII 밖 글자는 공백이
     된다 — 사람이 눈으로 훑기 좋다. *)
 
-val text_utf8 : Bytes.t -> cols:int -> string
+val text_utf8 : Bytes.t -> cols:int -> cell:(row:int -> col:int -> int) -> string
 (** 같은 화면을 CP437 그대로 UTF-8 로. 테두리·하트·화살표가 살아 있어
     기계 판정에 쓴다. *)
 
-val rgb_text : Bytes.t -> cols:int -> string
-(** 텍스트 화면을 RGB 로. 8x8 글리프를 세로로 두 배 늘려 25 줄이 400
+val rgb_text : Bytes.t -> cols:int -> cell:(row:int -> col:int -> int) -> string
+(** 텍스트 화면을 RGB 로. 칸의 글자는 [cell], 속성은 그 다음 바이트다. 8x8 글리프를 세로로 두 배 늘려 25 줄이 400
     줄이 된다. 너비는 [cols] * 8. *)
 
 val rgb_cga4 : Bytes.t -> mode:int -> color_select:int -> string

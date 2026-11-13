@@ -100,6 +100,32 @@ let crtc_mode13 =
      0x9C; 0x8E; 0x8F; 0x28; 0x40; 0x96; 0xB9; 0xA3;
      0xFF |]
 
+(* 텍스트 모드의 CRTC 부팅값. SeaBIOS stdvgamodes.c 의 crtc_01(0·1),
+   crtc_03(2·3), crtc_07(7)이다. 셋 다 시작 주소 0, word 주소이고, 행
+   간격(13h)이 14h·28h 라 한 행이 40·80 글자다. *)
+let crtc_mode01 =
+  [| 0x2D; 0x27; 0x28; 0x90; 0x2B; 0xA0; 0xBF; 0x1F;
+     0x00; 0x4F; 0x0D; 0x0E; 0x00; 0x00; 0x00; 0x00;
+     0x9C; 0x8E; 0x8F; 0x14; 0x1F; 0x96; 0xB9; 0xA3;
+     0xFF |]
+
+let crtc_mode03 =
+  [| 0x5F; 0x4F; 0x50; 0x82; 0x55; 0x81; 0xBF; 0x1F;
+     0x00; 0x4F; 0x0D; 0x0E; 0x00; 0x00; 0x00; 0x00;
+     0x9C; 0x8E; 0x8F; 0x28; 0x1F; 0x96; 0xB9; 0xA3;
+     0xFF |]
+
+let crtc_mode07 =
+  [| 0x5F; 0x4F; 0x50; 0x82; 0x55; 0x81; 0xBF; 0x1F;
+     0x00; 0x4F; 0x0D; 0x0E; 0x00; 0x00; 0x00; 0x00;
+     0x9C; 0x8E; 0x8F; 0x28; 0x0F; 0x96; 0xB9; 0xA3;
+     0xFF |]
+
+(* 텍스트 화면은 25 행이다. 이 모델의 텍스트 메모리는 0xB8000 의 32KB
+   창이다 — 80x25 한 장이 4KB 라 여덟 장이 들어간다. *)
+let text_rows = 25
+let text_window = 0x8000
+
 (* 글자 클록 하나가 내는 점 수. 16색은 평면 넷의 같은 바이트에서 여덟
    점을, 256색은 평면마다 한 바이트씩 네 점을 낸다. *)
 let dots_16 = 8
@@ -149,9 +175,12 @@ let spec = function
 
 let kind_of_mode m = let k, _, _, _ = spec m in k
 
-(* 모드를 세울 때 CRTC 에 싣는 표. 텍스트와 CGA 모드의 화면은 CRTC 를
-   거치지 않고 모드표에서 그리므로 표를 싣지 않는다. *)
+(* 모드를 세울 때 CRTC 에 싣는 표. CGA 그래픽 화면은 CRTC 를 거치지 않고
+   모드표에서 그리므로 표를 싣지 않는다. *)
 let crtc_table = function
+  | 0 | 1 -> Some crtc_mode01
+  | 2 | 3 -> Some crtc_mode03
+  | 7 -> Some crtc_mode07
   | 0x0D -> Some crtc_mode0d
   | 0x0E -> Some crtc_mode0e
   | 0x0F | 0x10 -> Some crtc_mode0f
@@ -160,7 +189,12 @@ let crtc_table = function
   | _ -> None
 let boot_mode = 3
 
+let load_crtc_table crtc m =
+  Option.iter (fun table -> Array.blit table 0 crtc 0 crtc_count) (crtc_table m)
+
 let create ~mem =
+  let crtc = Array.make crtc_count 0 in
+  load_crtc_table crtc boot_mode;
   {
     mem;
     planes = Array.init plane_count (fun _ -> Bytes.make plane_size '\000');
@@ -181,7 +215,7 @@ let create ~mem =
     attr = Array.init attr_count (fun i -> if i < 16 then i else 0);
     cga_color_select = 0x30;
     crtc_index = 0;
-    crtc = Array.make crtc_count 0;
+    crtc;
   }
 
 let mode t = t.mode
@@ -233,14 +267,14 @@ let set_mode t m ~clear =
   t.seq.(seq_map_mask) <- 0x0F;
   t.gc.(gc_bit_mask) <- 0xFF;
   t.seq.(seq_memory_mode) <- memory_mode_of t.kind;
-  Option.iter (fun table -> Array.blit table 0 t.crtc 0 crtc_count) (crtc_table m);
+  load_crtc_table t.crtc m;
   Array.iteri (fun i _ -> t.attr.(i) <- (if i < 16 then i else 0)) t.attr;
   t.cga_color_select <- 0x30;
   if clear then
     match spec m with
     | Text, _, _, cols ->
       (* 글자는 공백, 속성은 흰 글자 검은 바탕 *)
-      let cells = cols * 25 in
+      let cells = cols * text_rows in
       for i = 0 to cells - 1 do
         Bytes.set t.mem (cga_base + (i * 2)) ' ';
         Bytes.set t.mem (cga_base + (i * 2) + 1) '\007'
@@ -498,6 +532,17 @@ let scan_chars t ~dots f =
     done
   done
 
+(* 텍스트 화면 [row] 행 [col] 열의 글자 바이트 자리. 속성은 그 다음
+   바이트다. 그래픽과 같은 MA 를 쓴다: MA = 시작 주소 + 행 × [row_stride]
+   + 열이고 [scan_address] 가 바이트 자리로 바꾼다. 실기 VGA 는 64KB 평면의
+   뒤쪽 32KB 도 보여 줄 수 있지만, 이 모델의 텍스트 메모리는 [text_window]
+   하나뿐이라 자리가 그 안에서 돈다. 짝수로 맞춰 글자·속성 짝을 지킨다. *)
+let text_cell t =
+  let address = scan_address t in
+  let start = start_address t and stride = row_stride t in
+  fun ~row ~col ->
+    cga_base + (address (start + (row * stride) + col) land (text_window - 2))
+
 let plane_byte t p a = Char.code (Bytes.get t.planes.(p) a)
 
 (* 16색 점의 색 번호: 네 평면에서 같은 비트를 모은다(bit p = 평면 p). *)
@@ -551,7 +596,11 @@ let screen_digest t =
     done
   in
   (match spec t.mode with
-   | Text, _, _, cols -> over t.mem cga_base (cols * 25 * 2)
+   | Text, _, _, cols ->
+     let cell = text_cell t in
+     for row = 0 to text_rows - 1 do
+       for col = 0 to cols - 1 do over t.mem (cell ~row ~col) 2 done
+     done
    | (Cga4 | Cga2), _, _, _ -> over t.mem cga_base 0x4000
    | Planar, _, _, _ -> scan_chars t ~dots:dots_16 (fun a -> h := digest_step !h (char_planes t a))
    | Linear256, _, _, _ -> iter256 t (fun c -> h := digest_step !h c));
