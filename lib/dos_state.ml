@@ -131,7 +131,6 @@ type t = {
   mutable input_continuations : input_continuation list;
   mutable console_pending : string;  (* cooked AH=3F line bytes not yet returned *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
-  mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable pending_irq0 : bool;                (** IF 가 꺼져 못 넣은 틱 *)
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)

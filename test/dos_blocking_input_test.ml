@@ -188,7 +188,8 @@ let test_deferred_trap () =
 
 let test_idle_clock_reaches_irq () =
   let m = machine (bios_read 0 ^ store 0x200 ^ marker ^ exit) in
-  let tick_cycles = Dos_ports.cycles_per_tick m.Dos_state.ports in
+  (* POST 뒤 채널 0 의 카운트 65536 *)
+  let tick_cycles = 0x10000 * Dos_ports.cpu_cycles_per_pit_tick in
   (* Two-cycle idle quanta reach the PIT deadline within this machine-step
      budget, with the remaining half available for the real ROM IRQ code. *)
   let report = Dos_machine.run_until m ~max_steps:tick_cycles

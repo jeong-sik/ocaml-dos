@@ -23,8 +23,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
    console bytes are carried explicitly.
    7: the ports carry PIT channel 2 (mode, access, latch, count register
-   and the counting segment) right after the cycle counter. *)
-let format_version = 7
+   and the counting segment) right after the cycle counter.
+   8: PIT channel 0 is a counter of the same kind, written before channel 2
+   with the cycle of its next output rise (IRQ0); the machine no longer
+   carries the cycle of its last IRQ0. *)
+let format_version = 8
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -242,7 +245,7 @@ let put_frame w f handles =
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; pending_irq0; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; pending_irq0; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
@@ -283,7 +286,6 @@ let write_payload w t =
   put_list w ~what:"input continuation" (put_input_continuation w) input_continuations;
   C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
-  put "last tick" C.count last_tick;
   C.put_bool w pending_irq0;
   put "free base" C.word free_base;
   put "free top" C.word free_top;
@@ -456,7 +458,6 @@ let read_payload r =
           return_control_flags; service_return });
   t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
-  t.last_tick <- get "last tick" C.count;
   t.pending_irq0 <- C.get_bool r;
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;

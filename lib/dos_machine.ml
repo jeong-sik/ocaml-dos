@@ -94,7 +94,7 @@ let create () =
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
+      kbd_wait = false; kbd_requests = 0; pending_irq0 = false;
       ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
@@ -173,12 +173,7 @@ let step_result t =
   if t.exited then Exited
   else begin
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
-    let interval = Dos_ports.cycles_per_tick t.ports in
-    let cyc = Cpu86.cycles t.cpu in
-    if cyc - t.last_tick >= interval then begin
-      t.last_tick <- cyc;
-      t.pending_irq0 <- true
-    end;
+    if Dos_ports.irq0_due t.ports then t.pending_irq0 <- true;
     (* IRQ0 은 IF 가 켜져 있고 PIC 마스크가 풀렸을 때만 들어간다. 못
        넣은 틱은 버리지 않고 들고 있다가 다음 기회에 넣는다 — 버리면
        임계구역이 긴 프로그램에서 시계가 느려진다. HLT 는 그 인터럽트로

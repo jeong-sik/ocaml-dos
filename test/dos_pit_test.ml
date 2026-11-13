@@ -20,8 +20,7 @@ let make () =
   let video = Dos_video.create ~mem in
   Dos_ports.create ~mem ~video
 
-(* 기본 분주비 65536 의 IRQ0 간격에서 PIT 한 틱의 CPU 사이클을 얻는다 *)
-let cycles_per_pit_tick = Dos_ports.cycles_per_tick (make ()) / 0x10000
+let cycles_per_pit_tick = Dos_ports.cpu_cycles_per_pit_tick
 
 let at p tick = Dos_ports.set_now p (tick * cycles_per_pit_tick)
 let ctrl p v = Dos_ports.port_out p 0x43 v
@@ -325,16 +324,102 @@ let test_port61_bits () =
   ctrl p (ch2_word 3);
   check "OUT2 가 높으면 bit 5" (Dos_ports.port_in p 0x61 land 0x20) 0x20
 
+(* ---------- 채널 0 과 IRQ0 ----------
+
+   채널 0 의 OUT 이 오르는 틱마다 [Dos_ports.irq0_due] 가 한 번 참이다.
+   틱 [k] 에서 물으려면 사이클을 [k * cycles_per_pit_tick] 로 둔다. *)
+
+let rd0 p = Dos_ports.port_in p 0x40
+let wr0 p v = Dos_ports.port_out p 0x40 v
+let latched0 p = ctrl p 0x00; let lo = rd0 p in let hi = rd0 p in lo lor (hi lsl 8)
+let due p tick = at p tick; Dos_ports.irq0_due p
+
+(* [ticks] 마다 물어 참이 나온 틱 *)
+let irq0_ticks p ticks = List.filter (fun tick -> due p tick) ticks
+
+let test_channel0_after_post () =
+  let p = make () in
+  (* POST 가 모드 3·65536 을 틱 0 에 실었다. 셈은 다음 틱부터다. *)
+  check_b "켠 직후는 요청 없음" (due p 0) false;
+  check_b "65536 틱 뒤는 아직" (due p 0x10000) false;
+  check_b "65537 틱에 첫 상승" (due p 0x10001) true;
+  check_b "같은 상승을 두 번 세지 않는다" (due p 0x10001) false;
+  check_b "다음 상승 앞" (due p 0x20000) false;
+  check_b "한 주기 뒤 다음 상승" (due p 0x20001) true;
+  (* 모드 3 은 반주기마다 둘씩 센다: 상승 직후 65536(= 0), 그 뒤 FFFEh *)
+  at p 0x20001;
+  check "상승 직후 카운트" (latched0 p) 0x0000;
+  at p 0x20002;
+  check "한 틱 뒤 카운트" (latched0 p) 0xFFFE
+
+let test_channel0_count_load () =
+  let p = make () in
+  at p 1000;
+  (* 모드 2, 하위·상위 바이트, 카운트 100 *)
+  ctrl p 0x34;
+  wr0 p 100;
+  wr0 p 0;
+  (* 1101, 1201, ..., 2001 *)
+  check "카운트를 실은 때부터 센다"
+    (List.length (irq0_ticks p (List.init 1001 (fun i -> 1001 + i))))
+    10;
+  let p = make () in
+  at p 1000;
+  ctrl p 0x34;
+  wr0 p 100;
+  wr0 p 0;
+  check_b "상승은 실은 틱 + 1 + 100" (due p 1100) false;
+  check_b "1101 틱에 상승" (due p 1101) true;
+  at p 1101;
+  check "모드 2 상승 직후 카운트" (latched0 p) 100;
+  check_b "1200 틱은 아직" (due p 1200) false;
+  check_b "다음 상승 1201" (due p 1201) true
+
+(* 제어 워드는 카운터를 멈춘다. 새 카운트를 쓰기 전까지는 상승이 없다. *)
+let test_channel0_control_word_stops () =
+  let p = make () in
+  at p 100;
+  ctrl p 0x34;
+  check_b "POST 의 상승 시점이 지나도 요청 없음" (due p 0x10001) false;
+  check_b "한참 뒤에도 없음" (due p 0x30000) false;
+  wr0 p 10;
+  wr0 p 0;
+  check_b "카운트를 쓰면 다시 센다" (due p (0x30000 + 11)) true
+
+let test_channel0_merges_missed_rises () =
+  let p = make () in
+  at p 0;
+  ctrl p 0x34;
+  wr0 p 10;
+  wr0 p 0;
+  (* 상승 11, 21, 31, 41 을 한 번에 지나친다 — IRR 은 한 비트다 *)
+  check_b "늦게 물어도 한 번" (due p 45) true;
+  check_b "지나친 상승은 쌓이지 않는다" (due p 50) false;
+  check_b "다음 상승은 51" (due p 51) true
+
+let test_channel0_latch_twice () =
+  let p = make () in
+  at p 10;
+  ctrl p 0x00;
+  at p 500;
+  ctrl p 0x00;
+  let lo = rd0 p in
+  let hi = rd0 p in
+  (* 모드 3, 65536: 틱 10 은 셈 시작 뒤 9 펄스 — 65536 - 18 *)
+  check "두 번째 래치는 무시된다" (lo lor (hi lsl 8)) (0x10000 - 18)
+
 let test_channel0_untouched () =
   let p = make () in
   at p 0;
-  ctrl p 0x36;
-  Dos_ports.port_out p 0x40 0x00;
+  ctrl p 0x34;
+  wr0 p 0x00;
   ctrl p (ch2_word 0);
   wr p 0x34;
-  Dos_ports.port_out p 0x40 0x10;
+  wr0 p 0x10;
   wr p 0x12;
-  check "채널 0 분주비" (Dos_ports.cycles_per_tick p) (0x1000 * cycles_per_pit_tick)
+  (* 채널 0 카운트 1000h 를 틱 0 에 실었다 *)
+  check_b "채널 2 를 사이에 써도 채널 0 은 1000h" (due p 0x1000) false;
+  check_b "1001h 틱에 상승" (due p 0x1001) true
 
 let ports_bytes p =
   let w = Dos_snap_codec.writer () in
@@ -488,6 +573,49 @@ let test_next_rise_matches_out () =
         counts)
     [ 0; 1; 2; 3; 4; 5 ]
 
+(* 기계에서: 게스트가 BIOS 틱(0040:006C) 하나를 기다린 뒤 INT 8 을 걸고 채널
+   0 을 모드 2·1000(3E8h)으로 바꾼다. 핸들러는 들어오자마자 채널 0 을 래치해
+   읽는다. IRQ0 이 그 카운트를 실은 때부터 센 OUT 상승이면 막 다시 실린
+   카운트(1000 에서 몇 틱 뺀 값)를 읽는다. 셈을 켠 때부터 세면 첫 BIOS 틱
+   뒤라서 상관없는 값이 나온다. *)
+let test_irq0_handler_sees_reload () =
+  let count_at = 0x2F0 and results = 0x300 and n = 1000 in
+  let prog =
+    "\x31\xc0\x8e\xc0\x26\xa1\x6c\x04"     (* 0100: xor ax,ax; mov es,ax; mov ax,[es:046Ch] *)
+    ^ "\xfb\x26\x3b\x06\x6c\x04\x74\xf9"   (* 0108: sti; l: cmp ax,[es:046Ch]; je l *)
+    ^ "\xfa\xb8\x08\x25\xba\x33\x01\xcd\x21" (* 0110: cli; mov ax,2508h; mov dx,0133h; int 21h *)
+    ^ "\xb0\x34\xe6\x43"                   (* 0119: mov al,34h; out 43h,al *)
+    ^ "\xb0\xe8\xe6\x40\xb0\x03\xe6\x40"   (* 011D: 카운트 03E8h *)
+    ^ "\xfb"                               (* 0125: sti *)
+    ^ "\x80\x3e\xf0\x02\x03\x72\xf9"       (* 0126: cmp byte [02F0h],3; jb 0126h *)
+    ^ "\xfa\xb8\x00\x4c\xcd\x21"           (* 012D: cli; mov ax,4C00h; int 21h *)
+    ^ "\x50\x53"                           (* 0133: push ax; push bx *)
+    ^ "\xb0\x00\xe6\x43"                   (* 채널 0 래치 *)
+    ^ "\xe4\x40\x88\xc4\xe4\x40\x86\xc4"   (* in al,40h; mov ah,al; in al,40h; xchg al,ah *)
+    ^ "\x8a\x1e\xf0\x02\x30\xff\xd1\xe3"   (* mov bl,[02F0h]; xor bh,bh; shl bx,1 *)
+    ^ "\x89\x87\x00\x03"                   (* mov [bx+0300h],ax *)
+    ^ "\xfe\x06\xf0\x02"                   (* inc byte [02F0h] *)
+    ^ "\xb0\x20\xe6\x20\x5b\x58\xcf"       (* EOI; pop bx; pop ax; iret *)
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m prog;
+  ignore (Dos_machine.run_until m ~max_steps:500_000 ~stop:Dos_machine.exited);
+  check_b "IRQ0 세 번 뒤 끝난다" (Dos_machine.exited m) true;
+  let psp = 0x10000 in
+  check "핸들러가 세 번 돌았다" (Dos_machine.mem_read m (psp + count_at)) 3;
+  for i = 0 to 2 do
+    let a = psp + results + (2 * i) in
+    let v = Dos_machine.mem_read m a lor (Dos_machine.mem_read m (a + 1) lsl 8) in
+    (* 상승에서 래치까지 열 명령 안팎 — 64 틱보다 짧다 *)
+    check_b (Printf.sprintf "IRQ0 %d: 래치한 카운트 %d 가 막 다시 실린 값" i v)
+      (v <= n && v > n - 64) true
+  done;
+  (* 첫 BIOS 틱(65537) 뒤 카운트를 싣고, 그 뒤 세 주기 *)
+  let first_tick = 0x10001 in
+  let ticks = Cpu86.cycles m.Dos_state.cpu / cycles_per_pit_tick in
+  check_b "세 주기가 흘렀다" (ticks >= first_tick + (3 * n)) true;
+  check_b "세 주기 남짓만 흘렀다" (ticks < first_tick + (3 * n) + 512) true
+
 let () =
   test_mode0_delay_loop ();
   test_mode0_gate_pauses ();
@@ -504,11 +632,17 @@ let () =
   test_bcd ();
   test_control_word_stops ();
   test_port61_bits ();
+  test_channel0_after_post ();
+  test_channel0_count_load ();
+  test_channel0_control_word_stops ();
+  test_channel0_merges_missed_rises ();
+  test_channel0_latch_twice ();
   test_channel0_untouched ();
   test_snapshot ();
   test_snapshot_refuses_bcd_overflow ();
   test_delay_loop_on_machine ();
   test_next_rise_matches_out ();
+  test_irq0_handler_sees_reload ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n" !failed;
     exit 1

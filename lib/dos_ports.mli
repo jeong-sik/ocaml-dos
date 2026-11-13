@@ -26,9 +26,18 @@ val set_now : t -> int -> unit
 val port_in : t -> int -> int
 val port_out : t -> int -> int -> unit
 
-val cycles_per_tick : t -> int
-(** PIT 채널 0 의 분주비가 정하는 IRQ0 간격(CPU 사이클). 기본 분주비
-    65536 = 18.2Hz. 게임이 음악·부드러운 이동을 위해 이 값을 바꾼다. *)
+val cpu_cycles_per_pit_tick : int
+(** PIT 한 틱(CLK 펄스)의 CPU 사이클. *)
+
+val irq0_due : t -> bool
+(** 지난 물음 뒤로 PIT 채널 0 의 OUT 이 낮음에서 높음으로 바뀌었다 — IRQ0
+    요청이다. 참이면 [set_now] 의 시각 뒤로 다음 상승을 잡는다. 그 사이 여러
+    번 올랐어도 한 번이다(8259 IRR 은 한 비트다). 기계가 매 스텝 [set_now]
+    뒤에 부른다.
+
+    채널 0 은 BIOS POST 뒤의 상태(모드 3, 카운트 65536 = 18.2Hz)로 켜진다.
+    게임이 음악·부드러운 이동을 위해 모드와 카운트를 바꾼다. 상승 간격과
+    시점은 {!Dos_pit} 가 그 카운트를 실은 때부터 센다. *)
 
 val irq0_masked : t -> bool
 (** PIC IMR(포트 0x21) 의 bit0. 마스크된 IRQ 는 전달하지 않는다. *)
