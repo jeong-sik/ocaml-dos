@@ -89,9 +89,8 @@ let create () =
       mem; cpu; ports;
       exited = false; exit_code = 0; video;
       host_files = Hashtbl.create 8;
-      handles = Hashtbl.create 4;
+      handles = Hashtbl.of_seq (List.to_seq (standard_handles ()));
       open_files = Hashtbl.create 4;
-      (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
       kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
