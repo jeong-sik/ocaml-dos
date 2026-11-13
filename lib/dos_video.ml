@@ -60,24 +60,53 @@ let spec = function
      지금 모드가 무엇인지는 mode 로 확인할 수 있다. *)
   | _ -> (Text, 640, 400, 80)
 
+(* 속성 컨트롤러 10h(모드 제어)와 11h(테두리). 10h 의 bit 3 이 서 있으면
+   글자 속성의 bit 7 은 깜박임이고 바탕은 여덟 색이다. 꺼지면 bit 7 이
+   바탕을 밝게 해 바탕도 열여섯 색이 된다. *)
+let attr_mode_control = 0x10
+let attr_overscan = 0x11
+let mode_control_blink = 0x08
+
+(* 모드를 세울 때 10h 에 싣는 값. SeaBIOS vgasrc/stdvgamodes.c 의 actl_*
+   표다. 텍스트 0Ch(9점 선 문자 + 깜박임), 흑백 텍스트 0Eh(흑백 속성을
+   더함), 그래픽 01h, 256색 41h(화소 8비트). *)
+let mono_text_mode = 7
+let mode_control_text = 0x0C
+let mode_control_mono_text = 0x0E
+let mode_control_graphics = 0x01
+let mode_control_256 = 0x41
+
+let mode_control m =
+  match spec m with
+  | Text, _, _, _ ->
+    if m = mono_text_mode then mode_control_mono_text else mode_control_text
+  | (Cga4 | Cga2 | Planar), _, _, _ -> mode_control_graphics
+  | Linear256, _, _, _ -> mode_control_256
+
+(* 속성 팔레트 기본값은 항등 — 색 번호가 곧 DAC 자리다. BIOS 가 심는
+   EGA 호환 값(00,01,...,3F)을 쓰려면 DAC 의 그 자리에도 같은 색이 있어야
+   하는데, 우리 DAC 의 기본값은 0-15 가 CGA 색이다. 둘 중 하나를 고르는
+   문제라 항등을 골랐다 — 팔레트를 건드리지 않는 게임이 바른 색을 본다.
+   10h 만 모드의 값을 싣는다. *)
+let default_attr m =
+  Array.init attr_count (fun i ->
+      if i < 16 then i else if i = attr_mode_control then mode_control m else 0)
+
+let boot_mode = 3
+
 let create ~mem =
   {
     mem;
     planes = Array.init plane_count (fun _ -> Bytes.make plane_size '\000');
     latches = Array.make plane_count 0;
-    mode = 3;
+    mode = boot_mode;
     gc_index = 0;
     gc = Array.make gc_count 0;
     seq_index = 0;
     seq = Array.make seq_count 0;
     attr_index = 0;
     attr_is_data = false;
-    (* 속성 팔레트 기본값은 항등 — 색 번호가 곧 DAC 자리다. BIOS 가
-       심는 EGA 호환 값(00,01,...,3F)을 쓰려면 DAC 의 그 자리에도 같은
-       색이 있어야 하는데, 우리 DAC 의 기본값은 0-15 가 CGA 색이다.
-       둘 중 하나를 고르는 문제라 항등을 골랐다 — 팔레트를 건드리지
-       않는 게임이 바른 색을 본다. *)
-    attr = Array.init attr_count (fun i -> if i < 16 then i else 0);
+    attr = default_attr boot_mode;
     cga_color_select = 0x30;
   }
 
@@ -88,6 +117,13 @@ let text_cols t = let _, _, _, c = spec t.mode in c
 let planes t = t.planes
 let attr_palette t = t.attr
 let set_attr_palette t i v = if i >= 0 && i < attr_count then t.attr.(i) <- v
+let text_blink t = t.attr.(attr_mode_control) land mode_control_blink <> 0
+let set_text_blink t on =
+  let v = t.attr.(attr_mode_control) in
+  t.attr.(attr_mode_control) <-
+    (if on then v lor mode_control_blink else v land lnot mode_control_blink)
+let overscan t = t.attr.(attr_overscan)
+let set_overscan t v = t.attr.(attr_overscan) <- v
 let cga_color_select t = t.cga_color_select
 let set_cga_color_select t v = t.cga_color_select <- v land 0xff
 
@@ -103,7 +139,7 @@ let set_mode t m ~clear =
   (* 모드 세팅 직후의 기본값: 네 평면 모두 쓰기 가능, 비트 전부 통과. *)
   t.seq.(seq_map_mask) <- 0x0F;
   t.gc.(gc_bit_mask) <- 0xFF;
-  Array.iteri (fun i _ -> t.attr.(i) <- (if i < 16 then i else 0)) t.attr;
+  Array.blit (default_attr m) 0 t.attr 0 attr_count;
   t.cga_color_select <- 0x30;
   if clear then
     match spec m with

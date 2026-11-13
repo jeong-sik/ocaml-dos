@@ -377,7 +377,10 @@ let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
   match Dos_video.kind t.video with
-  | Dos_video.Text -> Dos_render.rgb_text t.mem ~cols:(cols t)
+  | Dos_video.Text ->
+    Dos_render.rgb_text t.mem ~cols:(cols t)
+      ~attr:(Dos_video.attr_palette t.video) ~pal
+      ~blink:(Dos_video.text_blink t.video)
   | Dos_video.Cga4 ->
     Dos_render.rgb_cga4 t.mem ~mode:(Dos_video.mode t.video)
       ~color_select:(Dos_video.cga_color_select t.video)
