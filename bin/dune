@@ -1,11 +1,13 @@
 (executable
  (name dosboot)
  (public_name ocaml-dos.dosboot)
+ (modules dosboot)
  (package ocaml-dos)
  (libraries cpu86core dosmachine))
 
 (executable
  (name dosplay)
  (public_name ocaml-dos.dosplay)
+ (modules dosplay frame_out)
  (package ocaml-dos)
  (libraries dosmachine dosterm unix))

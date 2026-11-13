@@ -1,11 +1,15 @@
 type mouse = { x : int; y : int; code : int; released : bool }
 
+type graphics_reply = Loaded | Failed of string
+
 type event =
   | Key of int
   | Unmapped of string
   | Mouse of mouse
   | Text_area of { width : int; height : int }
   | Cells of { cols : int; rows : int }
+  | Graphics of { id : int; reply : graphics_reply }
+  | Device_attributes
   | Quit
 
 (* ---------- 키 ---------- *)
@@ -201,6 +205,8 @@ let csi params final =
        [ Mouse { code = int_or_zero b; x = max 0 (int_or_zero x - 1);
                  y = max 0 (int_or_zero y - 1); released = final = 'm' } ]
      | _ -> [ Unmapped ("CSI " ^ params ^ String.make 1 final) ])
+  (* DA1 답 [CSI ? … c] *)
+  | 'c' when String.length params > 0 && params.[0] = '?' -> [ Device_attributes ]
   | 't' ->
     (match List.map int_or_zero fields with
      | [ 4; height; width ] -> [ Text_area { width; height } ]
@@ -225,6 +231,39 @@ let csi_final s from =
   go from
 
 let is_continuation c = Char.code c land 0xC0 = 0x80
+
+let loaded_message = "OK"
+
+(* [ESC _G 키=값,…;메시지 ESC \] 의 [G] 와 [ESC \] 사이. 키 [i] 가 없으면
+   우리가 id 를 붙여 보낸 명령의 답이 아니니 버린다. *)
+let graphics_reply body =
+  match String.index_opt body ';' with
+  | None -> []
+  | Some k ->
+    let message = String.sub body (k + 1) (String.length body - k - 1) in
+    let id =
+      List.find_map
+        (fun kv ->
+          match String.split_on_char '=' kv with
+          | [ "i"; v ] -> int_of_string_opt v
+          | _ -> None)
+        (String.split_on_char ',' (String.sub body 0 k))
+    in
+    (match id with
+     | Some id ->
+       let reply = if message = loaded_message then Loaded else Failed message in
+       [ Graphics { id; reply } ]
+     | None -> [])
+
+(* [from] 부터 처음 나오는 ST([ESC \])의 자리 *)
+let find_st s from =
+  let n = String.length s in
+  let rec go i =
+    if i + 1 >= n then None
+    else if s.[i] = '\027' && s.[i + 1] = '\\' then Some i
+    else go (i + 1)
+  in
+  go from
 
 let plain c =
   match c with
@@ -255,6 +294,15 @@ let parse s =
           | 'O' ->
             if i + 2 >= n then (List.rev acc, rest i)
             else go (i + 3) (letter_key s.[i + 2] Plain :: acc)
+          (* APC. 터미널이 보내는 것은 그래픽 답([ESC _G])뿐이다. [ESC _] 에
+             다른 글자가 오면 옛 꼴 Alt+_ 다. *)
+          | '_' when i + 2 >= n -> (List.rev acc, rest i)
+          | '_' when s.[i + 2] = 'G' -> (
+            match find_st s (i + 3) with
+            | None -> (List.rev acc, rest i)
+            | Some j ->
+              let evs = graphics_reply (String.sub s (i + 3) (j - i - 3)) in
+              go (j + 2) (List.rev_append evs acc))
           | c -> go (i + 2) (alt_key c :: acc))
       | c when Char.code c >= 0x80 ->
         let rec stop j = if j < n && is_continuation s.[j] then stop (j + 1) else j in
@@ -362,3 +410,14 @@ let image ~id ~width ~height ~cols ~rows rgb =
   Buffer.contents out
 
 let delete_image id = Printf.sprintf "%sa=d,d=I,i=%d,q=2%s" apc_open id apc_close
+
+let temp_file_marker = "tty-graphics-protocol"
+
+(* q=1: 성공은 답하지 않고 실패만 답한다. 실행기는 실패 답을 받으면 직접
+   보내기로 돌아간다. *)
+let image_file ~id ~width ~height ~cols ~rows path =
+  Printf.sprintf "%sa=T,f=24,t=t,s=%d,v=%d,i=%d,c=%d,r=%d,C=1,q=1;%s%s" apc_open width height
+    id cols rows (base64 path) apc_close
+
+let probe_file ~id path =
+  Printf.sprintf "%sa=q,f=24,t=t,s=1,v=1,i=%d;%s%s" apc_open id (base64 path) apc_close
