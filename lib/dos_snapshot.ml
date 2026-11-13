@@ -21,8 +21,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    5: suspended BIOS input services carry their return boundary, and both
    input and EXEC carry their owned ROM service return frame.
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
-   console bytes are carried explicitly. *)
-let format_version = 6
+   console bytes are carried explicitly.
+   11 (7-10 are taken by open PRs, #68): EMS carries the OS handle 0 among
+   its handles, a frame page is shown or empty instead of handle 0 standing
+   for empty, and each handle's page map saved by INT 67h AH=47h. *)
+let format_version = 11
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -53,9 +56,7 @@ let save_error_to_string (Unsaveable message) = "machine cannot be saved: " ^ me
 
 let reg = C.word
 let handle_number = C.range 0 (max_handles - 1)
-let ems_handle_key = C.range Dos_ems.first_handle Dos_ems.max_handle
-(* [ems_mapped] uses handle 0 for "nothing mapped". *)
-let ems_mapped_handle = C.range 0 Dos_ems.max_handle
+let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
 let file_pos = C.count
 let vector = C.byte
 
@@ -74,11 +75,17 @@ let check_consistency t =
         if acc = None && not (Array.for_all page_ok pages) then Some h else acc)
       t.ems_pages None
   in
-  let mapped_ok (h, p) =
-    (h = 0 && p = 0)
-    || (match Hashtbl.find_opt t.ems_pages h with
-        | Some pages -> p < Array.length pages
-        | None -> false)
+  let shown_ok = function
+    | None -> true
+    | Some (h, p) ->
+      (match Hashtbl.find_opt t.ems_pages h with
+       | Some pages -> p < Array.length pages
+       | None -> false)
+  in
+  let saved_ok h m =
+    Hashtbl.mem t.ems_pages h
+    && Array.length m = Dos_ems.frame_pages
+    && Array.for_all shown_ok m
   in
   let return_ok = function
     | Direct_return -> true
@@ -104,9 +111,12 @@ let check_consistency t =
   | Some h -> Error (Printf.sprintf "EMS handle %d has a page that is not 0 or %d bytes" h
                        Dos_ems.page_bytes)
   | None ->
-    if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
-    else if not (Array.for_all mapped_ok t.ems_mapped) then
+    if not (Hashtbl.mem t.ems_pages Dos_ems.os_handle) then Error "the EMS OS handle is missing"
+    else if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
+    else if not (Array.for_all shown_ok t.ems_mapped) then
       Error "an EMS frame page maps a page that does not exist"
+    else if not (Hashtbl.fold (fun h m acc -> acc && saved_ok h m) t.ems_saved true) then
+      Error "an EMS saved page map names a handle or page that does not exist"
     else if not (List.for_all input_ok t.input_continuations) then
       Error "an input continuation has inconsistent state"
     else if not (List.for_all (fun frame -> return_ok frame.parent_service_return) t.exec_frames) then
@@ -127,6 +137,14 @@ let put_list w ~what put l =
 
 let put_pairs w ~what ~a ~b l =
   put_list w ~what (fun (x, y) -> C.put w ~what a x; C.put w ~what b y) l
+
+(* An EMS frame page: shown (handle, logical page) or empty. *)
+let put_shown w = function
+  | None -> C.put_bool w false
+  | Some (h, p) ->
+    C.put_bool w true;
+    C.put w ~what:"EMS mapping" ems_handle_key h;
+    C.put w ~what:"EMS mapping" C.word p
 
 let put_service_return w = function
   | Direct_return -> C.put_bool w false
@@ -246,7 +264,7 @@ let write_payload w t =
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped;
+        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved;
         mouse } = t
   in
   let put what r v = C.put w ~what r v in
@@ -299,7 +317,12 @@ let write_payload w t =
       put "EMS handle" ems_handle_key k;
       put_list w ~what:"EMS page" (C.put_bytes w) (Array.to_list pages))
     (sorted_bindings ems_pages);
-  put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
+  put_list w ~what:"EMS saved map"
+    (fun (k, m) ->
+      put "EMS saved map" ems_handle_key k;
+      put_list w ~what:"EMS saved mapping" (put_shown w) (Array.to_list m))
+    (sorted_bindings ems_saved);
+  put_list w ~what:"EMS mapping" (put_shown w) (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
         mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
         mouse_handler_off } = mouse
@@ -340,6 +363,19 @@ let get_list r ~what get =
 
 let get_pairs r ~what ~a ~b =
   get_list r ~what (fun () -> let x = C.get r ~what a in let y = C.get r ~what b in (x, y))
+
+let get_shown r =
+  if C.get_bool r then begin
+    let h = C.get r ~what:"EMS mapping" ems_handle_key in
+    let p = C.get r ~what:"EMS mapping" C.word in
+    Some (h, p)
+  end
+  else None
+
+let get_frame r ~what =
+  let m = Array.of_list (get_list r ~what (fun () -> get_shown r)) in
+  if Array.length m <> Dos_ems.frame_pages then C.fail "EMS frame size differs";
+  m
 
 let fill_table tbl bindings =
   Hashtbl.reset tbl;
@@ -492,9 +528,12 @@ let read_payload r =
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in
          (k, Array.of_list (get_list r ~what:"EMS page" (fun () -> C.get_bytes r)))));
-  let mapped = get_pairs r ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word in
-  if List.length mapped <> Array.length t.ems_mapped then C.fail "EMS frame size differs";
-  List.iteri (fun i p -> t.ems_mapped.(i) <- p) mapped;
+  fill_table t.ems_saved
+    (get_list r ~what:"EMS saved map" (fun () ->
+         let k = get "EMS saved map" ems_handle_key in
+         (k, get_frame r ~what:"EMS saved mapping")));
+  let mapped = get_frame r ~what:"EMS mapping" in
+  Array.blit mapped 0 t.ems_mapped 0 (Array.length mapped);
   let m = t.mouse in
   m.mouse_present <- C.get_bool r;
   m.mouse_x <- get "mouse x" C.any;
