@@ -176,7 +176,9 @@ let () =
    FCB and reads one record, opens a handle, allocates two EMS pages and
    leaves both mapped with a byte written through the frame, latches PIT
    counter 0, then CLI and spins, so the next timer tick stays pending.
-   The host attaches the mouse at (123, 45) with the left button down.
+   The host attaches the mouse at (123, 45) with the left button down; the
+   press is logged at (120, 40), its 8x8 cell in mode 3. Setting mode 12h
+   then moves the cursor to the middle of 640x480 and keeps the log.
 
    Its round trip also compares the restored fields to the original's one by
    one, so a reader that drops or swaps a field fails by name even where the
@@ -296,8 +298,9 @@ let () =
   pre "an FCB one record in" (List.map (fun (_, (_, p)) -> p) (sorted_bindings a.fcbs) = [ 128 ]);
   pre "two names left in the find queue" (List.length a.find_queue = 2);
   pre "handle 5 open" (Hashtbl.mem a.handles 5);
-  pre "the mouse at (123, 45), button 1"
-    (a.mouse.mouse_x = 123 && a.mouse.mouse_y = 45 && a.mouse.mouse_buttons = 1);
+  pre "the mouse at (320, 240) after mode 12h, button 1, press logged at (120, 40)"
+    (a.mouse.mouse_x = 320 && a.mouse.mouse_y = 240 && a.mouse.mouse_buttons = 1
+     && a.mouse.mouse_presses.(0).last_x = 120 && a.mouse.mouse_presses.(0).last_y = 40);
   let saved = save_exn a in
   let b = restore_exn saved in
   same_fields "rich" a b;
@@ -375,6 +378,26 @@ let () =
   check "EMS: 254 handles" (Hashtbl.length t.Dos_state.ems_pages = 254);
   ignore (restore_exn (save_exn t))
 
+(* The payload ends with the two mouse ranges, each a low and a high
+   word of eight bytes. A low end above the high end is refused at restore,
+   even with the checksum fixed. *)
+let () =
+  let t = Dos_machine.create () in
+  let saved = save_exn t in
+  let header_len = magic_len + 8 + 32 + 16 in
+  let b = Bytes.of_string saved in
+  let x_low_at = Bytes.length b - (4 * 8) in
+  check "the crafted bytes see the x range 0..639"
+    (Bytes.get_int64_be b x_low_at = 0L && Bytes.get_int64_be b (x_low_at + 8) = 639L);
+  Bytes.set_int64_be b x_low_at 640L;
+  let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
+  Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
+  match Dos_snapshot.restore (Bytes.to_string b) with
+  | Error (Dos_snapshot.Corrupt m) ->
+    check "a mouse range with its ends crossed is refused" (m = "mouse range low above high")
+  | Ok _ -> check "a mouse range with its ends crossed is refused at restore" false
+  | Error e -> check ("crossed mouse range: " ^ Dos_snapshot.error_to_string e) false
+
 (* Inconsistent EMS state: refused by save, and by restore when the bytes
    are crafted past save. *)
 let () =
@@ -395,18 +418,16 @@ let () =
   (* The payload ends with the frame mapping (count, then four pairs) and
      the mouse: 105 bytes up to its callback registration (the default
      cursors take a flag, two kinds and two text masks), then three ints
-     for each of six button logs, then two ranges of one byte each while
-     unset. Point frame page 2 at handle 9, which does not exist, and fix
-     the checksum so only the consistency check can refuse. *)
-  check "the crafted bytes assume no mouse range"
-    (t.mouse.mouse_range_x = None && t.mouse.mouse_range_y = None);
+     for each of six button logs, then two ranges of two ints each. Point
+     frame page 2 at handle 9, which does not exist, and fix the checksum
+     so only the consistency check can refuse. *)
   check "the crafted bytes assume the default cursors"
     (t.mouse.mouse_graphics_cursor = Dos_state.Default_arrow
      && t.mouse.mouse_text_cursor = Dos_state.default_text_cursor);
   let header_len = magic_len + 8 + 32 + 16 in
   let button_logs = 2 * Dos_state.mouse_button_count in
   let cursors_len = 8 + 8 + 8 + (2 * 8) in
-  let mouse_len = 1 + (3 * 8) + cursors_len + (5 * 8) + (button_logs * 3 * 8) + 2 in
+  let mouse_len = 1 + (3 * 8) + cursors_len + (5 * 8) + (button_logs * 3 * 8) + (2 * 2 * 8) in
   let at = String.length saved - mouse_len - (4 * 16) + (2 * 16) in
   let b = Bytes.of_string saved in
   Bytes.set_int64_be b at 9L;
