@@ -147,6 +147,12 @@ let attack_bukhae =
     wait "누가 군량을 가져 갑니까(1-3)" (region 110 300 300 30) "cc1b3b8810294397939f095e8a0eb07d";
     press "유비가 군량을" [ "1"; "enter" ];
     wait "전투 명령(1-9)" (region 325 290 170 55) "354891a0723d04960d63da6194d4caba";
+    (* The question under the menu is typed out a letter at a time, like the
+       first turn's. A digit pressed before it ends only skips the typing:
+       with IRQ0 counted from the count write (#71) the 8 went there and the
+       battle waited for orders on day 1. x 325..428 stops before the cursor
+       at 432. *)
+    wait "유비님, 명령을(1-9)?" (region 325 350 104 40) "56e20b46494745218776b16612dda797";
     (* A battle menu opens on its digit alone; an Enter after it would close
        the menu again. *)
     press "8. 위임, Y" [ "8"; "y" ];
