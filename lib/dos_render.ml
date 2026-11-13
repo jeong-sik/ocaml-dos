@@ -78,6 +78,12 @@ let blit img ~width ~x ~y (r, g, b) =
   Bytes.set img (i + 1) (Char.chr g);
   Bytes.set img (i + 2) (Char.chr b)
 
+(* 시퀀서가 화면을 끄면 그림 전체가 DAC 0 번 색이다. *)
+let rgb_solid ~width ~height pal =
+  let r, g, b = rgb_of_dac pal 0 in
+  String.init (width * height * 3) (fun i ->
+      Char.chr (match i mod 3 with 0 -> r | 1 -> g | _ -> b))
+
 (* 텍스트: 셀마다 8x8 글리프를 세로로 두 줄씩 찍는다. 한 번만 그리면
    위쪽 절반만 차고 아래가 검게 남는다. 폰트는 1비트/행 — 최상위 비트가
    왼쪽이다. 바탕색은 상위 니블의 아래 세 비트만 쓴다. 네 번째 비트는

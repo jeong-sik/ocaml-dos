@@ -376,6 +376,11 @@ let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
 
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
+  if Dos_video.screen_blanked t.video then begin
+    let width, height = Dos_video.dims t.video in
+    Dos_render.rgb_solid ~width ~height pal
+  end
+  else
   match Dos_video.kind t.video with
   | Dos_video.Text -> Dos_render.rgb_text t.mem ~cols:(cols t)
   | Dos_video.Cga4 ->
