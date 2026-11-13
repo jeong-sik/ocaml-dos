@@ -441,8 +441,7 @@ let read_payload r =
   t.psp_seg <- get "psp" C.word;
   t.kbd_wait <- C.get_bool r;
   t.ext_scan_pending <- get "pending extended scan" C.byte;
-  t.input_continuations <-
-    get_list r ~what:"input continuation" (fun () ->
+  set_input_continuations t @@ get_list r ~what:"input continuation" (fun () ->
         let request = get_input_request r in
         let return_cs = get "input return boundary" C.word in
         let return_ip = get "input return boundary" C.word in

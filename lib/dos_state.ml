@@ -174,6 +174,30 @@ let wr16 t a v = wr8 t a v; wr8 t (a + 1) (v lsr 8)
 let phys_mask = 0xfffff
 let physical seg off = ((seg lsl 4) + off) land phys_mask
 
+(* ---------- DOS 데이터 영역 ----------
+
+   MS-DOS 4.0 CONST2.ASM SWAP_START 의 앞 두 바이트: ErrorMode(INT 24h
+   처리 중), INDOS(DOS 안에 있는 깊이). PRINT 같은 TSR 은 ErrorMode 가
+   INDOS 바로 앞이라고 믿는다. INT 21h AH=34h 가 INDOS 주소를 준다.
+   게스트 메모리에 두어 스냅숏이 메모리째 싣는다. 자리는 IVT·BDA 와 첫
+   PSP(1000h) 사이의 빈 곳이다.
+
+   INDOS 는 [input_continuations] 에서 나온다. DISP.ASM 은 01h..0Ch 를
+   포함한 거의 모든 기능에서 INDOS 를 올리고, 끝나면 내린다. 이 기계의
+   서비스는 차단 읽기 말고는 게스트 코드를 끼우지 않고 끝나니, 게스트가
+   볼 수 있는 값은 기다리는 DOS 읽기의 수다. INT 24h 를 모델링하지 않아
+   ErrorMode 는 늘 0 이다. *)
+let sda_seg = 0x0070
+let sda_error_mode = 0
+let sda_in_dos = 1
+let byte_max = 0xFF
+
+let set_input_continuations t waits =
+  t.input_continuations <- waits;
+  let in_dos = List.length (List.filter (fun w ->
+      match w.request with Dos_input _ -> true | Bios_key -> false) waits) in
+  wr8 t (physical sda_seg sda_in_dos) (min in_dos byte_max)
+
 let finish_service_return t = function
   | Direct_return -> ()
   | Interrupt_return { frame_ss; frame_sp; status_mask } ->
