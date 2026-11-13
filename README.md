@@ -71,7 +71,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
-  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
+  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, InDOS 주소(34h), 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
 - **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), PIC 마스크,
   VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
@@ -216,7 +216,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | 모듈 | 맡은 것 |
 |---|---|
 | `Cpu86` | 8086/186 코어. 메모리와 포트는 콜백으로 바깥에 있다 |
-| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계 |
+| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS) |
 | `Dos_ports` | 하드웨어 포트 — PIT, PIC, DAC, CRTC, 스피커 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/16h/1Ah/33h |

@@ -980,6 +980,10 @@ let service_immediate t =
       ok t
     end
     else fail t 6
+  | 0x34 ->
+    (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
+    Cpu86.set_seg cpu 0 sda_seg;
+    Cpu86.set_reg16 cpu 3 sda_in_dos
   | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg
   | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
