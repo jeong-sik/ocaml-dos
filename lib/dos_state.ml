@@ -149,9 +149,14 @@ type t = {
   mutable epoch_sec : int;
   (* EMS 4.0 스텁(Dos_ems)의 상태 *)
   ems_pages : (int, Bytes.t array) Hashtbl.t;
-        (** 핸들(1 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB) *)
-  mutable ems_mapped : (int * int) array;
-        (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지) *)
+        (** 핸들(0 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB).
+            운영체제 핸들 0 은 늘 있다. *)
+  ems_mapped : (int * int) option array;
+        (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지). [None] 은
+            비어 있다. *)
+  ems_saved : (int, (int * int) option array) Hashtbl.t;
+        (** 핸들 → AH=47h 가 저장한 [ems_mapped]. AH=48h 가 꺼내 간다.
+            있는 페이지만 가리킨다. *)
   mouse : mouse;
 }
 

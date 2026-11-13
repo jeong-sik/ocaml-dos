@@ -100,8 +100,9 @@ let create () =
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
-      ems_pages = Hashtbl.create 2;
-      ems_mapped = Array.make 4 (0, 0);
+      ems_pages = Dos_ems.boot_handles ();
+      ems_mapped = Array.make Dos_ems.frame_pages None;
+      ems_saved = Hashtbl.create 1;
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
