@@ -71,11 +71,8 @@ let apply st = function
   | Dosterm.Load_state -> (
     match st.state_file with
     | Some q ->
-      Option.iter
-        (fun m ->
-          st.m <- m;
-          st.redraw <- true)
-        (Quicksave.load q)
+      (* 화면이 다르면 프레임 지문이 달라 다시 그린다. *)
+      Option.iter (fun m -> st.m <- m) (Quicksave.load q)
     | None -> st.unmapped <- st.unmapped + 1)
   | Dosterm.Text_area { width; height } ->
     st.area <- Some (width, height);
