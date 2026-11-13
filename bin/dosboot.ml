@@ -135,7 +135,7 @@ let () =
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
-  let feed_sync = ref "" in
+  let feed_sync = ref "" and cpu_mhz = ref None in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -157,6 +157,8 @@ let () =
       ("--type", Arg.Set_string typed,
        "TEXT  글자를 차례로 입력 (US 자판 스캔 코드)");
       ("--mouse", Arg.Set_string mouse, "X,Y,BUTTONS  마우스를 붙이고 위치를 준다");
+      ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
+       "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다");
       ("--clock", Arg.Set_string clock,
        "Y-M-D,H:M:S  게스트가 보는 기준시각 (기본 1990-1-1,8:0:0)");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
@@ -176,7 +178,20 @@ let () =
       ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
-  let m = Dos_machine.create () in
+  let speed =
+    match !cpu_mhz with
+    | None -> Dos_ports.pc_speed
+    | Some mhz -> (
+      match Dos_ports.speed_of_mhz mhz with
+      | Ok speed ->
+        Printf.eprintf "cpu: %.2f MHz (8086 cycles)\n"
+          (float_of_int (Dos_ports.speed_hz speed) /. 1e6);
+        speed
+      | Error e ->
+        prerr_endline ("bad --cpu-mhz: " ^ e);
+        exit 2)
+  in
+  let m = Dos_machine.create ~speed () in
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
