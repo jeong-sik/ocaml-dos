@@ -183,11 +183,15 @@ let test_trigger_irq () =
   check "not before" (not (advance_to r (due - 1)));
   check "F2h raises the IRQ" (advance_to r due);
   check "once" (not (advance_to r (due + 1)));
+  check "the line stays high" (Dos_sb.irq_line r.sb);
   cmd r [ 0xF2 ];
   check "an unacknowledged IRQ swallows the next" (not (advance_to r (r.now + us 10)));
   ignore (inp r status_port);
+  check "22Eh drops the line" (not (Dos_sb.irq_line r.sb));
   cmd r [ 0xF2 ];
-  check "22Eh acknowledges" (advance_to r (r.now + us 10))
+  check "22Eh acknowledges" (advance_to r (r.now + us 10));
+  cmd r [ 0x1C ];
+  check "1Ch drops the line" (not (Dos_sb.irq_line r.sb))
 
 let test_single_block () =
   let r = rig () in
@@ -220,6 +224,9 @@ let test_auto_init () =
   set_rate r;
   cmd r [ 0x48; 0x02; 0x00; 0x1C ];
   check "IRQ every three bytes" (irq_steps r 3 = [ 3 ]);
+  cmd r [ 0x14; 0x00; 0x00 ];
+  check "a new transfer drops the line" (not (Dos_sb.irq_line r.sb));
+  cmd r [ 0xDA; 0x48; 0x02; 0x00; 0x1C ];
   ignore (inp r status_port);
   check "and again" (irq_steps r 3 = [ 3 ]);
   check "lost without 22Eh" (irq_steps r 3 = []);

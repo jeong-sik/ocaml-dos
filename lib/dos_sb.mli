@@ -54,6 +54,12 @@ val due_at : t -> int
 (** The CPU cycle of the DSP's next event, [max_int] when none is
     scheduled. *)
 
+val irq_line : t -> bool
+(** The DSP holds its IRQ line high: raised and not yet acknowledged
+    through 22Eh, a reset or a new transfer. A caller whose PIC request
+    has not been taken yet drops it when the line falls (DOSBox
+    [PIC_DeActivateIRQ]). *)
+
 val advance : t -> now:int -> dma:Dos_dma.t -> mem:Bytes.t -> bool
 (** Runs every event due by [now]: the end of a reset, timer IRQs, and the
     bytes of the playing block, taken from DMA channel 1. [true] when the

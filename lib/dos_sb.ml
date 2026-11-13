@@ -256,6 +256,8 @@ let port_in t p =
   else if p = read_status_port then Some (read_status t)
   else None
 
+let irq_line t = t.irq_high
+
 let due_at t =
   let reset = match t.reset with Releasing at -> at | Running | Held -> max_int in
   let timer = match t.timers with at :: _ -> at | [] -> max_int in
