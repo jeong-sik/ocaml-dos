@@ -8,6 +8,6 @@
 (executable
  (name dosplay)
  (public_name ocaml-dos.dosplay)
- (modules dosplay frame_out quicksave terminal)
+ (modules dosplay frame_out host_file quicksave save_dir terminal)
  (package ocaml-dos)
  (libraries dosmachine dosterm unix))

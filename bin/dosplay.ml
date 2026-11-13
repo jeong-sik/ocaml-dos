@@ -8,11 +8,6 @@
    프레임을 건너뛸 뿐 게스트 시간은 밀리지 않는다. 호스트가 에뮬레이션
    자체를 못 따라가면 느려질 뿐 빨라지지는 않는다. 바뀐 프레임만 보낸다. *)
 
-let read_file path =
-  let ic = open_in_bin path in
-  Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
-      really_input_string ic (in_channel_length ic))
-
 (* PIT 입력 클록(Hz). CPU 클록은 그 [Dos_ports.cpu_cycles_per_pit_tick] 배다. *)
 let pit_hz = 1_193_182
 let cpu_hz = pit_hz * Dos_ports.cpu_cycles_per_pit_tick
@@ -174,12 +169,12 @@ let mount_dir m dir =
     (fun name ->
       let path = Filename.concat dir name in
       if Sys.file_exists path && not (Sys.is_directory path) then
-        Dos_machine.mount_file m (String.uppercase_ascii name) (read_file path))
+        Dos_machine.mount_file m (String.uppercase_ascii name) (Host_file.read path))
     (Sys.readdir dir)
 
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
-  let fps = ref default_fps and mouse = ref true and state = ref "" in
+  let fps = ref default_fps and mouse = ref true and state = ref "" and save_dir = ref "" in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
@@ -189,7 +184,9 @@ let () =
       ("--fps", Arg.Set_int fps, "N  초당 프레임(기본 30)");
       ("--no-mouse", Arg.Clear mouse, "  마우스 드라이버를 붙이지 않는다");
       ("--state", Arg.Set_string state,
-       "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다") ]
+       "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다");
+      ("--save-dir", Arg.Set_string save_dir,
+       "DIR  게임이 바꾼 파일을 끝날 때 여기에 쓴다. 시작할 때 여기 파일을 --dir 위에 싣는다") ]
   in
   Arg.parse specs (fun a -> raise (Arg.Bad ("unexpected " ^ a)))
     "dosplay [--dir DIR] (--com PATH | --exe PATH | --state FILE) — Kitty 그래픽 터미널에서 실행, F12 로 끝";
@@ -197,6 +194,16 @@ let () =
     prerr_endline "dosplay needs a terminal on stdin and stdout";
     exit 2
   end;
+  let saves =
+    if !save_dir = "" then None
+    else
+      match Save_dir.prepare !save_dir with
+      | Ok () -> Some !save_dir
+      | Error e ->
+        prerr_endline ("cannot use --save-dir: " ^ e);
+        exit 2
+  in
+  let originals = ref [] in
   let fresh () =
     let m = Dos_machine.create () in
     List.iter (mount_dir m) (List.rev !dirs);
@@ -205,11 +212,13 @@ let () =
         match String.index_opt spec '=' with
         | Some i ->
           Dos_machine.mount_file m (String.sub spec 0 i)
-            (read_file (String.sub spec (i + 1) (String.length spec - i - 1)))
+            (Host_file.read (String.sub spec (i + 1) (String.length spec - i - 1)))
         | None -> prerr_endline ("bad --mount (want NAME=PATH): " ^ spec))
       (List.rev !mounts);
-    if !com <> "" then Dos_machine.load_com m (read_file !com)
-    else Dos_machine.load_exe m (read_file !exe);
+    originals := Dos_machine.mounted_names m;
+    Option.iter (mount_dir m) saves;
+    if !com <> "" then Dos_machine.load_com m (Host_file.read !com)
+    else Dos_machine.load_exe m (Host_file.read !exe);
     if !mouse then Dos_machine.attach_mouse m;
     m
   in
@@ -234,7 +243,20 @@ let () =
       redraw = true; quit = false; unmapped = 0; guest_cycles = 0 }
   in
   watch_signals ();
-  let wall = Terminal.with_terminal o (fun () -> play st) in
+  (* 이어 할 때(--state 만)는 상태 파일이 기준이라 DIR 을 덮어 싣지 않는다.
+     비교는 어느 쪽이든 시작한 기계와 한다. *)
+  let saved = Option.map (fun dir -> Save_dir.create dir ~originals:!originals m) saves in
+  (* 에뮬레이터가 예외로 멈춰도 게임이 쓴 파일은 남긴다. *)
+  let write_back () =
+    Option.iter
+      (fun sd ->
+        Save_dir.write_back sd st.m;
+        Save_dir.report sd)
+      saved
+  in
+  let wall =
+    Fun.protect ~finally:write_back (fun () -> Terminal.with_terminal o (fun () -> play st))
+  in
   (match !stop_signal with
    | Some name -> Printf.eprintf "stopped by %s\n" name
    | None ->
