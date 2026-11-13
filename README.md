@@ -69,7 +69,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
   최상위 비트가 왼쪽 점인 IBM 순서다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
+  seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah, 58h first·best·last fit),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, InDOS 주소(34h), 확장 에러(59h),
   verify 플래그(2Eh/54h), 스위치 문자(37h), 벡터 읽기·쓰기, IOCTL, DOS 버전 5.0
@@ -216,7 +216,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | 모듈 | 맡은 것 |
 |---|---|
 | `Cpu86` | 8086/186 코어. 메모리와 포트는 콜백으로 바깥에 있다 |
-| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch) |
+| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch·AllocMethod) |
 | `Dos_error` | INT 21h 에러 코드의 class·action·locus 와 기능마다 돌려줄 수 있는 코드 (MS-DOS 4.0 `MS_TABLE.ASM`) |
 | `Dos_ports` | 하드웨어 포트 — PIT, PIC, DAC, CRTC, 스피커 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
