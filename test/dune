@@ -73,3 +73,7 @@
 (test
  (name dos_unserved_test)
  (libraries dosmachine))
+
+(test
+ (name dos_int15_test)
+ (libraries dosmachine))

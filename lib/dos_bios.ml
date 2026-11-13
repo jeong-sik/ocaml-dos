@@ -14,13 +14,15 @@ open Dos_state
    나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
    조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
    12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type bios_service =
+  | Video | Equipment | Memory_size | System | Keyboard | Time_of_day | Mouse
 type host_vector = Bios of bios_service | Dos_terminate | Dos_call | Dos_keep | Ems
 
 let host_vector = function
   | 0x10 -> Some (Bios Video)
   | 0x11 -> Some (Bios Equipment)
   | 0x12 -> Some (Bios Memory_size)
+  | 0x15 -> Some (Bios System)
   | 0x16 -> Some (Bios Keyboard)
   | 0x1A -> Some (Bios Time_of_day)
   | 0x20 -> Some Dos_terminate
@@ -402,6 +404,24 @@ let clock t =
 (* 마우스는 하네스가 움직인다. 기본은 장착 — KOEI 계열 게임은 부팅에서
    AX=0 으로 드라이버를 검사하고, 없으면 키보드 모드로 강제한다.
    AX=0x0C 로 건 핸들러는 Dos_machine.set_mouse 가 이벤트와 함께 부른다. *)
+(* INT 15h 시스템 서비스. 88h 는 1MB 위 확장 메모리 KB 인데 이 기계 RAM 은
+   1MB 라 0 이다. 4Fh 는 INT 09 가 부르는 키보드 가로채기로, 기본 처리기는
+   CF=1(그대로 처리)·AL 그대로 돌려준다. 나머지는 AH=86h·CF=1(지원하지 않는
+   기능)이다. C0h 에 이렇게 답하는 것은 PC AT 1984/01/10 BIOS 다. 출처는
+   RBIL INT 15/AH=88h(rb-1529), 4Fh(rb-1387), C0h(rb-1594). *)
+let extended_memory_kb = 0
+let unsupported_function = 0x86
+
+let system t =
+  let cpu = t.cpu in
+  match Cpu86.reg8 cpu 4 with
+  | 0x88 -> Cpu86.set_reg16 cpu 0 extended_memory_kb; set_cf t false
+  | 0x4F -> set_cf t true
+  | _ ->
+    report_unserved t No_function ~vector:0x15;
+    Cpu86.set_reg8 cpu 4 unsupported_function;
+    set_cf t true
+
 let mouse t =
   let cpu = t.cpu in
   let m = t.mouse in
@@ -443,4 +463,5 @@ let service t s =
   | Equipment -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410); Completed
   | Memory_size -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413); Completed
   | Time_of_day -> clock t; Completed
+  | System -> system t; Completed
   | Mouse -> mouse t; Completed

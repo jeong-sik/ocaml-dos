@@ -2,7 +2,8 @@
     INT 10h(비디오)·11h(장비)·12h(메모리)·16h(키보드)·1Ah(시각)·
     33h(마우스) 서비스. *)
 
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type bios_service =
+  | Video | Equipment | Memory_size | System | Keyboard | Time_of_day | Mouse
 type host_vector = Bios of bios_service | Dos_terminate | Dos_call | Dos_keep | Ems
 
 val host_vector : int -> host_vector option
