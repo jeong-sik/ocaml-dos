@@ -167,6 +167,36 @@ dune exec --root . bin/dosboot.exe -- --demo ega --steps 2000000 --out /tmp/ega
 
 게임 이미지는 저장소에 넣지 않는다.
 
+## 터미널에서 하기
+
+`dosplay` 는 사람이 직접 하는 실행기다. 화면은 Kitty 그래픽 프로토콜로
+그리고, 입력은 Kitty 키보드 프로토콜과 SGR 픽셀 마우스로 받는다. Ghostty
+와 kitty 처럼 두 프로토콜을 아는 터미널에서 돈다. F12 로 끝낸다.
+
+```sh
+dune build --root . --profile release
+./_build/default/bin/dosplay.exe --dir /path/to/game --exe /path/to/game/GAME.EXE
+```
+
+- `--dir DIR` 은 폴더의 파일을 모두 대문자 이름으로 마운트한다. 하위
+  폴더는 건너뛴다.
+- 게스트는 벽시계에 맞춰 4.77MHz 로 돈다. 화면은 바뀐 프레임만 초당
+  `--fps`(기본 30) 번까지 보낸다. 그리기가 늦어도 게스트 시간은 밀리지
+  않는다.
+- 끝날 때 stderr 에 게스트 시간과 벽시계 시간을 찍는다. 게스트 시간이
+  많이 짧으면 이 호스트가 에뮬레이션을 못 따라간 것이다. dev 빌드는
+  느리니 release 로 빌드한다.
+- 키는 누르는 순간 BIOS 워드 하나가 된다(누름과 뗌을 함께 넣는다).
+  - 받는 키: 글자·숫자, Ctrl·Alt+글자, F1~F10(Shift·Ctrl·Alt 포함),
+    방향키·Home·End·PgUp·PgDn·Ins·Del, 키패드.
+  - BIOS 워드가 없는 키는 버린다: US 자판 표에 없는 구두점, F11,
+    수식이 붙은 방향키. 끝날 때 몇 개를 버렸는지 알린다.
+- 마우스는 그림 위의 픽셀을 드라이버 가상 화면으로 옮긴다. 크기는
+  DOSBox-X 와 같다: 13h·0Dh 는 640x200, 12h 는 640x480, 텍스트는
+  열×8 x 200.
+  - 게임이 INT 33h 07h·08h 로 정한 범위는 아직 따르지 않는다.
+- 화면은 터미널 왼쪽 위의 4:3 상자에 그린다.
+
 ## 바깥에서 몰기
 
 ```ocaml
@@ -225,6 +255,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
 | `Dos_snapshot` | 기계 전체를 바이트로 저장하고 새 기계로 되살린다. 형식 번호가 다르면 거절하고, 코어 digest 는 보여 주기만 한다 |
 | `Dos_snap_codec` | 스냅숏의 정수·불·바이트 인코딩. 쓸 때와 읽을 때 같은 범위를 검사한다 — 되살릴 수 없는 스냅숏은 저장 단계에서 거절된다 |
+| `Dosterm` (`term/`) | 터미널 바이트를 키·마우스 사건으로, 프레임을 Kitty 그래픽 이스케이프로. `dosplay` 가 쓴다 |
 | `Dos_core_identity` | 이 빌드가 어떤 코어인지 — `lib/` 소스의 digest 를 빌드가 계산해 넣는다 (`ocaml-dos.core-identity`) |
 
 어떤 커밋의 digest 인지 알고 싶으면 그 커밋을 받아 `dune build` 하고
