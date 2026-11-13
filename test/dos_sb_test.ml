@@ -394,6 +394,57 @@ let test_machine_snapshot () =
        | Error e -> check ("restore: " ^ Dos_snapshot.error_to_string e) false
        | Ok r -> check "restored machine without the card" (Dos_ports.sound_blaster (ports r) = None))
 
+(* IRQ 7 before the guest hooks it lands in the BIOS default handler,
+   which sends the EOI (SeaBIOS handle_hwpic1). A handler hooked later
+   still gets the next one:
+     sti; F2h; spin; hook INT 0Fh; in al,22Eh; F2h; wait for [flag]; int 20h *)
+let unhooked_then_hooked =
+  "\xFB\xBA\x2C\x02\xB0\xF2\xEE\xB9\xC8\x00\xE2\xFE\xB8\x0F\x25\xBA\x2B\x01\xCD\x21"
+  ^ "\xBA\x2E\x02\xEC\xB2\x2C\xB0\xF2\xEE\xB9\xFF\xFF\x80\x3E\x3D\x01\x00\x75\x02\xE2"
+  ^ "\xF7\xCD\x20\x50\x52\xBA\x2E\x02\xEC\x2E\xFE\x06\x3D\x01\xB0\x20\xE6\x20\x5A\x58"
+  ^ "\xCF\x00"
+
+let unhooked_flag = 0x13D
+
+(* OCW3 0Bh: the next read of 20h is the in-service register. *)
+let in_service pic =
+  Dos_pic.write_command pic 0x0B;
+  let isr = Dos_pic.read_command pic in
+  Dos_pic.write_command pic 0x0A;
+  isr
+
+let test_machine_unhooked_irq () =
+  let m = Dos_machine.create ~sound_blaster:true () in
+  Dos_machine.load_com m unhooked_then_hooked;
+  let base = Cpu86.seg m.Dos_state.cpu 3 lsl 4 in
+  Dos_machine.run m ~max_steps:300_000;
+  check_int "the hooked handler got the second IRQ 7"
+    (Char.code (Bytes.get m.Dos_state.mem (base + unhooked_flag))) 1;
+  check_int "nothing left in service" (in_service (Dos_ports.pic (ports m))) 0
+
+(* The default handler alone: with IRQ 7 in service, a software INT 0Fh
+   sends the EOI and changes nothing else -- AX, the BIOS tick, memory.
+     cli; mov ax,1234h; int 0Fh; mov [0200h],ax; int 20h *)
+let call_default = "\xFA\xB8\x34\x12\xCD\x0F\xA3\x00\x02\xCD\x20"
+
+let test_default_handler () =
+  let m = Dos_machine.create () in
+  let pic = Dos_ports.pic (ports m) in
+  let ivt v = Dos_state.rd16 m (v * 4) lor (Dos_state.rd16 m ((v * 4) + 2) lsl 16) in
+  List.iter
+    (fun v -> check_int (Printf.sprintf "IRQ vector %02Xh is the default handler" v) (ivt v) (ivt 0x0F))
+    [ 0x0A; 0x0B; 0x0C; 0x0D; 0x0E ];
+  check "software vectors keep the plain IRET" (ivt 0x0F <> ivt 0x70);
+  Dos_pic.raise_irq pic Dos_pic.Sound_blaster;
+  Dos_pic.acknowledge pic Dos_pic.Sound_blaster;
+  let tick = Dos_state.rd16 m 0x46C in
+  Dos_machine.load_com m call_default;
+  let base = Cpu86.seg m.Dos_state.cpu 3 lsl 4 in
+  Dos_machine.run m ~max_steps:1_000;
+  check_int "the default handler sent the EOI" (in_service pic) 0;
+  check_int "it kept AX" (Dos_state.rd16 m (base + 0x200)) 0x1234;
+  check_int "it left the tick alone" (Dos_state.rd16 m 0x46C) tick
+
 let () =
   test_power_on ();
   test_reset ();
@@ -414,6 +465,8 @@ let () =
   test_machine_guest ();
   test_machine_withdrawn_request ();
   test_machine_snapshot ();
+  test_machine_unhooked_irq ();
+  test_default_handler ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;
     exit 1

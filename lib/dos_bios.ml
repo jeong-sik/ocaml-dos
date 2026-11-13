@@ -16,10 +16,12 @@ let host_served = [ 0x09; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
-   0x20, 호스트 서빙 벡터의 되돌림 스텁은 0x100 부터 16바이트씩. *)
+   0x20, 하드웨어 IRQ 기본 루틴은 0x30, 호스트 서빙 벡터의 되돌림 스텁은
+   0x100 부터 16바이트씩. *)
 let rom_seg = 0xF000
 let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
+let hw_irq_off = 0x0030
 let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
@@ -46,6 +48,21 @@ let bios_int8 =
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
 
+(* IRQ0-7 의 벡터(08h-0Fh). 쓰는 장치가 없는 줄의 기본 루틴은 EOI 를
+   보내고 IRET 한다 — SeaBIOS post.c 가 08h-0Fh 를 entry_hwpic1 로 채우고,
+   handle_hwpic1 은 pic_eoi1(20h 를 포트 20h 로)만 한다. IMR 은 건드리지
+   않는다. IRET 스텁이면 프로그램이 벡터를 걸기 전에 들어온 IRQ 가 ISR
+   비트를 남겨, 그 줄이 다시 들어오지 않는다(#110). *)
+let hw_irq_first_vector = 0x08
+let hw_irq_lines = 8
+
+let hw_irq_default =
+  "\x50"                            (* push ax *)
+  ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
+  ^ "\x58\xcf"                      (* pop ax; iret *)
+
+let is_hw_irq_vector v = v >= hw_irq_first_vector && v < hw_irq_first_vector + hw_irq_lines
+
 let equipment_word =
   (* bit0 디스켓 있음, bit1 코프로세서 없음(8087 미장착 — ESC 명령은
      아무 일도 하지 않는다), bits4-5 = 10b 컬러 80x25, bits14-15 프린터 1 개 *)
@@ -66,6 +83,9 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
+  Bytes.blit_string hw_irq_default 0 t.mem
+    ((rom_seg * 16) + hw_irq_off)
+    (String.length hw_irq_default);
   set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
   set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
@@ -109,12 +129,13 @@ let install t =
      세그먼트+0x0A 를 읽기 때문이다. 되돌림 스텁 자리는 비워 둔다. *)
   set_ivt t 0x67 emm_entry_off rom_seg;
   t.stubs <- (0x67, emm_entry_off) :: t.stubs;
-  (* 나머지 벡터는 전부 IRET 스텁으로 채운다. 실기 BIOS 는 모든 벡터가
-     ROM/DOS 를 가리켜서, 프로그램이 훅을 걸며 되읽은 "옛 벡터" 가 0:0
-     이 아니다. 하나라도 비워 두면 체인 복귀가 0000:0000 으로 떨어진다. *)
+  (* 나머지 벡터는 전부 ROM 을 가리킨다 — 하드웨어 IRQ 줄은 EOI 루틴,
+     그 밖은 IRET 스텁. 실기 BIOS 는 모든 벡터가 ROM/DOS 를 가리켜서,
+     프로그램이 훅을 걸며 되읽은 "옛 벡터" 가 0:0 이 아니다. 하나라도
+     비워 두면 체인 복귀가 0000:0000 으로 떨어진다. *)
   for v = 0 to 255 do
     if not (List.mem v (0x08 :: host_served)) then
-      set_ivt t v iret_stub_off rom_seg
+      set_ivt t v (if is_hw_irq_vector v then hw_irq_off else iret_stub_off) rom_seg
   done;
   (* IBM PC BIOS(5150)는 8x8 글꼴 표를 F000:FA6E 에 둔다. 그래픽 모드에서
      글자를 직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 —
