@@ -610,26 +610,30 @@ let ext_read t =
 
 type line_result = Line_complete of string | Line_waiting of line_input
 
+(* DOS 의 콘솔 출력은 BIOS teletype 으로 간다. 텍스트 모드에서는 칸의
+   속성을 그대로 두고, 그래픽 모드에서는 이 색(밝은 회색)으로 그린다. *)
+let dos_output_color = 0x07
+
 let echo_line_character t c =
   if c = 0x09 then begin
     let col, _ = get_cursor t in
     let width = 8 - (col mod 8) in
-    for _ = 1 to width do put_char t 0x20 0x07 done;
+    for _ = 1 to width do teletype t 0x20 dos_output_color done;
     width
   end
   else if c < 0x20 then begin
-    put_char t 0x5e 0x07;
-    put_char t (c + 0x40) 0x07;
+    teletype t 0x5e dos_output_color;
+    teletype t (c + 0x40) dos_output_color;
     2
   end
-  else begin put_char t c 0x07; 1 end
+  else begin teletype t c dos_output_color; 1 end
 
 let erase_line_character t width =
   for _ = 1 to width do
     let col, row = get_cursor t in
     let col, row = if col > 0 then col - 1, row
       else if row > 0 then cols t - 1, row - 1 else 0, 0 in
-    write_cell t row col 0x0720;
+    write_char_only t ~col ~row 0x20 ~color:dos_output_color;
     set_cursor t col row
   done
 
@@ -639,17 +643,20 @@ let rec read_line t ~capacity line =
   | Some w ->
     let c = ascii_of_key w in
     match c, line.echo_widths with
-    | 0x0d, _ -> put_char t 0x0d 0x07; Line_complete line.text
+    | 0x0d, _ -> teletype t 0x0d dos_output_color; Line_complete line.text
     | (0x08 | 0x7f), width :: widths ->
       erase_line_character t width;
       read_line t ~capacity
         { text = String.sub line.text 0 (String.length line.text - 1); echo_widths = widths }
     | (0x00 | 0x08 | 0x7f), _ -> read_line t ~capacity line
     | 0x0a, _ ->
-      if line.text <> "" then begin put_char t 0x0d 0x07; put_char t 0x0a 0x07 end;
+      if line.text <> "" then begin
+        teletype t 0x0d dos_output_color;
+        teletype t 0x0a dos_output_color
+      end;
       read_line t ~capacity line
     | _, _ when String.length line.text >= capacity - 1 ->
-      put_char t 0x07 0x07; (* Full buffers still wait for CR or an editing key. *)
+      teletype t 0x07 dos_output_color; (* Full buffers still wait for CR or an editing key. *)
       read_line t ~capacity line
     | _, _ ->
       let width = echo_line_character t c in
@@ -672,7 +679,7 @@ let resume_input t request =
      | None -> Awaiting_input (Dos_input request)
      | Some c ->
        Cpu86.set_reg8 t.cpu 0 c;
-       if echo && c <> 0 then put_char t c 0x07;
+       if echo && c <> 0 then teletype t c dos_output_color;
        Completed)
   | Read_buffered_line ({ base; capacity; line } as input) ->
     (match read_line t ~capacity line with
@@ -685,7 +692,7 @@ let resume_input t request =
     (match read_line t ~capacity:console_line_capacity line with
      | Line_waiting line -> Awaiting_input (Dos_input (Read_console_line { input with line }))
      | Line_complete text ->
-       put_char t 0x0a 0x07;
+       teletype t 0x0a dos_output_color;
        t.console_pending <-
          if String.length text > 0 && text.[0] = '\026' then "" else text ^ "\r\n";
        return_console_bytes t ~destination ~length)
@@ -701,7 +708,7 @@ let service_immediate t =
     Cpu86.set_reg8 cpu 0 t.last_child_code;
     Cpu86.set_reg8 cpu 4 0;
     ok t
-  | 0x02 -> put_char t (Cpu86.reg8 cpu 2) 0x07
+  | 0x02 -> teletype t (Cpu86.reg8 cpu 2) dos_output_color
   | 0x06 ->
     (* 직접 콘솔 입출력. DL=FF 면 읽기(ZF 로 있고없음), 아니면 쓰기.
        Turbo Pascal 런타임의 에러 메시지가 이 길로 나온다 — 없으면
@@ -716,7 +723,7 @@ let service_immediate t =
         Cpu86.set_reg8 cpu 0 0;
         Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero)
       )
-    else put_char t dl 0x07
+    else teletype t dl dos_output_color
   | 0x09 ->
     (* '$' 로 끝나는 문자열. 길이를 안 주는 대신 끝 표시를 찾는다. *)
     let base = seg_off t 3 2 in
@@ -724,7 +731,7 @@ let service_immediate t =
     while (not !stop) && !i < 65536 do
       let c = rd8 t (base + !i) in
       if c = Char.code '$' then stop := true
-      else begin put_char t c 0x07; incr i end
+      else begin teletype t c dos_output_color; incr i end
     done
   | 0x0B ->
     let available = t.ext_scan_pending <> 0 || key_pending t in
@@ -849,7 +856,7 @@ let service_immediate t =
     if is_console h then begin
       (* 실기 DOS 는 부팅 때 stdin/stdout/stderr 를 열어 준다 — 없으면
          런타임이 잘못된 핸들(6)로 즉사한다(실측). *)
-      for i = 0 to n - 1 do put_char t (rd8 t (src + i)) 0x07 done;
+      for i = 0 to n - 1 do teletype t (rd8 t (src + i)) dos_output_color done;
       Cpu86.set_reg16 cpu 0 n;
       ok t
     end
