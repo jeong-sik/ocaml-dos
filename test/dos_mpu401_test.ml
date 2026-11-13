@@ -136,6 +136,61 @@ let () =
   check_b "command mode with one byte" (status (load (crafted false 1)) = byte_waiting);
   check_b "UART mode with two bytes" (status (load (crafted true 2)) = byte_waiting)
 
+(* ---------- in the machine ---------- *)
+
+let ports m = m.Dos_state.ports
+
+(* A guest that finds the card the way a music driver does:
+     331h <- FFh; wait 331h bit 7 clear; [r0] <- 330h
+     331h <- 3Fh; wait 331h bit 7 clear; [r1] <- 330h
+     330h <- 90h (MIDI note on); [r2] <- 331h; int 20h *)
+let guest_program =
+  "\xBA\x31\x03\xB0\xFF\xEE\xEC\xA8\x80\x75\xFB\x4A\xEC\xA2\x28\x01"
+  ^ "\x42\xB0\x3F\xEE\xEC\xA8\x80\x75\xFB\x4A\xEC\xA2\x29\x01\xB0\x90"
+  ^ "\xEE\x42\xEC\xA2\x2A\x01\xCD\x20\x00\x00\x00"
+
+let r0 = 0x128
+let r1 = 0x129
+let r2 = 0x12A
+let floating = 0xFF
+
+let () =
+  let m = Dos_machine.create () in
+  check "no card by default: 331h floats" (Dos_ports.port_in (ports m) M.status_port) floating;
+  check "no card by default: 330h floats" (Dos_ports.port_in (ports m) M.data_port) floating;
+  Dos_ports.port_out (ports m) M.status_port 0xFF;
+  check "no card: a reset gets nothing" (Dos_ports.port_in (ports m) M.status_port) floating;
+  let m = Dos_machine.create ~mpu401:true () in
+  Dos_machine.load_com m guest_program;
+  let base = Cpu86.seg m.Dos_state.cpu 3 lsl 4 in
+  Dos_machine.run m ~max_steps:10_000;
+  let at off = Char.code (Bytes.get m.Dos_state.mem (base + off)) in
+  check "the guest's reset answered" (at r0) ack;
+  check "the guest's 3Fh answered" (at r1) ack;
+  check "the guest saw nothing waiting after a MIDI byte" (at r2) nothing_waiting;
+  (* the guest left the card in UART mode: a snapshot keeps it there *)
+  let p = ports m in
+  let restored m =
+    match Dos_snapshot.save m with
+    | Error e -> failwith (Dos_snapshot.save_error_to_string e)
+    | Ok s ->
+      (match Dos_snapshot.restore s with
+       | Ok r -> r
+       | Error e -> failwith (Dos_snapshot.error_to_string e))
+  in
+  let u = ports (restored m) in
+  Dos_ports.port_out u M.status_port 0x3F;
+  check "restored in UART mode: 3Fh is ignored" (Dos_ports.port_in u M.status_port) nothing_waiting;
+  Dos_ports.port_out p M.status_port 0xFF;
+  Dos_ports.port_out p M.status_port 0xFF;
+  let r = ports (restored m) in
+  check "restored with the card: the answer waits" (Dos_ports.port_in r M.status_port) byte_waiting;
+  check "restored: FEh" (Dos_ports.port_in r M.data_port) ack;
+  Dos_ports.port_out r M.status_port 0x3F;
+  check "restored: 3Fh answers in command mode" (Dos_ports.port_in r M.status_port) byte_waiting;
+  let r = ports (restored (Dos_machine.create ())) in
+  check "restored without the card" (Dos_ports.port_in r M.status_port) floating
+
 let () =
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;

@@ -135,7 +135,7 @@ let () =
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
-  let feed_sync = ref "" in
+  let feed_sync = ref "" and mpu401 = ref false in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -173,10 +173,11 @@ let () =
             | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)")
          | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)"),
        "  INT 21h AH=42 seek 중 폰트 글리프 요청(offset = idx*RECSIZE+base 패턴) 기록");
-      ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프") ]
+      ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프");
+      ("--mpu401", Arg.Set mpu401, "  330h 에 MPU-401(UART 전용)을 꽂는다. MIDI 바이트는 버린다") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
-  let m = Dos_machine.create () in
+  let m = Dos_machine.create ~mpu401:!mpu401 () in
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
