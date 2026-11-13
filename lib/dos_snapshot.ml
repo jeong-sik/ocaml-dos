@@ -26,8 +26,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    and the counting segment) right after the cycle counter.
    8: PIT channel 0 is a counter of the same kind, written before channel 2
    with the cycle of its next output rise (IRQ0); the machine no longer
-   carries the cycle of its last IRQ0. *)
-let format_version = 8
+   carries the cycle of its last IRQ0.
+   9: a PIT counter writes its control word bits 5-0 as written (in place
+   of mode, access and BCD), the tick its count reaches the counting
+   element, and a status byte latched by the read-back command. *)
+let format_version = 9
 
 let digest_hex_len = 32
 let checksum_len = 16

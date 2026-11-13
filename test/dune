@@ -73,3 +73,7 @@
 (test
  (name dos_mouse_callback_test)
  (libraries dosmachine))
+
+(test
+ (name dos_pit_read_back_test)
+ (libraries dosmachine))
