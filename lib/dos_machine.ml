@@ -115,6 +115,7 @@ let create () =
         mouse_dx = 0; mouse_dy = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
       };
+      on_unserved = (fun _ ~vector:_ ~ax:_ -> ());
     }
   in
   on_ring_poll :=
@@ -131,6 +132,9 @@ let create () =
           frame_ss = Cpu86.seg cpu 2; frame_sp = Cpu86.reg16 cpu 4; status_mask } in
         accept_service t ~return_to (host_service t ~return_to v)
       | None ->
+        (* ROM 이 부르는 INT 1Ch 같은 것은 빼고, 프로그램이 부른 것만 *)
+        if Dos_bios.ivt_is_iret_stub t raw && Cpu86.seg cpu 1 <> Dos_bios.rom_seg then
+          report_unserved t Iret_stub ~vector:raw;
         if (not (Dos_bios.ivt_is_own_stub t raw)) && deliver_ivt t raw then ()
         else accept_service t ~return_to:Direct_return
             (host_service t ~return_to:Direct_return raw));
@@ -403,6 +407,8 @@ let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
 let mem_write t a v = wr8 t a v
 let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
+
+let on_unserved t f = t.on_unserved <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video

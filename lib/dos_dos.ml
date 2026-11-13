@@ -983,7 +983,7 @@ let service_immediate t =
   | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg
   | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x21
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
