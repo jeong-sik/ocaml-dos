@@ -47,6 +47,7 @@ type status =
   | Map_already_saved                            (** 8Dh *)
   | No_saved_map                                 (** 8Eh *)
   | Invalid_subfunction                          (** 8Fh *)
+  | Corrupt_map                                  (** A3h *)
 
 val status_code : status -> int
 
@@ -59,6 +60,9 @@ val target : Dos_state.t -> handle:int -> log:int -> ((int * int) option, status
 val show : Dos_state.t -> int -> (int * int) option -> unit
 (** [show t phys shown]: 물리 페이지 [phys] 에 [shown] 을 겹치거나 비운다.
     [phys] 는 [frame_pages] 보다 작고, [shown] 은 [target] 을 지난 값이다. *)
+
+val physical_of_segment : int -> int option
+(** 매핑 가능 세그먼트(D000h·D400h·D800h·DC00h)면 그 물리 페이지. *)
 
 val allocate : Dos_state.t -> count:int -> zero_ok:bool -> (int, status) result
 (** 새 핸들. [zero_ok] 는 Function 27 처럼 0 페이지를 받을지다. *)

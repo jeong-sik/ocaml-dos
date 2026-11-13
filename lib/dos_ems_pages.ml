@@ -47,6 +47,7 @@ type status =
   | Map_already_saved                            (* 8Dh *)
   | No_saved_map                                 (* 8Eh *)
   | Invalid_subfunction                          (* 8Fh *)
+  | Corrupt_map                                  (* A3h *)
 
 let status_code = function
   | Invalid_handle -> 0x83
@@ -61,6 +62,7 @@ let status_code = function
   | Map_already_saved -> 0x8D
   | No_saved_map -> 0x8E
   | Invalid_subfunction -> 0x8F
+  | Corrupt_map -> 0xA3
 
 let free_handle t =
   let rec go h =
@@ -141,6 +143,13 @@ let target t ~handle ~log =
     | None -> Error Invalid_handle
     | Some pages ->
       if log < Array.length pages then Ok (Some (handle, log)) else Error Logical_out_of_range
+
+(* 58h 가 알려 주는 매핑 가능 세그먼트면 그 물리 페이지. Function 17 은
+   세그먼트가 그 경계와 정확히 맞아야 한다고 한다. *)
+let physical_of_segment seg =
+  let d = seg - page_frame in
+  if d >= 0 && d mod page_size = 0 && d / page_size < frame_pages then Some (d / page_size)
+  else None
 
 let allocate t ~count ~zero_ok =
   if count = 0 && not zero_ok then Error Zero_pages
