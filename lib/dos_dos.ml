@@ -611,6 +611,108 @@ let fcb_set_random t =
     ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit);
   Cpu86.set_reg8 t.cpu 0 fcb_ok
 
+(* ---------- FCB 지우기·이름 바꾸기 ---------- *)
+
+(* TransFCB 가 거절하는 글자 — FCB.ASM CharType 에서 fFCB 가 꺼진 것.
+   20h 아래 제어 문자도 거절한다. *)
+let fcb_bad_chars = "\"/\\[]:<|>+=;,"
+let fcb_first_name_char = 0x20
+let fcb_name_len = 8
+let fcb_fields_len = 11
+
+(* 이름 8 칸 + 확장자 3 칸을 대문자로 읽는다. 쓸 수 없는 글자가 있거나
+   이름 칸이 비었으면 None 이다 (TransFCB → BadPack). '*' 는 그 칸의 남은
+   자리를 '?' 로 채운다 (NameTrans). *)
+let fcb_pattern_at t field =
+  let raw =
+    String.init fcb_fields_len (fun i -> Char.uppercase_ascii (Char.chr (rd8 t (field + i))))
+  in
+  let bad c = Char.code c < fcb_first_name_char || String.contains fcb_bad_chars c in
+  let name = String.sub raw 0 fcb_name_len
+  and ext = String.sub raw fcb_name_len (fcb_fields_len - fcb_name_len) in
+  if String.exists bad raw || String.trim name = "" then None
+  else Some (expand_stars name ^ expand_stars ext)
+
+let fcb_fields name = let base, ext = to_8_3 name in base ^ ext
+
+let fcb_matches pattern name =
+  let n = fcb_fields name in
+  let rec go i = i = fcb_fields_len || ((pattern.[i] = '?' || pattern.[i] = n.[i]) && go (i + 1)) in
+  go 0
+
+let name_of_fcb_fields f =
+  let trim_right s =
+    let n = ref (String.length s) in
+    while !n > 0 && s.[!n - 1] = ' ' do decr n done;
+    String.sub s 0 !n
+  in
+  let base = trim_right (String.sub f 0 fcb_name_len)
+  and ext = trim_right (String.sub f fcb_name_len (fcb_fields_len - fcb_name_len)) in
+  if ext = "" then base else base ^ "." ^ ext
+
+(* DIR.ASM: 무시하는 비트(읽기 전용·보관·장치)를 뺀 검색 속성이 볼륨 비트
+   하나뿐이면 볼륨 레이블만 찾는다. 이 기계에는 볼륨 레이블이 없다. *)
+let attr_ignore = 0x61
+let attr_volume_id = 0x08
+
+(* 패턴에 맞는 파일을 디렉터리 순서(이름순 — 4Eh 와 같다)로 *)
+let fcb_sources t addr pattern =
+  if Dos_fcb.search_attribute t addr land lnot attr_ignore = attr_volume_id then []
+  else
+    List.sort compare
+      (Hashtbl.fold
+         (fun k data acc -> if fcb_matches pattern k then (k, data) :: acc else acc)
+         t.host_files [])
+
+(* 13h. 하나라도 지우면 성공이다 (DELETE.ASM). *)
+let fcb_delete t =
+  let addr = seg_off t 3 2 in
+  let code =
+    match fcb_pattern_at t (Dos_fcb.locate t addr + Dos_fcb.name) with
+    | None -> fcb_error
+    | Some pattern ->
+      (match fcb_sources t addr pattern with
+       | [] -> fcb_error
+       | found ->
+         List.iter (fun (k, _) -> Hashtbl.remove t.host_files k) found;
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 17h. 새 이름의 '?' 자리에는 원래 이름의 글자가 들어간다 (NEW_RENAME).
+   새 이름이 이미 있으면 거기서 멈추고, 앞에서 바꾼 것은 그대로 둔다
+   (RENAME.ASM BAD_ACC). *)
+let fcb_rename t =
+  let addr = seg_off t 3 2 in
+  let fcb = Dos_fcb.locate t addr in
+  let code =
+    match
+      ( fcb_pattern_at t (fcb + Dos_fcb.name),
+        fcb_pattern_at t (fcb + Dos_fcb.rename_target) )
+    with
+    | None, _ | _, None -> fcb_error
+    | Some pattern, Some target ->
+      let rec go = function
+        | [] -> fcb_ok
+        | (old, data) :: rest ->
+          let source = fcb_fields old in
+          let fresh =
+            name_of_fcb_fields
+              (String.mapi (fun i c -> if c = '?' then source.[i] else c) target)
+          in
+          if Hashtbl.mem t.host_files fresh then fcb_error
+          else begin
+            Hashtbl.remove t.host_files old;
+            Hashtbl.replace t.host_files fresh data;
+            go rest
+          end
+      in
+      (match fcb_sources t addr pattern with
+       | [] -> fcb_error
+       | found -> go found)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
 (* ---------- 콘솔 입력 ---------- *)
 
 (* An empty ring is absence, never a completed zero-valued input. *)
@@ -1030,6 +1132,8 @@ let service_immediate t =
   | 0x21 -> fcb_random_read t
   | 0x23 -> fcb_file_size t
   | 0x24 -> fcb_set_random t
+  | 0x13 -> fcb_delete t
+  | 0x17 -> fcb_rename t
   | _ -> ()
 
 let terminate t = child_exit t ~code:0 ~keep:None
