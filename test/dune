@@ -71,5 +71,9 @@
  (libraries dosmachine))
 
 (test
+ (name dos_vretrace_test)
+ (libraries dosmachine cpu86core))
+
+(test
  (name dos_speed_test)
  (libraries dosmachine cpu86core))
