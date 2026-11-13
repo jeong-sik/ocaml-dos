@@ -69,8 +69,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
   최상위 비트가 왼쪽 점인 IBM 순서다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB 읽기(0Fh/10h/14h/21h/23h/24h, 확장 FCB)·
-  지우기(13h)·이름 바꾸기(17h), findfirst/findnext, 메모리 할당(48h/49h/4Ah),
+  seek/close/dup), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
+  쓴 바이트는 닫을 때 파일이 된다), findfirst/findnext,
+  메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
