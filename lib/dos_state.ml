@@ -187,12 +187,17 @@ let seg_off t sreg reg = physical (Cpu86.seg t.cpu sreg) (Cpu86.reg16 t.cpu reg)
 
 (* Copies [len] bytes of [src] into guest memory at physical [dst], wrapping
    at 1MB like [wr8]. A buffer that starts near the top of memory continues
-   at physical 0 instead of raising. *)
+   at physical 0 instead of raising. The bytes go through the CPU's bus, as
+   DOS's own REP MOVS would: in a planar mode the A0000h window is the
+   video planes, not the RAM under it (#117). *)
 let blit_to_mem t src src_off dst len =
-  let dst = dst land phys_mask in
-  let first = min len (phys_mask + 1 - dst) in
-  Bytes.blit src src_off t.mem dst first;
-  if len > first then Bytes.blit src (src_off + first) t.mem 0 (len - first)
+  for i = 0 to len - 1 do
+    Cpu86.bus_write t.cpu ((dst + i) land phys_mask) (Char.code (Bytes.get src (src_off + i)))
+  done
+
+(* The guest byte at physical [a] as the CPU reads it -- the counterpart of
+   [blit_to_mem] for bytes DOS takes from a guest buffer. *)
+let bus_rd8 t a = Cpu86.bus_read t.cpu (a land phys_mask)
 
 (* DS:DX 의 ASCIIZ — INT 21h 파일명 계열이 쓴다. *)
 let asciiz_at t base =

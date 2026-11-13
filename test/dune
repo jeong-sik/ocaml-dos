@@ -69,3 +69,7 @@
 (test
  (name dos_mouse_callback_test)
  (libraries dosmachine))
+
+(test
+ (name dos_io_bus_test)
+ (libraries dosmachine cpu86core))
