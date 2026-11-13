@@ -93,6 +93,10 @@ let install t =
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
   set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
   set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
+  (* POST 는 부팅 모드를 세우며 화면을 지운다: 공백, 속성 07h. 이게
+     없으면 화면 메모리가 0(검정 위 검정)이라, 칸의 속성을 두는 teletype
+     과 DOS 출력이 보이지 않는다. *)
+  Dos_video.set_mode t.video (Dos_video.mode t.video) ~clear:true;
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
@@ -263,8 +267,9 @@ let video t =
       end
     done
   | 0x0E ->
-    (* 그래픽 모드에서 BL 은 글자 색 전체다(256색 모드면 0~255). *)
-    put_char t al (if graphics t then Cpu86.reg8 cpu 3 else Cpu86.reg8 cpu 3 land 0x0f)
+    (* 텍스트 모드는 칸의 속성을 둔다. 그래픽 모드에서 BL 은 글자 색
+       전체다(256색 모드면 0~255). *)
+    teletype t al (Cpu86.reg8 cpu 3)
   | 0x0C ->
     (* 점 찍기: AL=색, CX=x, DX=y. BH 페이지는 한 장뿐이라 무시한다. *)
     Dos_video.put_pixel t.video ~x:(Cpu86.reg16 cpu 1) ~y:(Cpu86.reg16 cpu 2)
