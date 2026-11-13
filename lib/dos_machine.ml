@@ -49,10 +49,10 @@ let service_status_mask t v =
   | 0x21, _ -> Cpu86.f_carry
   | _ -> 0
 
-let create () =
+let create ?(sound_blaster = false) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~mem ~video in
+  let ports = Dos_ports.create ~mem ~video ~sound_blaster in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
@@ -183,6 +183,14 @@ let step_result t =
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;
+    (* DSP 는 바이트·리셋·타이머 때가 오면 DMA 채널 1 에서 가져가고, 블록
+       끝이면 IRQ 7 을 올린다. DMA 는 1MB 배열을 그대로 읽는다 — 비디오
+       평면 창(A0000h)을 DMA 로 읽는 프로그램은 다루지 않는다. *)
+    (match Dos_ports.sound_blaster t.ports with
+     | Some sb when cyc >= Dos_sb.due_at sb ->
+       if Dos_sb.advance sb ~now:cyc ~dma:(Dos_ports.dma t.ports) ~mem:t.mem then
+         Dos_pic.raise_irq pic Dos_pic.Sound_blaster
+     | Some _ | None -> ());
     (* 요청은 IF 가 켜지고, 마스크가 풀리고, 같거나 높은 줄이 EOI 를 받을
        때까지 IRR 에 남는다 — 버리면 임계구역이 긴 프로그램에서 시계가
        느려지고 키가 사라진다. 벡터가 0:0 이면 아무것도 넣지 않고, 그 줄은

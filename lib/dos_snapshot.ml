@@ -27,8 +27,12 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    flag, the last read) replace the PIC mask, the last scan code and the
    machine's pending-tick flag.
    8: the DMA controller (per channel: base and current address and count,
-   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC. *)
-let format_version = 8
+   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC.
+   9: whether a Sound Blaster is in the machine, and its DSP (reset,
+   answers, the command half written, the playing block, timers, the
+   IRQ line, rate, block length, speaker, test register), after the DMA
+   controller. *)
+let format_version = 9
 
 let digest_hex_len = 32
 let checksum_len = 16

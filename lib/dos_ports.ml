@@ -34,6 +34,7 @@ type t = {
   mutable pit0_access : int;            (** 1=lo 2=hi 3=lo/hi *)
   pic : Dos_pic.t;
   dma : Dos_dma.t;                      (** 포트 00h-0Fh 와 페이지 레지스터 *)
+  mutable sb : Dos_sb.t option;         (** 220h 의 Sound Blaster. 스냅숏이 꽂고 뺀다 *)
   kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
   (* VGA DAC *)
   pal : (int * int * int) array;
@@ -85,7 +86,7 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
-let create ~mem ~video =
+let create ~mem ~video ~sound_blaster =
   {
     mem;
     video;
@@ -97,6 +98,7 @@ let create ~mem ~video =
     pit0_access = 3;
     pic = Dos_pic.create ();
     dma = Dos_dma.create ();
+    sb = (if sound_blaster then Some (Dos_sb.create ()) else None);
     kbc = Dos_kbc.create ();
     pal = Array.init dac_entries default_vga_pal;
     dac_write_index = 0;
@@ -136,6 +138,40 @@ let set_now t n = t.now <- n
 let palette t = t.pal
 let pic t = t.pic
 let dma t = t.dma
+let sound_blaster t = t.sb
+
+(* Sound Blaster 2.0 의 FM 은 카드의 228h·229h 에도 보인다 — 388h·389h 의
+   OPL2 와 같은 칩이다(DOSBox 도 base+8 에 OPL 을 단다). *)
+let sb_fm_address = 0x228
+let sb_fm_data = 0x229
+let opl_address = 0x388
+let opl_data = 0x389
+
+let fm_alias t p =
+  match t.sb with
+  | None -> p
+  | Some _ -> if p = sb_fm_address then opl_address else if p = sb_fm_data then opl_data else p
+
+(* DSP 가 IRQ 선을 내렸는데 CPU 가 아직 요청을 안 받았으면 요청을
+   거둔다(DOSBox PIC_DeActivateIRQ). 22Eh 를 읽은 뒤, 리셋·새 전송 뒤다. *)
+let follow_sb_line t sb =
+  if not (Dos_sb.irq_line sb) then Dos_pic.lower_irq t.pic Dos_pic.Sound_blaster
+
+let sb_port_in t p =
+  match t.sb with
+  | None -> None
+  | Some sb ->
+    let v = Dos_sb.port_in sb p in
+    follow_sb_line t sb;
+    v
+
+let sb_port_out t p v =
+  match t.sb with
+  | None -> false
+  | Some sb ->
+    let taken = Dos_sb.port_out sb ~now:t.now p v in
+    follow_sb_line t sb;
+    taken
 let kbc t = t.kbc
 let speaker_on t = t.port_b land 0x03 = 0x03
 
@@ -165,7 +201,10 @@ let port_in t p =
   match Dos_dma.port_in t.dma p with
   | Some v -> v
   | None ->
-  match p land 0xffff with
+  match sb_port_in t (p land 0xffff) with
+  | Some v -> v
+  | None ->
+  match fm_alias t (p land 0xffff) with
   | 0x20 -> Dos_pic.read_command t.pic
   | 0x21 -> Dos_pic.read_mask t.pic
   | 0x40 ->
@@ -244,8 +283,9 @@ let port_out t p v =
   let v = v land 0xff in
   if Dos_video.port_out t.video p v then ()
   else if Dos_dma.port_out t.dma p v then ()
+  else if sb_port_out t (p land 0xffff) v then ()
   else
-  match p land 0xffff with
+  match fm_alias t (p land 0xffff) with
   | 0x20 -> Dos_pic.write_command t.pic v
   | 0x21 -> Dos_pic.write_mask t.pic v
   | 0x40 ->
@@ -343,7 +383,7 @@ let dac_phase_r = C.range 0 2
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
-        pit0_access; pic; dma; kbc; pal; dac_write_index; dac_read_index;
+        pit0_access; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; crtc_index; crtc; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp } = t
@@ -359,6 +399,9 @@ let write_state w t =
   put "pit0_access" pit_access pit0_access;
   Dos_pic.write_state w pic;
   Dos_dma.write_state w dma;
+  (match sb with
+   | None -> C.put_bool w false
+   | Some s -> C.put_bool w true; Dos_sb.write_state w s);
   Dos_kbc.write_state w kbc;
   put "DAC size" C.count (Array.length pal);
   Array.iter
@@ -393,6 +436,13 @@ let read_state r t =
   t.pit0_access <- get "pit0_access" pit_access;
   Dos_pic.read_state r t.pic;
   Dos_dma.read_state r t.dma;
+  t.sb <-
+    (if C.get_bool r then begin
+       let s = Dos_sb.create () in
+       Dos_sb.read_state r s;
+       Some s
+     end
+     else None);
   Dos_kbc.read_state r t.kbc;
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri

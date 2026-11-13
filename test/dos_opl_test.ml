@@ -14,7 +14,7 @@ let check name got want =
 let () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let t = Dos_ports.create ~mem ~video in
+  let t = Dos_ports.create ~mem ~video ~sound_blaster:false in
   let write reg dat =
     Dos_ports.port_out t 0x388 reg;
     Dos_ports.port_out t 0x389 dat
