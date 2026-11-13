@@ -161,6 +161,57 @@ let out t ~tick =
        seg.since = None || high
      | Software_strobe | Hardware_strobe -> k <> seg.n)
 
+(* 세기 시작한 뒤 지나간 펄스 [k] 에서의 OUT. GATE 가 높고 첫 펄스가
+   지난 때의 [out] 과 같은 식이다. 미뤄 둔 새 카운트가 실리는 경계를 볼 때
+   쓴다. *)
+let out_at t seg k =
+  match t.mode with
+  | Interrupt_on_terminal_count -> t.lsb_written = None && k >= seg.n
+  | Hardware_one_shot -> k >= seg.n
+  | Rate_generator -> k mod seg.n <> seg.n - 1
+  | Square_wave -> let high, _, _ = square seg k in high
+  | Software_strobe | Hardware_strobe -> k <> seg.n
+
+(* 이 구간이 끝없이 이어진다고 볼 때, 지나간 펄스 [k] 뒤로 OUT 이 낮음에서
+   높음으로 바뀌는 첫 펄스 수. 갈래마다 [out] 의 식을 풀었다. *)
+let rise_in t seg k =
+  let n = seg.n in
+  match t.mode with
+  | Interrupt_on_terminal_count ->
+    (* 2바이트 카운트의 첫 바이트만 쓴 동안은 낮은 채 다음 쓰기를 기다린다 *)
+    if t.lsb_written = None && k < n then Some n else None
+  | Hardware_one_shot -> if k < n then Some n else None
+  | Rate_generator ->
+    (* 카운트 1 이면 OUT 이 늘 낮다 *)
+    if n < 2 then None else Some (k - (k mod n) + n)
+  | Square_wave ->
+    let low = n / 2 in
+    let p = k mod n in
+    if low = 0 then None (* 카운트 1 이면 늘 높다 *)
+    else if seg.low_first then Some (k - p + (if p < low then low else n + low))
+    else Some (k - p + n)
+  | Software_strobe | Hardware_strobe -> if k <= n then Some (n + 1) else None
+
+let next_rise t ~tick =
+  settle t ~tick;
+  match t.run with
+  | Stopped _ | Counting { seg = { since = None; _ }; _ } -> None
+  | Counting { seg = { since = Some s; _ } as seg; reload } ->
+    let tick_of seg_since seg_base k' = seg_since + (k' - seg_base) in
+    let k = pulses seg tick in
+    let here = rise_in t seg k in
+    (match reload, here with
+     | None, _ -> Option.map (tick_of s seg.base) here
+     | Some r, Some k' when k' < r.at -> Some (tick_of s seg.base k')
+     | Some r, (Some _ | None) ->
+       (* 새 카운트가 실린 뒤의 구간에서 찾는다. 펄스 [r.at] 부터는 새 구간의
+          OUT 이다 — 경계가 상승인지는 옛 구간의 마지막 펄스와 새 구간의 첫
+          펄스로 본다. 새 카운트가 1 인 모드 2 는 경계에서 오르지 않는다. *)
+       let s' = tick_of s seg.base r.at in
+       let next = { n = r.next_n; low_first = r.next_low_first; base = 0; since = Some s' } in
+       if (not (out_at t seg (r.at - 1))) && out_at t next 0 then Some s'
+       else Option.map (tick_of s' 0) (rise_in t next 0))
+
 let fresh_segment ~tick ~gate n =
   { n; low_first = false; base = 0; since = (if gate then Some (tick + 1) else None) }
 

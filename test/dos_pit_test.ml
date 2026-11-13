@@ -395,6 +395,99 @@ let test_delay_loop_on_machine () =
   check_b "0x801 펄스 이상 기다렸다"
     (Cpu86.cycles m.Dos_state.cpu >= 0x801 * cycles_per_pit_tick) true
 
+(* ---------- 다음 OUT 상승 ----------
+
+   [Dos_pit.next_rise] 를 [Dos_pit.out] 을 한 틱씩 짚어 찾은 상승과 견준다.
+   짚으면 카운터가 그 틱까지 셈을 정리하므로, 저장·복원으로 만든 복제본에서
+   짚는다. 시나리오는 모드 0~5 에 카운트 1(데이터시트가 모드 2·3 에서 금하는
+   값)부터 8 까지, 셈 도중 새 카운트, 첫 바이트만 쓴 새 카운트, GATE 를 내렸다
+   올리기와 내린 채 두기를 섞는다. *)
+
+let clone pit =
+  let w = Dos_snap_codec.writer () in
+  Dos_pit.write_state w pit;
+  let q = Dos_pit.create () in
+  Dos_pit.read_state (Dos_snap_codec.reader (Dos_snap_codec.contents w)) q;
+  q
+
+let scan_rise pit ~tick ~limit =
+  let q = clone pit in
+  let rec go prev x =
+    if x > tick + limit then None
+    else
+      let cur = Dos_pit.out q ~tick:x in
+      if (not prev) && cur then Some x else go cur (x + 1)
+  in
+  go (Dos_pit.out q ~tick) (tick + 1)
+
+type event = Control of int | Byte of int | Gate of bool
+
+let play ~gate events =
+  let pit = Dos_pit.create () in
+  let level = ref gate in
+  List.iter
+    (fun (tick, e) ->
+      match e with
+      | Control v -> Dos_pit.control pit ~tick v
+      | Byte v -> Dos_pit.write pit ~tick ~gate:!level v
+      | Gate g ->
+        if g <> !level then begin
+          level := g;
+          Dos_pit.gate_edge pit ~tick ~high:g
+        end)
+    events;
+  pit
+
+let show_rise = function None -> "None" | Some x -> string_of_int x
+
+let check_rises name ~gate events ~longest =
+  let last = List.fold_left (fun acc (tick, _) -> max acc tick) 0 events in
+  let limit = (4 * longest) + 8 in
+  for tick = last to last + (2 * longest) + 4 do
+    let got = Dos_pit.next_rise (clone (play ~gate events)) ~tick in
+    let want = scan_rise (play ~gate events) ~tick ~limit in
+    if got <> want then begin
+      incr failed;
+      Printf.eprintf "FAIL next_rise %s at tick %d: got %s want %s\n%!" name tick
+        (show_rise got) (show_rise want)
+    end
+  done
+
+let test_next_rise_matches_out () =
+  let counts = [ 1; 2; 3; 5; 8 ] and second_counts = [ 1; 2; 5 ] in
+  List.iter
+    (fun mode ->
+      (* GATE 로 트리거하는 모드 1·5 는 GATE 를 낮게 두고 쓴 뒤 올린다 *)
+      let triggered = mode = 1 || mode = 5 in
+      let start = if triggered then [ (5, Gate true) ] else [] in
+      List.iter
+        (fun n ->
+          let load = [ (0, Control (0x30 lor (mode lsl 1))); (1, Byte n); (2, Byte 0) ] in
+          let base = load @ start in
+          let gate = not triggered in
+          let name extra = Printf.sprintf "mode %d n %d%s" mode n extra in
+          check_rises (name "") ~gate base ~longest:n;
+          let after = if triggered then 5 else 2 in
+          for d = 1 to n + 2 do
+            let at = after + d in
+            List.iter
+              (fun n2 ->
+                check_rises (name (Printf.sprintf " then %d at %d" n2 at)) ~gate
+                  (base @ [ (at, Byte n2); (at, Byte 0) ]) ~longest:(max n n2))
+              second_counts;
+            check_rises (name (Printf.sprintf " then a lone low byte at %d" at)) ~gate
+              (base @ [ (at, Byte 3) ]) ~longest:n;
+            List.iter
+              (fun e ->
+                check_rises (name (Printf.sprintf " gate low at %d for %d" at e)) ~gate
+                  (base @ [ (at, Gate false); (at + e, Gate true) ]) ~longest:n)
+              [ 1; 2; 3 ];
+            check_rises (name (Printf.sprintf " gate left low at %d" at)) ~gate
+              (base @ [ (at, Gate false) ]) ~longest:n
+          done)
+        counts)
+    [ 0; 1; 2; 3; 4; 5 ]
+
 let () =
   test_mode0_delay_loop ();
   test_mode0_gate_pauses ();
@@ -415,6 +508,7 @@ let () =
   test_snapshot ();
   test_snapshot_refuses_bcd_overflow ();
   test_delay_loop_on_machine ();
+  test_next_rise_matches_out ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n" !failed;
     exit 1
