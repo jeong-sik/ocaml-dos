@@ -73,3 +73,7 @@
 (test
  (name dos_fcb_records_test)
  (libraries dosmachine))
+
+(test
+ (name dos_fcb_names_test)
+ (libraries dosmachine))
