@@ -402,6 +402,15 @@ let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
+
+(* [frame_rgb] 가 읽는 입력을 하나씩 섞는다. [frame_rgb] 가 새 입력을
+   읽게 되면 여기에도 넣는다. *)
+let frame_digest t =
+  let mix h v = Hashtbl.hash (h, v) in
+  let h = mix (Dos_video.screen_digest t.video) (Dos_video.mode t.video) in
+  let h = mix h (Dos_video.cga_color_select t.video) in
+  let h = Array.fold_left mix h (Dos_video.attr_palette t.video) in
+  Array.fold_left (fun h (r, g, b) -> mix (mix (mix h r) g) b) h (Dos_ports.palette t.ports)
 let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
