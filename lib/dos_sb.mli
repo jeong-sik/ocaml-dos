@@ -13,11 +13,22 @@
     {b Digitized sound.} 40h sets the time constant TC: one byte every
     256 - TC µs. 14h plays one block of length + 1 bytes. 48h sets the
     auto-init block length and 1Ch plays such blocks until DAh or a reset.
-    91h and 90h are the same with the 48h length. The DSP takes each byte
+    91h and 90h are the same with the 48h length. ADPCM blocks take the
+    same paths with fewer bytes a second: 74h/75h (4-bit, a byte every 2
+    sample times), 76h/77h (2.6-bit, 3), 16h/17h (2-bit, 4) play once,
+    7Dh, 7Fh and 1Fh are their auto-init forms. The odd codes and the
+    auto-init forms send a reference byte first; this model times it like
+    the block's other bytes. 15h plays as 14h, as in DOSBox. A block queued
+    behind another takes its own format's byte time from its first byte.
+    The DSP takes each byte
     from the DMA channel when its time comes and drops it (no sound). On a
     masked channel it waits. At the end of each block it raises the IRQ.
     D0h pauses and D4h continues. A 14h during an auto-init block plays
     after that block, which ends the auto-init run.
+
+    {b MIDI.} 34h and 35h enter UART mode: every later byte written to
+    22Ch is MIDI out, which goes nowhere, until a reset (86Box). 38h
+    sends one byte. 36h and 37h do nothing, as in 86Box.
 
     {b IRQ.} Block ends, F2h (10µs later) and 80h (silence of length + 1
     bytes) raise it. A raise while the last one is not yet acknowledged
@@ -32,10 +43,10 @@
     DOSBox resets the auto-init length to 0, 86Box to 8000h bytes (this
     model).
 
-    {b Outside the model.} Sound output, ADPCM, DMA input (24h), MIDI,
-    0E2h, the DREQ bits of the DMA status, and a busy bit that toggles
-    while DMA runs. Those commands still swallow their parameter bytes so
-    the next command parses. *)
+    {b Outside the model.} Sound output (PCM and ADPCM decoding), DMA
+    input (24h), MIDI input, 0E2h, the DREQ bits of the DMA status, and a
+    busy bit that toggles while DMA runs. Those commands still swallow
+    their parameter bytes so the next command parses. *)
 
 type t
 

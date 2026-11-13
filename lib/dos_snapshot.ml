@@ -31,8 +31,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    9: whether a Sound Blaster is in the machine, and its DSP (reset,
    answers, the command half written, the playing block, timers, the
    IRQ line, rate, block length, speaker, test register), after the DMA
-   controller. *)
-let format_version = 9
+   controller.
+   10: each DSP block, and the block queued behind it, carry their format
+   (8-bit PCM or one of three ADPCM sizes), and the DSP carries whether it
+   is in MIDI UART mode. *)
+let format_version = 10
 
 let digest_hex_len = 32
 let checksum_len = 16
