@@ -211,12 +211,15 @@ let sda off = physical sda_seg off
    음수 오프셋도 받는다. *)
 let pre_swap_verify = -32
 let pre_swap_switch_char = -30
+let pre_swap_alloc_method = -29
 let default_switch_char = Char.code '/'
 
 (* CONST2.ASM 초기값 중 0 이 아닌 것: WPErr <-1>, chSwitch <'/'> *)
 let init_dos_data t =
   wr8 t (sda sda_wp_err) byte_max;
   wr8 t (sda pre_swap_switch_char) default_switch_char
+
+let set_locus t l = wr8 t (sda sda_exterr_locus) (Dos_error.locus_code l)
 
 (* DISP.ASM DSKROUT: AH 가 0 이거나 0Ch 보다 크고 59h 가 아닌 기능에 들어갈
    때. 50h·51h·62h·33h·64h 는 그 앞에서 따로 끝나 여기에 오지 않는다. *)
@@ -234,7 +237,7 @@ let enter_call t =
   if disk_route (ax lsr 8) then begin
     wr8 t (sda sda_user_in_ax) (ax land 0xff);
     wr8 t (sda (sda_user_in_ax + 1)) (ax lsr 8);
-    wr8 t (sda sda_exterr_locus) (Dos_error.locus_code Dos_error.Unknown_locus);
+    set_locus t Dos_error.Unknown_locus;
     wr8 t (sda sda_error_mode) 0;
     wr8 t (sda sda_wp_err) byte_max
   end
@@ -305,7 +308,7 @@ let fail t code =
    | Some { Dos_error.error_class; action; locus } ->
      wr8 t (sda sda_exterr_class) (Dos_error.class_code error_class);
      wr8 t (sda sda_exterr_action) (Dos_error.action_code action);
-     Option.iter (fun l -> wr8 t (sda sda_exterr_locus) (Dos_error.locus_code l)) locus);
+     Option.iter (set_locus t) locus);
   Cpu86.set_reg16 t.cpu 0 (Dos_error.returned_code ~fn code);
   set_cf t true
 
