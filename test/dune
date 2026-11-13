@@ -73,3 +73,7 @@
 (test
  (name dos_speed_test)
  (libraries dosmachine cpu86core))
+
+(test
+ (name dos_cmos_test)
+ (libraries dosmachine cpu86core))

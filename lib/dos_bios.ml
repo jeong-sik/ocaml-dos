@@ -72,7 +72,7 @@ let install t =
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
   wr16 t 0x410 equipment_word;
-  wr16 t 0x413 640;                 (* 기억용량 KB *)
+  wr16 t 0x413 Dos_cmos.base_memory_kb;  (* 기억용량 KB — CMOS 15h·16h 와 같다 *)
   wr8 t 0x417 0;                    (* 시프트 상태 *)
   wr8 t 0x418 0;
   wr16 t 0x41A ring_lo;

@@ -59,6 +59,7 @@ let ports speed =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
   Dos_ports.create ~speed ~mem ~video
+    ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
 
 let pit_count t =
   let lo = Dos_ports.port_in t 0x40 in
