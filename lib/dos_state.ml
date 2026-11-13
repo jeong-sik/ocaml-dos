@@ -186,11 +186,44 @@ let physical seg off = ((seg lsl 4) + off) land phys_mask
    포함한 거의 모든 기능에서 INDOS 를 올리고, 끝나면 내린다. 이 기계의
    서비스는 차단 읽기 말고는 게스트 코드를 끼우지 않고 끝나니, 게스트가
    볼 수 있는 값은 기다리는 DOS 읽기의 수다. INT 24h 를 모델링하지 않아
-   ErrorMode 는 늘 0 이다. *)
+   ErrorMode 는 늘 0 이다.
+
+   그 뒤는 확장 에러(AH=59h)다: WPErr, EXTERR_LOCUS, EXTERR, EXTERR_ACTION,
+   EXTERR_CLASS, EXTERRPT. 0x0C..0x19(DTA, 현재 PSP 등)는 호스트 상태에
+   있어 비워 두고, Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
 let sda_seg = 0x0070
 let sda_error_mode = 0
 let sda_in_dos = 1
+let sda_wp_err = 2
+let sda_exterr_locus = 3
+let sda_exterr = 4
+let sda_exterr_action = 6
+let sda_exterr_class = 7
+let sda_exterr_pointer = 8
+let sda_user_in_ax = 0x1A
 let byte_max = 0xFF
+let sda off = physical sda_seg off
+
+(* DISP.ASM DSKROUT: AH 가 0 이거나 0Ch 보다 크고 59h 가 아닌 기능에 들어갈
+   때. 50h·51h·62h·33h·64h 는 그 앞에서 따로 끝나 여기에 오지 않는다. *)
+let get_extended_error = 0x59
+let last_console_call = 0x0C
+let max_function = 0x6C
+let early_calls = [ 0x33; 0x50; 0x51; 0x62; 0x64 ]
+
+let disk_route ah =
+  (ah = 0 || ah > last_console_call)
+  && ah <> get_extended_error && ah <= max_function && not (List.mem ah early_calls)
+
+let enter_call t =
+  let ax = Cpu86.reg16 t.cpu 0 in
+  if disk_route (ax lsr 8) then begin
+    wr8 t (sda sda_user_in_ax) (ax land 0xff);
+    wr8 t (sda (sda_user_in_ax + 1)) (ax lsr 8);
+    wr8 t (sda sda_exterr_locus) (Dos_error.locus_code Dos_error.Unknown_locus);
+    wr8 t (sda sda_error_mode) 0;
+    wr8 t (sda sda_wp_err) byte_max
+  end
 
 let set_input_continuations t waits =
   t.input_continuations <- waits;
@@ -246,8 +279,20 @@ let set_cf t on =
 
 let ok t = set_cf t false
 
+(* MS_CODE.ASM SYS_RET_ERR: ETAB_LK 이 진짜 코드를 EXTERR 에 두고, 이
+   기능이 돌려줄 수 없는 코드면 바꾼다. ErrorMap·CAL_LK 이 표에서
+   class·action·locus 를 채운다. 기능 번호는 USER_IN_AX 의 AH 다. *)
 let fail t code =
-  Cpu86.set_reg16 t.cpu 0 code;
+  let fn = rd8 t (sda (sda_user_in_ax + 1)) in
+  wr8 t (sda sda_exterr) (code land 0xff);
+  wr8 t (sda (sda_exterr + 1)) (code lsr 8);
+  (match Dos_error.info code with
+   | None -> ()
+   | Some { Dos_error.error_class; action; locus } ->
+     wr8 t (sda sda_exterr_class) (Dos_error.class_code error_class);
+     wr8 t (sda sda_exterr_action) (Dos_error.action_code action);
+     Option.iter (fun l -> wr8 t (sda sda_exterr_locus) (Dos_error.locus_code l)) locus);
+  Cpu86.set_reg16 t.cpu 0 (Dos_error.returned_code ~fn code);
   set_cf t true
 
 (* ---------- 시계 ---------- *)

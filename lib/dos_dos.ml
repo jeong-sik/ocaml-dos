@@ -980,6 +980,16 @@ let service_immediate t =
       ok t
     end
     else fail t 6
+  | 0x59 ->
+    (* GETSET.ASM $GetExtendedError: AX=EXTERR, BL=action, BH=class,
+       CH=locus(CL 그대로), ES:DI=EXTERRPT, CF=0 *)
+    let word off = rd8 t (sda off) lor (rd8 t (sda (off + 1)) lsl 8) in
+    Cpu86.set_reg16 cpu 0 (word sda_exterr);
+    Cpu86.set_reg16 cpu 3 (word sda_exterr_action);
+    Cpu86.set_reg8 cpu 5 (rd8 t (sda sda_exterr_locus));
+    Cpu86.set_reg16 cpu 7 (word sda_exterr_pointer);
+    Cpu86.set_seg cpu 0 (word (sda_exterr_pointer + 2));
+    ok t
   | 0x34 ->
     (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
     Cpu86.set_seg cpu 0 sda_seg;
@@ -992,6 +1002,7 @@ let service_immediate t =
 let terminate t = child_exit t ~code:0 ~keep:None
 
 let rec service t ~return_to =
+  enter_call t;
   match Cpu86.reg8 t.cpu 4 with
   | (0x01 | 0x07 | 0x08) as ah -> resume_input t (Read_character { echo = ah = 0x01 })
   | 0x0A ->
