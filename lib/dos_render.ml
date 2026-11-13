@@ -47,22 +47,22 @@ let cp437 = [|
   "\194\176"; "\226\136\153"; "\194\183"; "\226\136\154"; "\226\129\191"; "\194\178"; "\226\150\160"; "\194\160"
 |]
 
-let text_grid mem ~cols ~render =
+let text_grid mem ~cols ~cell ~render =
   let b = Buffer.create (cols * rows * 2) in
   for r = 0 to rows - 1 do
     for c = 0 to cols - 1 do
-      let ch = Char.code (Bytes.get mem (vram_base + (((r * cols) + c) * 2))) in
+      let ch = Char.code (Bytes.get mem (cell ~row:r ~col:c)) in
       Buffer.add_string b (render ch)
     done;
     Buffer.add_char b '\n'
   done;
   Buffer.contents b
 
-let text_ascii mem ~cols =
-  text_grid mem ~cols ~render:(fun ch ->
+let text_ascii mem ~cols ~cell =
+  text_grid mem ~cols ~cell ~render:(fun ch ->
       if ch >= 32 && ch < 127 then String.make 1 (Char.chr ch) else " ")
 
-let text_utf8 mem ~cols = text_grid mem ~cols ~render:(fun ch -> cp437.(ch))
+let text_utf8 mem ~cols ~cell = text_grid mem ~cols ~cell ~render:(fun ch -> cp437.(ch))
 
 (* 6비트 DAC 값을 8비트로. 팔레트 배열은 바깥에서도 만질 수 있으니
    범위를 벗어난 값은 자른다 — 그림을 그리다 기계를 죽일 일은 아니다. *)
@@ -82,15 +82,15 @@ let blit img ~width ~x ~y (r, g, b) =
    위쪽 절반만 차고 아래가 검게 남는다. 폰트는 1비트/행 — 최상위 비트가
    왼쪽이다. 바탕색은 상위 니블의 아래 세 비트만 쓴다. 네 번째 비트는
    깜빡임 속성이지 색이 아니다. *)
-let rgb_text mem ~cols =
+let rgb_text mem ~cols ~cell =
   let width = cols * 8 in
   let height = rows * glyph_h * glyph_scale in
   let img = Bytes.make (width * height * 3) '\000' in
   for r = 0 to rows - 1 do
     for c = 0 to cols - 1 do
-      let cell = vram_base + (((r * cols) + c) * 2) in
-      let ch = Char.code (Bytes.get mem cell) in
-      let attr = Char.code (Bytes.get mem (cell + 1)) in
+      let a = cell ~row:r ~col:c in
+      let ch = Char.code (Bytes.get mem a) in
+      let attr = Char.code (Bytes.get mem (a + 1)) in
       let fg = cga_palette.(attr land 0x0f) in
       let bg = cga_palette.((attr lsr 4) land 0x07) in
       let glyph = Font8x8.glyph ch in
