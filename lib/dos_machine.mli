@@ -15,7 +15,8 @@
 
 type t = Dos_state.t
 
-val create : unit -> t
+val create : ?speed:Dos_ports.speed -> unit -> t
+(** [speed] 를 주지 않으면 IBM PC 의 4.77MHz 다. *)
 
 (** {1 적재} *)
 

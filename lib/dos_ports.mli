@@ -11,17 +11,40 @@
 
 type t
 
+(** {1 CPU 속도}
+
+    속도는 PIT 한 틱(1/1193182초)에 CPU 사이클이 몇 개 도는가다. 게스트가
+    시간을 재는 길 — IRQ0 간격, PIT 카운터, 리프레시 비트, 재주사 비트,
+    OPL 타이머, 시각 — 은 이 값으로 사이클을 실제 시간에 맞춘다. 사이클은
+    8086 명령표의 값이라서 속도는 "8086 으로 치면 몇 MHz" 다. *)
+
+type speed
+
+val pc_speed : speed
+(** IBM PC 의 4.77MHz(PIT 한 틱에 4 사이클). *)
+
+val speed_of_mhz : float -> (speed, string) result
+(** 가장 가까운 PIT 정수배로 맞춘다. 12 는 PIT 10 배인 11.93MHz 가 된다.
+    1.19MHz(1 배)보다 느리거나 1193MHz(1000 배)보다 빠르면, 또는 NaN 이나
+    무한대면 [Error]. *)
+
+val speed_hz : speed -> int
+(** 그 속도의 CPU 클록(Hz). *)
+
 val cga_palette : (int * int * int) array
 (** CGA 16색 — 속성 바이트의 하위 니블이 글자색, 상위 니블이 바탕색. *)
 
-val create : mem:Bytes.t -> video:Dos_video.t -> t
-(** [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
+val create : speed:speed -> mem:Bytes.t -> video:Dos_video.t -> t
+(** [speed] 는 CPU 속도다. [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
     와 같은 값으로 유지하는 데 쓴다. 커서의 진실 원천은 하나여야 한다.
     비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성)는 [video] 로
     넘긴다. *)
 
 val set_now : t -> int -> unit
 (** 현재 CPU 누적 사이클. 기계가 매 스텝 알려준다. *)
+
+val cpu_hz : t -> int
+(** 이 기계의 CPU 클록(Hz). 사이클을 초로 바꿀 때 쓴다. *)
 
 val port_in : t -> int -> int
 val port_out : t -> int -> int -> unit
