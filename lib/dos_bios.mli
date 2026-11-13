@@ -7,6 +7,18 @@ val host_served : int list
     — 인터럽트를 IVT 직독으로 부르는 런타임이 있다. 스텁은 "int 실벡터
     +0x80; iret" 이고, 그 사설 벡터를 호스트 훅이 받는다. *)
 
+val rom_seg : int
+(** F000h, the segment of every ROM routine and stub. *)
+
+val xms_entry_off : int
+(** Where the XMS control function starts in the ROM segment; INT 2Fh
+    AX=4310h hands out F000:[xms_entry_off]. *)
+
+val xms_control_id : int
+(** 43h: the service id {!private_service_vector} returns for the XMS
+    control function's stub. It is not a vector: IVT[43h] stays the IRET
+    stub. *)
+
 val install : Dos_state.t -> unit
 (** ROM·IVT·BDA 를 실기 부팅 상태로 채운다. *)
 

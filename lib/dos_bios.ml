@@ -12,7 +12,7 @@ open Dos_state
 (* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
    전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
    삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x00; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
+let host_served = [ 0x00; 0x10; 0x16; 0x20; 0x21; 0x27; 0x2F; 0x33; 0x67 ]
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
@@ -21,6 +21,7 @@ let rom_seg = 0xF000
 let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
 let bios_int8_off = 0x0040
+let xms_entry_off = 0x0060
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
@@ -29,6 +30,21 @@ let rom_font_last = 0x7E
 
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
+
+(* The XMS control function (Dos_xms), far-called at F000:[xms_entry_off]
+   after INT 2Fh AX=4310h. XMS 3.0 "IMPLEMENTATION NOTES" ask it to start
+   with a short jump over three NOPs: a hooking program patches a far
+   jump over those five bytes and chains to entry + 5. Its service id is
+   43h, the multiplex number XMS answers to. It names the stub in
+   [stubs] and picks the private vector; IVT[43h] stays the IRET stub. *)
+let xms_control_id = 0x43
+let xms_hook_bytes = 5
+
+let xms_control =
+  "\xeb\x03\x90\x90\x90"                (* jmp short +3; nop; nop; nop *)
+  ^ "\xcd" ^ String.make 1 (Char.chr (private_vector xms_control_id))
+                                     (* int 0C3h — the host serves it *)
+  ^ "\xcb"                            (* retf *)
 
 let set_ivt t v off sg =
   wr16 t (v * 4) off;
@@ -66,6 +82,10 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
+  Bytes.blit_string xms_control 0 t.mem
+    ((rom_seg * 16) + xms_entry_off)
+    (String.length xms_control);
+  t.stubs <- (xms_control_id, xms_entry_off + xms_hook_bytes) :: t.stubs;
   set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
   set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
