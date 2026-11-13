@@ -1,5 +1,5 @@
 (* INT 21h AH=38h — MS-DOS 4.0 GETSET.ASM $INTERNATIONAL, DOSCNTRY.INC,
-   COUNTRY.SYS 원본 MKCNTRY.ASM us437_info·us_ucase. *)
+   커널 기본표 DOSMES.ASM COUNTRY_CDPG·UCASE_TAB·MAP_CASE. *)
 
 let failed = ref 0
 let check name got want =
