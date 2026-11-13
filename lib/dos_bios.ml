@@ -27,12 +27,37 @@ let rom_font_off = 0xFA6E
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
+(* VGA BIOS 의 글꼴 표: INT 43h·1Fh 가 가리키고 AX=1130h 가 알려 준다.
+   키는 글자 높이다. VGA ROM 의 8x14·8x16 글꼴이 없어서 8x8 글꼴을
+   세로로 늘려 채운다 — 행·열 자리는 맞고 글자 모양만 다르다. 256자 표
+   가운데 0x20~0x7E 만 채운다. 8x8 표의 뒤 절반(128자)이 INT 1Fh 표다. *)
+let font_tables = [ (8, 0xA000); (14, 0xB000); (16, 0xC000) ]
+let font_glyph_rows = 8
+let font8_off = List.assoc font_glyph_rows font_tables
+let cga_high_font_off = font8_off + (cga_high_first * font_glyph_rows)
+
+(* AX=1130h BH=5·7 의 9점 대체 글꼴 목록. 목록 끝 표시(0) 하나뿐이라
+   대체할 글자가 없다. *)
+let alt_font_off = 0xD000
+
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
 
 let set_ivt t v off sg =
   wr16 t (v * 4) off;
   wr16 t ((v * 4) + 2) sg
+
+(* VGA BIOS 는 모드를 세울 때 INT 43h 를 그 모드의 글자 높이 표로 돌린다. *)
+let set_font_vector t =
+  set_ivt t font_vector (List.assoc (Dos_video.char_height t.video) font_tables) rom_seg
+
+(* AH=0Ah 는 그래픽 모드에서 색을 받지 않는다. 모드마다 가장 밝은 색으로
+   그린다(DOSBox int10_char.cpp WriteChar). *)
+let default_glyph_color t =
+  match Dos_video.kind t.video with
+  | Dos_video.Cga4 -> 0x03
+  | Dos_video.Cga2 -> 0x01
+  | Dos_video.Text | Dos_video.Planar | Dos_video.Linear256 -> 0x0F
 
 (* IRQ0 에서 도는 ROM 루틴: 0x46C 틱을 올리고 INT 1Ch 사용자 훅을 부른
    뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다. *)
@@ -85,8 +110,8 @@ let install t =
   wr16 t 0x44E 0;                   (* 페이지 시작 오프셋 *)
   wr16 t 0x463 0x3D4;               (* CRTC 어드레스 포트(컬러) *)
   wr8 t 0x465 0x29;                 (* CRT 모드 레지스터 사본 *)
-  wr8 t 0x484 (rows - 1);
-  wr16 t 0x485 8;                   (* 글자 높이 *)
+  wr8 t 0x484 (rows t - 1);
+  wr16 t 0x485 (Dos_video.char_height t.video);  (* 글자 높이 *)
   wr8 t 0x462 0;                    (* 활성 페이지 *)
   wr8 t 0x460 7; wr8 t 0x461 6;     (* 커서 모양 *)
   set_cursor t 0 0;
@@ -128,7 +153,20 @@ let install t =
       (fun row b ->
         wr8 t ((rom_seg * 16) + rom_font_off + (ch * 8) + row) b)
       (Font8x8.glyph ch)
-  done
+  done;
+  List.iter
+    (fun (height, off) ->
+      for ch = rom_font_first to rom_font_last do
+        let g = Font8x8.glyph ch in
+        for line = 0 to height - 1 do
+          wr8 t ((rom_seg * 16) + off + (ch * height) + line)
+            g.(line * font_glyph_rows / height)
+        done
+      done)
+    font_tables;
+  wr8 t ((rom_seg * 16) + alt_font_off) 0;
+  set_ivt t cga_high_font_vector cga_high_font_off rom_seg;
+  set_font_vector t
 
 (* IVT[v] 가 아직 우리 스텁이면(게스트가 AH=25h 로 안 바꿨으면) 호스트
    구현으로 바로 간다 — deliver 로 다시 스텁에 들어가면 무한루프다. *)
@@ -166,7 +204,9 @@ let video t =
     if rd8 t 0x489 land 0x08 = 0 then Dos_ports.reset_dac t.ports;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
-    wr8 t 0x484 (rows - 1);
+    wr8 t 0x484 (rows t - 1);
+    wr16 t 0x485 (Dos_video.char_height t.video);
+    set_font_vector t;
     set_cursor t 0 0
   | 0x01 ->
     (* 커서 모양: CH=시작 스캔라인, CL=끝 *)
@@ -190,6 +230,21 @@ let video t =
   | 0x08 ->
     let col, row = get_cursor t in
     Cpu86.set_reg16 cpu 0 (read_cell t row col)
+  | (0x09 | 0x0A) when graphics t ->
+    (* 그래픽 모드: 글꼴 표의 점을 CX 번 찍는다. AH=09h 는 BL 이 색이고
+       bit7 이면 XOR 이다. AH=0Ah 는 모드의 기본색을 쓴다. 256색 모드의
+       바탕은 BH 다. 커서는 움직이지 않는다. *)
+    let fg = if ah = 0x09 then Cpu86.reg8 cpu 3 else default_glyph_color t in
+    let bg = glyph_background t ~fg ~back256:(Cpu86.reg8 cpu 7) in
+    let col, row = get_cursor t in
+    let r = ref row and c = ref col in
+    for _ = 1 to max 1 (Cpu86.reg16 cpu 1) do
+      if !r < rows t then begin
+        write_glyph t ~col:!c ~row:!r al ~fg ~bg;
+        incr c;
+        if !c >= cols t then begin c := 0; incr r end
+      end
+    done
   | 0x09 | 0x0A ->
     (* 커서 자리에 같은 글자를 CX 번. 커서는 움직이지 않는다.
        AH=09 는 BL 을 속성으로 쓰고, AH=0A 는 화면의 속성을 남긴다. *)
@@ -197,7 +252,7 @@ let video t =
     let n = max 1 (Cpu86.reg16 cpu 1) in
     let r = ref row and c = ref col in
     for _ = 1 to n do
-      if !r < rows then begin
+      if !r < rows t then begin
         let attr =
           if ah = 0x09 then Cpu86.reg8 cpu 3
           else (read_cell t !r !c) lsr 8
@@ -207,7 +262,9 @@ let video t =
         if !c >= cols t then begin c := 0; incr r end
       end
     done
-  | 0x0E -> put_char t al (Cpu86.reg8 cpu 3 land 0x0f)
+  | 0x0E ->
+    (* 그래픽 모드에서 BL 은 글자 색 전체다(256색 모드면 0~255). *)
+    put_char t al (if graphics t then Cpu86.reg8 cpu 3 else Cpu86.reg8 cpu 3 land 0x0f)
   | 0x0C ->
     (* 점 찍기: AL=색, CX=x, DX=y. BH 페이지는 한 장뿐이라 무시한다. *)
     Dos_video.put_pixel t.video ~x:(Cpu86.reg16 cpu 1) ~y:(Cpu86.reg16 cpu 2)
@@ -273,13 +330,30 @@ let video t =
        done
      | _ -> ())
   | 0x11 ->
-    (* AL=30h 폰트 정보: ES:BP=ROM 8x8 폰트, CX=높이, DL=행-1.
-       비디오 초기화가 이 포인터로 분기한다(실측: 빈 값이면 추락). *)
+    (* AL=30h 폰트 정보: BH 가 고른 표를 ES:BP 에, 화면 글꼴의 높이를 CX
+       에, 행-1 을 DL 에 준다(RBIL INT 10/AX=1130h). 비디오 초기화가 이
+       포인터로 분기한다(실측: 빈 값이면 추락). *)
     if al = 0x30 then begin
-      Cpu86.set_seg cpu 0 rom_seg;
-      Cpu86.set_reg16 cpu 5 0xFA6E;
-      Cpu86.set_reg16 cpu 1 8;
-      Cpu86.set_reg8 cpu 2 (rows - 1)
+      let rom off = Some (rom_seg, off) in
+      let vector v = Some (rd16 t ((v * 4) + 2), rd16 t (v * 4)) in
+      let table =
+        match Cpu86.reg8 cpu 7 with
+        | 0x00 -> vector cga_high_font_vector
+        | 0x01 -> vector font_vector
+        | 0x02 -> rom (List.assoc 14 font_tables)
+        | 0x03 -> rom rom_font_off
+        | 0x04 -> rom cga_high_font_off
+        | 0x05 | 0x07 -> rom alt_font_off
+        | 0x06 -> rom (List.assoc 16 font_tables)
+        | _ -> None
+      in
+      Option.iter
+        (fun (sg, off) ->
+          Cpu86.set_seg cpu 0 sg;
+          Cpu86.set_reg16 cpu 5 off;
+          Cpu86.set_reg16 cpu 1 (rd16 t 0x485);
+          Cpu86.set_reg8 cpu 2 (rd8 t 0x484))
+        table
     end
   | 0x12 ->
     (* 대체 선택: BL=10h 이면 EGA/VGA 정보. BH=0(컬러), BL=3(256KB) *)

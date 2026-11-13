@@ -85,6 +85,16 @@ let mode t = t.mode
 let kind t = let k, _, _, _ = spec t.mode in k
 let dims t = let _, w, h, _ = spec t.mode in (w, h)
 let text_cols t = let _, _, _, c = spec t.mode in c
+
+(* BIOS 글자 행: 480줄 모드는 8x16 글자로 30행, 나머지는 25행. 글자
+   높이는 줄 수를 행 수로 나눈 것이다(200줄 8, 350줄 14, 480줄과 텍스트
+   16). *)
+let tall_lines = 480
+let tall_rows = 30
+let normal_rows = 25
+
+let text_rows t = if snd (dims t) >= tall_lines then tall_rows else normal_rows
+let char_height t = snd (dims t) / text_rows t
 let planes t = t.planes
 let attr_palette t = t.attr
 let set_attr_palette t i v = if i >= 0 && i < attr_count then t.attr.(i) <- v
@@ -248,23 +258,29 @@ let reset_attr_flip t = t.attr_is_data <- false
 let cga_row_addr y = cga_base + (if y land 1 = 0 then 0 else 0x2000)
                      + ((y / 2) * 80)
 
+(* INT 10h AH=0Ch: 256색이 아닌 모드에서 색의 bit7 은 "이미 있는 점과
+   XOR" 이다(Ralf Brown's Interrupt List, INT 10/AH=0Ch). *)
+let xor_pixel = 0x80
+
 let put_pixel t ~x ~y ~color =
+  let xor = color land xor_pixel <> 0 in
   match kind t with
   | Text -> ()
   | Cga4 ->
     let a = cga_row_addr y + (x / 4) in
     let shift = (3 - (x mod 4)) * 2 in
     let old = Char.code (Bytes.get t.mem a) in
-    let nv = (old land lnot (3 lsl shift)) lor ((color land 3) lsl shift) in
+    let c = color land 3 in
+    let c = if xor then ((old lsr shift) land 3) lxor c else c in
+    let nv = (old land lnot (3 lsl shift)) lor (c lsl shift) in
     Bytes.set t.mem a (Char.chr nv)
   | Cga2 ->
     let a = cga_row_addr y + (x / 8) in
     let bit = 7 - (x mod 8) in
     let old = Char.code (Bytes.get t.mem a) in
-    let nv =
-      if color land 1 <> 0 then old lor (1 lsl bit)
-      else old land lnot (1 lsl bit)
-    in
+    let c = color land 1 in
+    let c = if xor then ((old lsr bit) land 1) lxor c else c in
+    let nv = if c <> 0 then old lor (1 lsl bit) else old land lnot (1 lsl bit) in
     Bytes.set t.mem a (Char.chr nv)
   | Planar ->
     let w, _ = dims t in
@@ -272,8 +288,11 @@ let put_pixel t ~x ~y ~color =
     let bit = 1 lsl (7 - (x mod 8)) in
     for p = 0 to plane_count - 1 do
       let old = Char.code (Bytes.get t.planes.(p) off) in
+      let on = color land (1 lsl p) <> 0 in
       let nv =
-        if color land (1 lsl p) <> 0 then old lor bit else old land lnot bit
+        if xor then (if on then old lxor bit else old)
+        else if on then old lor bit
+        else old land lnot bit
       in
       Bytes.set t.planes.(p) off (Char.chr nv)
     done
