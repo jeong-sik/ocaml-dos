@@ -155,6 +155,9 @@ let ivt_is_own_stub t v =
       && rd16 t ((v * 4) + 2) = rom_seg)
     t.stubs
 
+let ivt_is_iret_stub t v =
+  rd16 t (v * 4) = iret_stub_off && rd16 t ((v * 4) + 2) = rom_seg
+
 let private_service_vector t raw =
   List.find_map
     (fun (v, off) ->
@@ -323,7 +326,7 @@ let video t =
     Cpu86.set_reg8 cpu 0 0x1A;
     Cpu86.set_reg8 cpu 3 0x08;
     Cpu86.set_reg8 cpu 7 0x00
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x10
 
 (* ---------- INT 16h 키보드 ---------- *)
 
@@ -362,7 +365,7 @@ let keyboard t =
     push_key t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x16
 
 (* ---------- INT 1Ah 시각 ---------- *)
 
@@ -392,7 +395,7 @@ let clock t =
     Cpu86.set_reg8 cpu 6 (to_bcd m);
     Cpu86.set_reg8 cpu 2 (to_bcd d);
     set_cf t false
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x1A
 
 (* ---------- INT 33h 마우스 ---------- *)
 
@@ -428,7 +431,7 @@ let mouse t =
     m.mouse_handler_mask <- Cpu86.reg16 cpu 1;
     m.mouse_handler_seg <- Cpu86.seg cpu 0;
     m.mouse_handler_off <- Cpu86.reg16 cpu 2
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x33
 
 (* ---------- 묶음 ---------- *)
 

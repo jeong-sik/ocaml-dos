@@ -18,6 +18,12 @@ val install : Dos_state.t -> unit
 val ivt_is_own_stub : Dos_state.t -> int -> bool
 (** 그 벡터가 아직 우리 스텁을 가리키는가 — 게스트가 가로챘으면 false. *)
 
+val rom_seg : int
+
+val ivt_is_iret_stub : Dos_state.t -> int -> bool
+(** 그 벡터가 ROM 의 IRET 스텁을 가리키는가 — 이 기계가 구현하지 않은 벡터의
+    부팅 값이다. *)
+
 val private_service_vector : Dos_state.t -> int -> int option
 (** The real vector only when the private INT was issued by its ROM stub.
     This entry invokes the host service without consulting a hooked IVT. *)

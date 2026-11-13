@@ -132,6 +132,9 @@ let create () =
           frame_ss = Cpu86.seg cpu 2; frame_sp = Cpu86.reg16 cpu 4; status_mask } in
         accept_service t ~return_to (host_service t ~return_to v)
       | None ->
+        (* ROM 이 부르는 INT 1Ch 같은 것은 빼고, 프로그램이 부른 것만 *)
+        if Dos_bios.ivt_is_iret_stub t raw && Cpu86.seg cpu 1 <> Dos_bios.rom_seg then
+          report_unserved t Iret_stub ~vector:raw;
         if (not (Dos_bios.ivt_is_own_stub t raw)) && deliver_ivt t raw then ()
         else accept_service t ~return_to:Direct_return
             (host_service t ~return_to:Direct_return raw));

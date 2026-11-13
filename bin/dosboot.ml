@@ -44,6 +44,28 @@ let ega_com () =
       "\xb8\x00\x4c";      (* mov ax,4C00h *)
       "\xcd\x21" ]           (* int 21h *)
 
+(* --unserved: 이 기계가 받지 못한 INT 호출을 (갈래, 벡터, AH) 로 묶어 센다.
+   AL 은 처음 본 순서대로 남긴다. *)
+let unserved_tally () =
+  let tally = Hashtbl.create 16 in
+  let record kind ~vector ~ax =
+    let key = (kind, vector, ax lsr 8) and al = ax land 0xff in
+    let count, als = Option.value (Hashtbl.find_opt tally key) ~default:(0, []) in
+    Hashtbl.replace tally key (count + 1, if List.mem al als then als else als @ [ al ])
+  in
+  let kind_name = function
+    | Dos_state.No_function -> "no-function"
+    | Dos_state.Iret_stub -> "iret-stub"
+  in
+  let print () =
+    Hashtbl.fold (fun k v acc -> (k, v) :: acc) tally []
+    |> List.sort compare
+    |> List.iter (fun ((kind, vector, ah), (count, als)) ->
+        Printf.eprintf "UNSERVED %s INT %02xh AH=%02xh x%d AL=%s\n%!" (kind_name kind)
+          vector ah count (String.concat "," (List.map (Printf.sprintf "%02x") als)))
+  in
+  (record, print)
+
 let read_file path =
   let ic = open_in_bin path in
   let s = really_input_string ic (in_channel_length ic) in
@@ -132,6 +154,7 @@ let () =
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
+  and unserved = ref false
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
@@ -165,6 +188,7 @@ let () =
       ("--utf8", Arg.Set utf8, "  화면을 코드 페이지 437 그대로 출력");
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--int-trace", Arg.Set int_trace, "  INT 명령을 만날 때마다 기록");
+      ("--unserved", Arg.Set unserved, "  이 기계가 받지 못한 INT 호출을 끝에 센다(stderr)");
       ("--glyph-trace", Arg.String (fun s ->
          match String.split_on_char ',' s with
          | [ mx; rec_ ] ->
@@ -177,6 +201,8 @@ let () =
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
   let m = Dos_machine.create () in
+  let record_unserved, print_unserved = unserved_tally () in
+  if !unserved then Dos_machine.on_unserved m record_unserved;
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
@@ -282,6 +308,7 @@ let () =
        (Dos_machine.run_with_keys ~on_step ~on_key m ~max_steps:!steps
           ~keys:(parse_keys !keys))
    with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
+  if !unserved then print_unserved ();
   let c = Dos_machine.cpu_of m in
   let fw, fh = Dos_machine.frame_dims m in
   Printf.printf "mode=%02xh frame=%dx%d\n%!" (Dos_machine.video_mode m) fw fh;
