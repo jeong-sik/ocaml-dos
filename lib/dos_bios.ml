@@ -24,14 +24,16 @@ let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
-(* INT 21h AH=38h 표가 가리키는 대문자 루틴(Dos_country). 스텁 자리
-   (0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
-let case_map_off = 0x0400
+(* 나라별 표(Dos_country): 대문자 루틴과 INT 21h AH=38h·63h·65h 가
+   가리키는 표들. 스텁 자리(0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
+let country_off = 0x0400
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
+
+let country, country_rom = Dos_country.image ~segment:rom_seg ~at:country_off
 
 let set_ivt t v off sg =
   wr16 t (v * 4) off;
@@ -70,8 +72,8 @@ let install t =
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
   String.iteri
-    (fun i c -> wr8 t ((rom_seg * 16) + case_map_off + i) (Char.code c))
-    (Dos_country.case_map_code ~at:case_map_off);
+    (fun i c -> wr8 t ((rom_seg * 16) + country_off + i) (Char.code c))
+    country_rom;
   set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
   set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
@@ -437,5 +439,3 @@ let service t vec =
   | _ -> ());
   Completed
   end
-
-let case_map_entry = (rom_seg, case_map_off)

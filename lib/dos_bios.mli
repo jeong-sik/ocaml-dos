@@ -25,6 +25,5 @@ val service : Dos_state.t -> int -> Dos_state.service_result
 (** 벡터 번호에 맞는 BIOS 서비스를 실행한다. 모르는 벡터는 아무 일도
     하지 않는다(실기의 IRET 스텁과 같다). *)
 
-val case_map_entry : int * int
-(** INT 21h AH=38h 표의 대문자 루틴 (세그먼트, 오프셋). [install] 이 ROM 에
-    {!Dos_country.case_map_code} 를 싣는다. *)
+val country : Dos_country.layout
+(** 나라별 표의 자리. [install] 이 ROM 에 {!Dos_country.image} 를 싣는다. *)

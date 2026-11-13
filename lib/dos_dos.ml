@@ -554,7 +554,7 @@ let international_service t =
     let ds = Cpu86.seg cpu 3 in
     String.iteri
       (fun i c -> wr8 t (physical ds ((dx + i) land 0xffff)) (Char.code c))
-      (Dos_country.info ~case_map:Dos_bios.case_map_entry);
+      (Dos_country.info Dos_bios.country);
     Cpu86.set_reg16 cpu 3 current;
     succeed ()
   end
