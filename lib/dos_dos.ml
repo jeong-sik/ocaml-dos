@@ -690,6 +690,37 @@ let resume_input t request =
          if String.length text > 0 && text.[0] = '\026' then "" else text ^ "\r\n";
        return_console_bytes t ~destination ~length)
 
+(* ---------- 시각과 날짜: MS-DOS 4.0 MSCLOCK.ASM·TIME.ASM ---------- *)
+
+(* $SET_DATE·$SET_TIME 이 거절할 때 AL *)
+let bad_clock_value = 0xFF
+
+(* TIM$READ 가 INT 1Ah AH=00h 로 하는 일: 틱을 읽고 자정 넘김 표시를
+   지운다. 표시가 있으면 날짜를 하루 넘긴다(표시가 2 여도 하루다). *)
+let read_clock t =
+  if rd8 t bda_midnight <> 0 then t.dos_days <- Dos_clock.next_day t.dos_days;
+  wr8 t bda_midnight 0;
+  read_ticks t
+
+(* TIM$WRIT 가 INT 1Ah AH=01h 로 하는 일: 틱을 쓴다. AH=01h 는 자정 넘김
+   표시도 지우지만, 부르는 쪽(2Bh·2Dh)이 바로 앞에서 read_clock 으로 이미
+   지웠다. *)
+let write_clock t ~days ~ticks =
+  write_ticks t ticks;
+  t.dos_days <- days
+
+(* 부팅 때 DOS 가 RTC 날짜를 읽어 날 수를 정한다(READCLOC.INC
+   read_real_date). read_real_date 는 그 전에 자정 넘김을 버리는데, 이
+   기계에서는 Dos_bios.set_ticks_from_clock 이 먼저 지운다. *)
+let set_date_from_clock t =
+  let year, month, day, _, _, _ = now_fields t in
+  match Dos_clock.date_of_fields ~year ~month ~day with
+  | Some d -> t.dos_days <- Dos_clock.days_of_date d
+  | None ->
+    invalid_arg
+      (Printf.sprintf "DOS date %04d-%02d-%02d is outside 1980-01-01..2099-12-31"
+         year month day)
+
 (* ---------- INT 21h ---------- *)
 
 let service_immediate t =
@@ -746,27 +777,42 @@ let service_immediate t =
     Cpu86.set_reg16 cpu 3 (rd16 t (v * 4));
     Cpu86.set_seg cpu 0 (rd16 t ((v * 4) + 2))
   | 0x2A ->
-    let y, m, d, _, _, _ = now_fields t in
-    Cpu86.set_reg16 cpu 1 y;
-    Cpu86.set_reg8 cpu 6 m;
-    Cpu86.set_reg8 cpu 2 d;
-    Cpu86.set_reg8 cpu 0 (day_of_week (y, m, d))
+    ignore (read_clock t : int);
+    let d = Dos_clock.date_of_days t.dos_days in
+    Cpu86.set_reg16 cpu 1 d.year;
+    Cpu86.set_reg8 cpu 6 d.month;
+    Cpu86.set_reg8 cpu 2 d.day;
+    Cpu86.set_reg8 cpu 0 (Dos_clock.weekday t.dos_days)
   | 0x2B ->
-    t.epoch_year <- Cpu86.reg16 cpu 1;
-    t.epoch_month <- Cpu86.reg8 cpu 6;
-    t.epoch_day <- Cpu86.reg8 cpu 2;
-    Cpu86.set_reg8 cpu 0 0
+    (match
+       Dos_clock.date_of_fields ~year:(Cpu86.reg16 cpu 1) ~month:(Cpu86.reg8 cpu 6)
+         ~day:(Cpu86.reg8 cpu 2)
+     with
+     | None -> Cpu86.set_reg8 cpu 0 bad_clock_value
+     | Some d ->
+       (* DODATE: 날 수를 정하고, 시각을 읽어 그대로 다시 쓴다. 틱은 시각을
+          거쳐 돌아오며 한 틱 줄 수 있다. *)
+       let time = Dos_clock.time_of_ticks (read_clock t) in
+       write_clock t ~days:(Dos_clock.days_of_date d) ~ticks:(Dos_clock.ticks_of_time time);
+       Cpu86.set_reg8 cpu 0 0)
   | 0x2C ->
-    let _, _, _, h, mi, s = now_fields t in
-    Cpu86.set_reg8 cpu 5 h;
-    Cpu86.set_reg8 cpu 1 mi;
-    Cpu86.set_reg8 cpu 6 s;
-    Cpu86.set_reg8 cpu 2 0
-  | 0x2D ->
-    t.epoch_hour <- Cpu86.reg8 cpu 5;
-    t.epoch_min <- Cpu86.reg8 cpu 1;
-    t.epoch_sec <- Cpu86.reg8 cpu 6;
+    let time = Dos_clock.time_of_ticks (read_clock t) in
+    Cpu86.set_reg8 cpu 5 time.hour;
+    Cpu86.set_reg8 cpu 1 time.minute;
+    Cpu86.set_reg8 cpu 6 time.second;
+    Cpu86.set_reg8 cpu 2 time.hundredths;
     Cpu86.set_reg8 cpu 0 0
+  | 0x2D ->
+    (match
+       Dos_clock.time_of_fields ~hour:(Cpu86.reg8 cpu 5) ~minute:(Cpu86.reg8 cpu 1)
+         ~second:(Cpu86.reg8 cpu 6) ~hundredths:(Cpu86.reg8 cpu 2)
+     with
+     | None -> Cpu86.set_reg8 cpu 0 bad_clock_value
+     | Some time ->
+       (* $SET_TIME 은 먼저 시계를 읽어 넘긴 자정을 날짜에 반영한다 *)
+       ignore (read_clock t : int);
+       write_clock t ~days:t.dos_days ~ticks:(Dos_clock.ticks_of_time time);
+       Cpu86.set_reg8 cpu 0 0)
   | 0x30 ->
     Cpu86.set_reg8 cpu 0 dos_version_major;
     Cpu86.set_reg8 cpu 4 dos_version_minor;
