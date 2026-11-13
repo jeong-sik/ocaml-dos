@@ -104,6 +104,7 @@ let create () =
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
+      dos_days = 0;   (* 아래 Dos_dos.set_date_from_clock 가 기준시각으로 채운다 *)
       ems_pages = Hashtbl.create 2;
       ems_mapped = Array.make 4 (0, 0);
       mouse = {
@@ -120,6 +121,7 @@ let create () =
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
+  Dos_dos.set_date_from_clock t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
       match Dos_bios.private_service_vector t raw with
@@ -402,7 +404,7 @@ let cpu_of t = t.cpu
 let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
 let mem_write t a v = wr8 t a v
-let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
+let tick_count t = read_ticks t
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
@@ -415,7 +417,8 @@ let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_hour <- hour;
   t.epoch_min <- minute;
   t.epoch_sec <- second;
-  Dos_bios.set_ticks_from_clock t
+  Dos_bios.set_ticks_from_clock t;
+  Dos_dos.set_date_from_clock t
 
 let attach_mouse t = t.mouse.mouse_present <- true
 

@@ -21,8 +21,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    5: suspended BIOS input services carry their return boundary, and both
    input and EXEC carry their owned ROM service return frame.
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
-   console bytes are carried explicitly. *)
-let format_version = 6
+   console bytes are carried explicitly.
+   7: DOS keeps its own day count (MS-DOS DAYCNT) after the clock fields;
+   the DOS time of day is the BIOS tick count in RAM. *)
+let format_version = 7
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -246,7 +248,7 @@ let write_payload w t =
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped;
+        epoch_min; epoch_sec; dos_days; ems_pages; ems_mapped;
         mouse } = t
   in
   let put what r v = C.put w ~what r v in
@@ -294,6 +296,7 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  put "DOS days" C.count dos_days;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
       put "EMS handle" ems_handle_key k;
@@ -488,6 +491,7 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  t.dos_days <- get "DOS days" C.count;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in

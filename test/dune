@@ -73,3 +73,7 @@
 (test
  (name dos_bios_tick_test)
  (libraries dosmachine))
+
+(test
+ (name dos_clock_test)
+ (libraries dosmachine))

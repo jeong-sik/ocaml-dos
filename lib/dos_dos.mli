@@ -40,3 +40,9 @@ val largest_free : Dos_state.t -> int
 
 val matches_pattern : pattern:string -> name:string -> bool
 (** DOS 8.3 와일드카드. '*' 는 그 칸의 남은 자리를 '?' 로 채운다. *)
+
+val set_date_from_clock : Dos_state.t -> unit
+(** DOS 날짜(1980-01-01 부터 센 날 수)를 지금 RTC 날짜로 정한다. 부팅 때
+    MS-DOS 가 하는 일이다(READCLOC.INC [read_real_date]). 자정 넘김은
+    {!Dos_bios.set_ticks_from_clock} 을 먼저 불러 지운다. 날짜가
+    1980-01-01..2099-12-31 밖이면 [Invalid_argument]. *)

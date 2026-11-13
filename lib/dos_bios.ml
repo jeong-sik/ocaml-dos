@@ -98,10 +98,8 @@ let ticks_of_time ~hour ~minute ~second =
    틱은 하루를 넘지 않는다(23:59:59 가 1573025). *)
 let set_ticks_from_clock t =
   let _, _, _, hour, minute, second = now_fields t in
-  let ticks = ticks_of_time ~hour ~minute ~second in
-  wr16 t 0x46C (ticks land 0xFFFF);
-  wr16 t 0x46E (ticks lsr 16);
-  wr8 t 0x470 0
+  write_ticks t (ticks_of_time ~hour ~minute ~second);
+  wr8 t bda_midnight 0
 
 let equipment_word =
   (* bit0 디스켓 있음, bit1 코프로세서 없음(8087 미장착 — ESC 명령은
@@ -411,14 +409,14 @@ let clock t =
   let cpu = t.cpu in
   match Cpu86.reg8 cpu 4 with
   | 0x00 ->
-    Cpu86.set_reg16 cpu 1 (rd16 t 0x46E);   (* CX = 상위 워드 *)
-    Cpu86.set_reg16 cpu 2 (rd16 t 0x46C);   (* DX = 하위 워드 *)
-    Cpu86.set_reg8 cpu 0 (rd8 t 0x470);     (* AL = 자정 넘김 *)
-    wr8 t 0x470 0
+    let ticks = read_ticks t in
+    Cpu86.set_reg16 cpu 1 (ticks lsr 16);         (* CX = 상위 워드 *)
+    Cpu86.set_reg16 cpu 2 (ticks land 0xFFFF);    (* DX = 하위 워드 *)
+    Cpu86.set_reg8 cpu 0 (rd8 t bda_midnight);    (* AL = 자정 넘김 *)
+    wr8 t bda_midnight 0
   | 0x01 ->
-    wr16 t 0x46E (Cpu86.reg16 cpu 1);
-    wr16 t 0x46C (Cpu86.reg16 cpu 2);
-    wr8 t 0x470 0
+    write_ticks t ((Cpu86.reg16 cpu 1 lsl 16) lor Cpu86.reg16 cpu 2);
+    wr8 t bda_midnight 0
   | 0x02 ->
     let _, _, _, h, mi, s = now_fields t in
     Cpu86.set_reg8 cpu 5 (to_bcd h);

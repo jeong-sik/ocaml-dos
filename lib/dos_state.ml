@@ -140,13 +140,17 @@ type t = {
   mutable stubs : (int * int) list;           (** (벡터, ROM 스텁 오프셋) *)
   mutable exec_frames : exec_frame list;      (** EXEC 로 띄운 자식의 부모 프레임 *)
   mutable last_child_code : int;              (** AH=4Dh 가 돌려줄 마지막 자식 코드 *)
-  (* 기준 시각 — 여기에 경과를 더해 날짜·시각을 만든다 *)
+  (* 기준 시각 — RTC(INT 1Ah 02h·04h)는 여기에 경과를 더해 만든다. 부팅
+     때 BIOS 틱과 DOS 날짜도 이 시각에서 채운다. *)
   mutable epoch_year : int;
   mutable epoch_month : int;
   mutable epoch_day : int;
   mutable epoch_hour : int;
   mutable epoch_min : int;
   mutable epoch_sec : int;
+  mutable dos_days : int;
+      (** DOS 의 날짜: 1980-01-01 부터 센 날 수(MS-DOS DAYCNT). 시각은 BIOS
+          틱에서 읽는다(Dos_clock). *)
   (* EMS 4.0 스텁(Dos_ems)의 상태 *)
   ems_pages : (int, Bytes.t array) Hashtbl.t;
         (** 핸들(1 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB) *)
@@ -253,17 +257,13 @@ let now_fields t =
   done;
   (!y, !m, !d, rest / 3600, rest mod 3600 / 60, rest mod 60)
 
-(* 1980-01-01 부터의 요일 계산용 — DOS AH=2Ah 가 AL 에 요일을 준다.
-   1980-01-01 은 화요일이므로 2 에서 시작한다. *)
-let day_of_week (y, m, d) =
-  let days = ref 0 in
-  for yy = 1980 to y - 1 do
-    days := !days + if (yy mod 4 = 0 && yy mod 100 <> 0) || yy mod 400 = 0
-                    then 366 else 365
-  done;
-  for mm = 1 to m - 1 do days := !days + days_in_month y mm done;
-  days := !days + d - 1;
-  (!days + 2) mod 7
+(* BIOS 데이터 영역의 틱(0x40:0x6C, 32 비트)과 자정 넘김(0x40:0x70). *)
+let bda_ticks = 0x46C
+let bda_midnight = 0x470
+let read_ticks t = rd16 t bda_ticks lor (rd16 t (bda_ticks + 2) lsl 16)
+let write_ticks t v =
+  wr16 t bda_ticks (v land 0xFFFF);
+  wr16 t (bda_ticks + 2) ((v lsr 16) land 0xFFFF)
 
 (* ---------- 커서와 화면 ---------- *)
 
