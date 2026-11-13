@@ -71,6 +71,15 @@ val seg : t -> int -> int
 val set_seg : t -> int -> int -> unit
 
 val dump_ip : t -> int
+
+val bus_read : t -> int -> int
+(** The [read] callback this core was built with: what an instruction
+    sees at that physical address. A host service that copies memory the
+    way the guest's own string instructions would goes through it. *)
+
+val bus_write : t -> int -> int -> unit
+(** The [write] callback this core was built with. *)
+
 val set_ip : t -> int -> unit
 
 val physical : seg:int -> off:int -> int
