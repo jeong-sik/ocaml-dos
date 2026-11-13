@@ -157,6 +157,10 @@ type t = {
   ems_saved : (int, (int * int) option array) Hashtbl.t;
         (** 핸들 → AH=47h 가 저장한 [ems_mapped]. AH=48h 가 꺼내 간다.
             있는 페이지만 가리킨다. *)
+  ems_names : (int, string) Hashtbl.t;
+        (** 핸들 → AH=53h 로 붙인 이름. 여덟 바이트이고, 첫 NUL 뒤는 모두
+            NUL 이다. 이름이 없는(모두 NUL) 핸들은 없고, 같은 이름은 둘
+            없다. *)
   mouse : mouse;
 }
 

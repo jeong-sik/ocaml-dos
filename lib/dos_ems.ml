@@ -19,6 +19,15 @@ let page_bytes = P.page_bytes
 let os_handle = P.os_handle
 let max_handle = P.max_handle
 let boot_handles = P.boot_handles
+let names_ok = P.names_ok
+
+(* Function 19: 이 드라이버의 핸들은 모두 휘발성(0)이다. 비휘발성(1)은
+   지원하지 않는다(91h). DOSBox 와 같다. *)
+let volatile = 0
+let non_volatile = 1
+
+(* Function 21: 핸들 목록의 칸은 핸들 워드와 이름 여덟 바이트다. *)
+let directory_entry_bytes = 2 + P.name_bytes
 
 (* ---------- 게스트 배열 ----------
 
@@ -31,6 +40,8 @@ let boot_handles = P.boot_handles
    둔다. 59h 의 "context save area size" 는 전체 배열의 크기다. *)
 
 let lin seg off = (seg lsl 4) + (off land 0xffff)
+let peek_string t seg off n = String.init n (fun i -> Char.chr (rd8 t (lin seg (off + i))))
+let poke_string t seg off s = String.iteri (fun i c -> wr8 t (lin seg (off + i)) (Char.code c)) s
 let peek16 t seg off = rd8 t (lin seg off) lor (rd8 t (lin seg (off + 1)) lsl 8)
 let poke16 t seg off v = wr8 t (lin seg off) v; wr8 t (lin seg (off + 1)) (v lsr 8)
 
@@ -202,6 +213,43 @@ let service t =
          let r = P.reallocate t dx ~count:bx in
          set_bx (match r with Ok () -> bx | Error _ -> Array.length pages);
          r)
+    | 0x52 ->
+      (match al with
+       | 0x00 ->
+         if Hashtbl.mem t.ems_pages dx then (set_al volatile; Ok ()) else Error P.Invalid_handle
+       | 0x01 ->
+         let bl = Cpu86.reg8 cpu 3 in
+         if not (Hashtbl.mem t.ems_pages dx) then Error P.Invalid_handle
+         else if bl = volatile then Ok ()
+         else if bl = non_volatile then Error P.Not_supported
+         else Error P.Undefined_attribute
+       | 0x02 -> set_al volatile; Ok ()
+       | _ -> Error P.Invalid_subfunction)
+    | 0x53 ->
+      (match al with
+       | 0x00 ->
+         if Hashtbl.mem t.ems_pages dx then (poke_string t es di (P.name t dx); Ok ())
+         else Error P.Invalid_handle
+       | 0x01 -> P.set_name t dx (peek_string t ds si P.name_bytes)
+       | _ -> Error P.Invalid_subfunction)
+    | 0x54 ->
+      (match al with
+       | 0x00 ->
+         let handles = List.sort compare (Hashtbl.fold (fun h _ acc -> h :: acc) t.ems_pages []) in
+         List.iteri
+           (fun i h ->
+             let at = di + (i * directory_entry_bytes) in
+             poke16 t es at h;
+             poke_string t es (at + word_bytes) (P.name t h))
+           handles;
+         set_al (List.length handles);
+         Ok ()
+       | 0x01 -> Result.map set_dx (P.find_name t (peek_string t ds si P.name_bytes))
+       | 0x02 ->
+         (* Function 21: 운영체제 핸들을 포함한 최대 핸들 수 *)
+         set_bx (P.max_handle + 1);
+         Ok ()
+       | _ -> Error P.Invalid_subfunction)
     | 0x57 ->
       (match al with
        | 0x00 -> Dos_ems_move.move_region t ~exchange:false ~seg:ds ~off:si
