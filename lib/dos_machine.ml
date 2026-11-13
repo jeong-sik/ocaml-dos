@@ -115,7 +115,7 @@ let create () =
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
-  wr8 t (sda sda_wp_err) byte_max;              (* CONST2.ASM WPErr <-1> *)
+  init_dos_data t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
       match Dos_bios.private_service_vector t raw with

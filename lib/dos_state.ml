@@ -204,6 +204,20 @@ let sda_user_in_ax = 0x1A
 let byte_max = 0xFF
 let sda off = physical sda_seg off
 
+(* CONST2.ASM 에서 SWAP_START 앞: VERFLG, CharCo, chSwitch, AllocMethod,
+   fShare, DIFFNAM, MYNAME(16), CritPatch(10) 해서 32 바이트, 그 뒤 EVEN.
+   그 앞 크기를 몰라 EVEN 은 0 바이트로 친다. 게스트가 주소로 찾는 값이
+   아니어서 자리는 이 기계가 고른 것이다. [sda] 는 SWAP_START 기준이라
+   음수 오프셋도 받는다. *)
+let pre_swap_verify = -32
+let pre_swap_switch_char = -30
+let default_switch_char = Char.code '/'
+
+(* CONST2.ASM 초기값 중 0 이 아닌 것: WPErr <-1>, chSwitch <'/'> *)
+let init_dos_data t =
+  wr8 t (sda sda_wp_err) byte_max;
+  wr8 t (sda pre_swap_switch_char) default_switch_char
+
 (* DISP.ASM DSKROUT: AH 가 0 이거나 0Ch 보다 크고 59h 가 아닌 기능에 들어갈
    때. 50h·51h·62h·33h·64h 는 그 앞에서 따로 끝나 여기에 오지 않는다. *)
 let get_extended_error = 0x59
