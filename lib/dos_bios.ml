@@ -152,6 +152,9 @@ let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
 
+(* 속성 컨트롤러의 색 번호 레지스터 00h~0Fh *)
+let palette_regs = 16
+
 let video t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 and al = Cpu86.reg8 cpu 0 in
@@ -227,19 +230,31 @@ let video t =
        (* 색 번호 하나를 DAC 자리로: BL=색 번호, BH=DAC 자리 *)
        Dos_video.set_attr_palette t.video (Cpu86.reg8 cpu 3)
          (Cpu86.reg8 cpu 7)
+     | 0x01 -> Dos_video.set_overscan t.video (Cpu86.reg8 cpu 7)
      | 0x02 ->
-       (* 열여섯 색 + 테두리를 한 번에: ES:DX 가 17 바이트 *)
+       (* 열여섯 색 + 테두리를 한 번에: ES:DX 가 17 바이트. 마지막 바이트는
+          테두리(속성 11h)다 — 그다음 번호인 10h(모드 제어)가 아니다
+          (RBIL INT 10/AX=1002h, SeaBIOS stdvga_set_all_palette_reg). *)
        let src = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 2 in
-       for i = 0 to 16 do
+       for i = 0 to palette_regs - 1 do
          Dos_video.set_attr_palette t.video i (rd8 t (src + i))
-       done
+       done;
+       Dos_video.set_overscan t.video (rd8 t (src + palette_regs))
+     | 0x03 ->
+       (* BL bit 0: 1 이면 깜박임, 0 이면 바탕 열여섯 색(SeaBIOS
+          stdvga_set_palette_blinking) *)
+       Dos_video.set_text_blink t.video (Cpu86.reg8 cpu 3 land 1 <> 0)
      | 0x07 ->
-       Cpu86.set_reg8 cpu 7
-         (Dos_video.attr_palette t.video).(Cpu86.reg8 cpu 3 land 0x1f)
+       (* 속성 레지스터는 00h~14h 다. 그 밖의 BL 은 BH 를 두고 돌아간다. *)
+       let attr = Dos_video.attr_palette t.video in
+       let bl = Cpu86.reg8 cpu 3 in
+       if bl < Array.length attr then Cpu86.set_reg8 cpu 7 attr.(bl)
+     | 0x08 -> Cpu86.set_reg8 cpu 7 (Dos_video.overscan t.video)
      | 0x09 ->
        let dst = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 2 in
        let attr = Dos_video.attr_palette t.video in
-       for i = 0 to 16 do wr8 t (dst + i) attr.(i) done
+       for i = 0 to palette_regs - 1 do wr8 t (dst + i) attr.(i) done;
+       wr8 t (dst + palette_regs) (Dos_video.overscan t.video)
      | 0x10 ->
        (* 한 색: BX=번호, DH=R CH=G CL=B *)
        let idx = Cpu86.reg16 cpu 3 land 0xff in

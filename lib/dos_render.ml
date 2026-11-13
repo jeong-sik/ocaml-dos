@@ -78,11 +78,17 @@ let blit img ~width ~x ~y (r, g, b) =
   Bytes.set img (i + 1) (Char.chr g);
   Bytes.set img (i + 2) (Char.chr b)
 
+(* 텍스트 속성 바이트: 아래 니블이 글자색, 위 니블이 바탕색이다. 깜박임이
+   켜져 있으면 위 니블의 맨 위 비트는 색이 아니라 깜박임이다. *)
+let attr_nibble = 0x0f
+let attr_bg_without_blink = 0x07
+
 (* 텍스트: 셀마다 8x8 글리프를 세로로 두 줄씩 찍는다. 한 번만 그리면
    위쪽 절반만 차고 아래가 검게 남는다. 폰트는 1비트/행 — 최상위 비트가
-   왼쪽이다. 바탕색은 상위 니블의 아래 세 비트만 쓴다. 네 번째 비트는
-   깜빡임 속성이지 색이 아니다. *)
-let rgb_text mem ~cols =
+   왼쪽이다. 색 번호는 그래픽 모드처럼 속성 팔레트를 지나 DAC 에서 색을
+   얻는다. 깜박이는 글자는 늘 켜진 쪽으로 그린다 — 그림 한 장에는 시각이
+   없다. *)
+let rgb_text mem ~cols ~attr ~pal ~blink =
   let width = cols * 8 in
   let height = rows * glyph_h * glyph_scale in
   let img = Bytes.make (width * height * 3) '\000' in
@@ -90,9 +96,10 @@ let rgb_text mem ~cols =
     for c = 0 to cols - 1 do
       let cell = vram_base + (((r * cols) + c) * 2) in
       let ch = Char.code (Bytes.get mem cell) in
-      let attr = Char.code (Bytes.get mem (cell + 1)) in
-      let fg = cga_palette.(attr land 0x0f) in
-      let bg = cga_palette.((attr lsr 4) land 0x07) in
+      let a = Char.code (Bytes.get mem (cell + 1)) in
+      let bg_mask = if blink then attr_bg_without_blink else attr_nibble in
+      let fg = rgb_of_dac pal attr.(a land attr_nibble) in
+      let bg = rgb_of_dac pal attr.((a lsr 4) land bg_mask) in
       let glyph = Font8x8.glyph ch in
       for gy = 0 to glyph_h - 1 do
         let bits = glyph.(gy) in
