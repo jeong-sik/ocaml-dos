@@ -19,8 +19,7 @@ let accept_service t ~return_to = function
   | Control_transferred -> ()
   | Awaiting_input request ->
     let flags = Cpu86.flags t.cpu in
-    t.input_continuations <-
-      { request; service_return = return_to;
+    set_input_continuations t @@ { request; service_return = return_to;
         return_control_flags = flags land service_control_mask;
         return_cs = Cpu86.seg t.cpu 1; return_ip = Cpu86.dump_ip t.cpu;
         return_ss = Cpu86.seg t.cpu 2; return_sp = Cpu86.reg16 t.cpu 4 }
@@ -138,13 +137,13 @@ let create () =
    때문이다. 여기선 루트 프로그램을 싣는 얼굴만 남긴다. *)
 
 let load_com t image =
-  t.input_continuations <- [];
+  set_input_continuations t [];
   t.console_pending <- "";
   Dos_dos.load_com t image
 
 let load_exe t image =
   Dos_dos.load_exe t image;
-  t.input_continuations <- [];
+  set_input_continuations t [];
   t.console_pending <- ""
 
 (* ---------- 파일 마운트 ---------- *)
@@ -199,7 +198,7 @@ let step_result t =
       in
       (match result with
        | Completed ->
-         t.input_continuations <- rest;
+         set_input_continuations t rest;
          Cpu86.set_flags t.cpu
            ((Cpu86.flags t.cpu land lnot service_control_mask) lor wait.return_control_flags);
          finish_service_return t wait.service_return;
@@ -210,10 +209,10 @@ let step_result t =
            ignore (deliver_ivt t 1);
          Service_completed (Cpu86.idle t.cpu)
        | Control_transferred ->
-         t.input_continuations <- rest;
+         set_input_continuations t rest;
          Service_completed (Cpu86.idle t.cpu)
        | Awaiting_input request ->
-         t.input_continuations <- { wait with request } :: rest;
+         set_input_continuations t @@ { wait with request } :: rest;
          Waiting_for_input (Cpu86.idle t.cpu))
     | _ ->
       let was_halted = Cpu86.halted t.cpu in
