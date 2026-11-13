@@ -64,7 +64,8 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 ## 기계가 주는 것
 
 - **BIOS**: INT 10h(모드·커서·스크롤·문자·DAC·폰트·문자열), 11h 장비,
-  12h 메모리, 16h 키보드, 1Ah 시각, 33h 마우스. ROM F000:FA6E 에 IBM
+  12h 메모리, 15h 시스템(88h 확장 메모리 0, 4Fh, 나머지는 지원 안 함),
+  16h 키보드, 1Ah 시각, 33h 마우스. ROM F000:FA6E 에 IBM
   BIOS 표준 자리의 8x8 글꼴(0x20-0x7E)이 실려 있다 — 그래픽 모드에서
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
   최상위 비트가 왼쪽 점인 IBM 순서다
@@ -228,7 +229,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계 |
 | `Dos_ports` | 하드웨어 포트 — PIT, PIC, DAC, CRTC, 스피커 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
-| `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/16h/1Ah/33h |
+| `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/15h/16h/1Ah/33h |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |

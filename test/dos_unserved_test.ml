@@ -30,7 +30,7 @@ let program =
         int_ ~ax:0xFF00 0x16;
         int_ ~ax:0xFF00 0x1A;
         int_ ~ax:0x0000 0x11;               (* 있는 기능 *)
-        int_ ~ax:0xC000 0x15;               (* IRET 스텁 *)
+        int_ ~ax:0xC000 0x15;               (* 지원 안 함으로 답하는 기능 *)
         int_ ~ax:0x00FF 0x33;
         int_ ~ax:0x1600 0x2F;               (* IRET 스텁 *)
         hook_2f;
@@ -61,7 +61,7 @@ let () =
       (Dos_state.No_function, 0x10, 0xFE00);
       (Dos_state.No_function, 0x16, 0xFF00);
       (Dos_state.No_function, 0x1A, 0xFF00);
-      (Dos_state.Iret_stub, 0x15, 0xC000);
+      (Dos_state.No_function, 0x15, 0xC000);
       (Dos_state.No_function, 0x33, 0x00FF);
       (Dos_state.Iret_stub, 0x2F, 0x1600) ]
   in
