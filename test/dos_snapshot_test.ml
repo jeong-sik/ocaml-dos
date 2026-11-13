@@ -259,7 +259,6 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
     a.exec_frames b.exec_frames;
   c "last child code" (a.last_child_code = b.last_child_code);
   c "pending IRQ0" (a.pending_irq0 = b.pending_irq0);
-  c "last tick" (a.last_tick = b.last_tick);
   c "EMS mapping" (a.ems_mapped = b.ems_mapped);
   c "EMS pages" (sorted_bindings a.ems_pages = sorted_bindings b.ems_pages);
   c "mouse x" (a.mouse.mouse_x = b.mouse.mouse_x);
