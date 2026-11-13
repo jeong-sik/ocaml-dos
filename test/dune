@@ -81,3 +81,7 @@
 (test
  (name dos_vga_state_test)
  (libraries dosmachine))
+
+(test
+ (name dos_vga_bda_test)
+ (libraries dosmachine))

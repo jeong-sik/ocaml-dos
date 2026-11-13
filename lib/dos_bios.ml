@@ -83,6 +83,40 @@ let static_table =
   @ [ 0; 0; 0; 0; static_scan_lines; static_char_blocks; static_char_blocks;
       static_functions land 0xff; static_functions lsr 8; 0; 0; 0; 0 ]
 
+(* EGA/VGA BIOS 데이터: 0x487 은 EGA 기타 정보(bit 0 = 커서 모양 흉내 끔),
+   0x488 은 스위치, 0x489 는 VGA 모드 세우기 깃발(bit 7·4 = 200·400 주사선,
+   bit 3 = 기본 팔레트 싣기 끔). 비트 자리는 DOSBox-staging int10.cpp 와
+   같다. SeaBIOS 1231h 는 0x487 bit 3 을 바꾸지만 정작 그쪽 모드 세우기는
+   0x489 bit 3 을 본다. *)
+let bda_ega_misc = 0x487
+let bda_switches = 0x488
+let bda_vga_flags = 0x489
+let ega_misc_no_cursor_emulation = 0x01
+let vga_flag_200_lines = 0x80
+let vga_flag_400_lines = 0x10
+let vga_flag_keep_palette = 0x08
+(* bit 1 = 회색 합산 켬, bit 2 = 흑백 모니터. 둘 중 하나라도 서 있으면
+   AX=1010h·1012h 가 색을 회색으로 바꿔 싣는다(DOSBox-staging int10_pal.cpp
+   INT10_SetSingleDACRegister 의 0x06 마스크). 모드 세우기는 bit 1 만 본다. *)
+let vga_flag_gray_summing = 0x02
+let vga_flag_mono_display = 0x04
+let switches_kept = 0xF0
+let switches_cga_emulation = 0x08
+let switches_ega_enhanced = 0x09
+
+(* 부팅과 모드 세우기가 적는 값. SeaBIOS(vgainit.c init_bios_area, vgabios.c
+   vga_set_mode)와 DOSBox-staging(int10.cpp INT10_Seg40Init)이 같다.
+   - 0x487 60h: bit 5-6 = 256KB. 모드 세우기는 bit 7 에 AL bit 7(화면
+     보존)을 옮기고, 커서 흉내 끔(bit 0) 같은 다른 비트는 지운다.
+   - 0x488 F9h: 위 니블 = 연결 단자 비트, 아래 니블 = 스위치 9h.
+   - 0x489 51h: VGA 켬(bit 0), 400 줄(bit 4), DCC 바꾸기 켬(bit 6). 모드
+     세우기는 bit 7(200 줄)만 지운다. *)
+let ega_misc_256k = 0x60
+let ega_misc_screen_kept = 0x80
+let switches_post = 0xF9
+let vga_flags_post = 0x51
+let bda_crtc_port = 0x463             (* CRTC 어드레스 포트, 워드 *)
+
 let install t =
   (* EMM 디바이스 헤더(Dos_ems). 진입 스텁 "int 사설벡터; iret" 뒤에,
      DOS 디바이스 관례대로 +0x0A 에 드라이버 이름이 온다. EMS 런타임은
@@ -115,7 +149,7 @@ let install t =
   wr16 t 0x44A (cols t);
   wr16 t 0x44C 0x1000;              (* 페이지 크기(바이트) 4KB *)
   wr16 t 0x44E 0;                   (* 페이지 시작 오프셋 *)
-  wr16 t 0x463 0x3D4;               (* CRTC 어드레스 포트(컬러) *)
+  wr16 t bda_crtc_port 0x3D4;       (* CRTC 어드레스 포트(컬러) *)
   wr8 t 0x465 0x29;                 (* CRT 모드 레지스터 사본 *)
   wr8 t 0x484 (rows - 1);
   wr16 t 0x485 8;                   (* 글자 높이 *)
@@ -123,6 +157,9 @@ let install t =
   wr8 t 0x460 7; wr8 t 0x461 6;     (* 커서 모양 *)
   set_cursor t 0 0;
   List.iteri (fun i b -> wr8 t ((video_rom_seg * 16) + static_table_off + i) b) static_table;
+  wr8 t bda_ega_misc ega_misc_256k;
+  wr8 t bda_switches switches_post;
+  wr8 t bda_vga_flags vga_flags_post;
   (* 호스트가 서빙하는 벡터도 IVT 에 실주소가 있어야 한다 — Turbo
      Pascal 의 Intr 썽크는 INT 명령 없이 IVT 를 직접 읽어 그 주소로
      retf 한다(실측: 빈 IVT[10h] 로 0000:0000 추락). 스텁 본체는
@@ -185,26 +222,6 @@ let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
 
-(* EGA/VGA BIOS 데이터: 0x487 은 EGA 기타 정보(bit 0 = 커서 모양 흉내 끔),
-   0x488 은 스위치, 0x489 는 VGA 모드 세우기 깃발(bit 7·4 = 200·400 주사선,
-   bit 3 = 기본 팔레트 싣기 끔). 비트 자리는 DOSBox-staging int10.cpp 와
-   같다. SeaBIOS 1231h 는 0x487 bit 3 을 바꾸지만 정작 그쪽 모드 세우기는
-   0x489 bit 3 을 본다. *)
-let bda_ega_misc = 0x487
-let bda_switches = 0x488
-let bda_vga_flags = 0x489
-let ega_misc_no_cursor_emulation = 0x01
-let vga_flag_200_lines = 0x80
-let vga_flag_400_lines = 0x10
-let vga_flag_keep_palette = 0x08
-(* bit 1 = 회색 합산 켬, bit 2 = 흑백 모니터. 둘 중 하나라도 서 있으면
-   AX=1010h·1012h 가 색을 회색으로 바꿔 싣는다(DOSBox-staging int10_pal.cpp
-   INT10_SetSingleDACRegister 의 0x06 마스크). 모드 세우기는 bit 1 만 본다. *)
-let vga_flag_gray_summing = 0x02
-let vga_flag_mono_display = 0x04
-let switches_kept = 0xF0
-let switches_cga_emulation = 0x08
-let switches_ega_enhanced = 0x09
 let alt_select_done = 0x12
 
 (* 회색 = 0.30 R + 0.59 G + 0.11 B 를 256 단위로 반올림한다(SeaBIOS
@@ -233,6 +250,17 @@ let sum_to_gray pal ~first ~count =
 let set_bda_bit t addr bit on =
   let v = rd8 t addr in
   wr8 t addr (if on then v lor bit else v land lnot bit)
+
+(* 모드 세우기 뒤의 0x487·0x488·0x489(SeaBIOS vga_set_mode) *)
+let modeset_bda t ~screen_kept =
+  wr8 t bda_ega_misc (ega_misc_256k lor (if screen_kept then ega_misc_screen_kept else 0));
+  wr8 t bda_switches switches_post;
+  wr8 t bda_vga_flags (rd8 t bda_vga_flags land lnot vga_flag_200_lines)
+
+(* AH=12h BL=10h: BH = 1 이면 흑백(CRTC 3B4h), CL = 스위치, CH = 연결 단자 *)
+let crtc_mono = 0x3B4
+let switch_bits = 0x0F
+let feature_shift = 4
 
 (* 디스플레이 조합 코드(AX=1A00h) 08h = VGA 컬러 *)
 let dcc_vga_color = 0x08
@@ -321,6 +349,7 @@ let video t =
     (* AL 의 최상위 비트는 "화면을 지우지 말라" 는 뜻이다. *)
     let mode = al land 0x7f in
     Dos_video.set_mode t.video mode ~clear:(al land 0x80 = 0);
+    modeset_bda t ~screen_kept:(al land 0x80 <> 0);
     (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
        AL bit7(화면 보존)과는 상관없다. 막는 길은 BDA 0x489 bit3
        (기본 팔레트 싣기 금지, AX=1201h BL=31h 가 켜는 비트) 하나다. *)
@@ -383,7 +412,8 @@ let video t =
       (Dos_video.get_pixel t.video ~x:(Cpu86.reg16 cpu 1)
          ~y:(Cpu86.reg16 cpu 2))
   | 0x0F ->
-    Cpu86.set_reg8 cpu 0 (Dos_video.mode t.video);
+    (* AL bit 7 = 마지막 모드 세우기가 화면을 지우지 않았다(0x487 bit 7) *)
+    Cpu86.set_reg8 cpu 0 (Dos_video.mode t.video lor (rd8 t bda_ega_misc land ega_misc_screen_kept));
     Cpu86.set_reg8 cpu 4 (cols t);
     Cpu86.set_reg8 cpu 7 (rd8 t 0x462)
   | 0x10 ->
@@ -463,15 +493,17 @@ let video t =
       Cpu86.set_reg8 cpu 2 (rows - 1)
     end
   | 0x12 ->
-    (* 대체 선택. BL=10h 는 EGA/VGA 정보: BH=0(컬러), BL=3(256KB).
+    (* 대체 선택. BL=10h 는 EGA/VGA 정보: BH = 컬러 0·흑백 1, BL=3(256KB),
+       CX 는 0x488 의 두 니블(DOSBox-staging int10.cpp. SeaBIOS 는 CH=0).
        BL=30h·31h·33h·34h·36h 는 받으면 AL=12h, AL 이 범위 밖이면 AL=0 이다
        (RBIL INT 10/AH=12h BL=30h~36h). 그 밖의 BL 은 AL 을 두고 돌아간다. *)
     let al_in n f = if al > n then Cpu86.set_reg8 cpu 0 0 else (f (); Cpu86.set_reg8 cpu 0 alt_select_done) in
     (match Cpu86.reg8 cpu 3 with
      | 0x10 ->
-       Cpu86.set_reg8 cpu 7 0;
-       Cpu86.set_reg8 cpu 3 3;
-       Cpu86.set_reg16 cpu 1 0
+       Cpu86.set_reg8 cpu 7 (if rd16 t bda_crtc_port = crtc_mono then 1 else 0);
+       Cpu86.set_reg8 cpu 3 video_mem_256k;
+       Cpu86.set_reg8 cpu 1 (rd8 t bda_switches land switch_bits);
+       Cpu86.set_reg8 cpu 5 (rd8 t bda_switches lsr feature_shift)
      | 0x30 ->
        (* 다음 모드 세우기의 텍스트 주사선 수. BDA 만 바꾼다 — 텍스트 그림은
           늘 8x8 글자를 세로로 두 배 늘린 400 줄이다. *)
