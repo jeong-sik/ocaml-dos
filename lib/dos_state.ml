@@ -21,6 +21,9 @@ let cpu_hz = 4_772_727
 let first_file_handle = 5
 let max_handles = 20
 
+(* 이 기계의 드라이브는 C: 하나다(0 = A:). *)
+let default_drive = 2
+
 (* [data] is shared: every handle opened on the same [hname] (through
    [Dos_dos.open_handle], not [dup]) points at the same ref, so a write
    through one is a read through the other -- real DOS keeps one file on
@@ -416,5 +419,12 @@ let deliver_call t seg off =
 let starve t =
   t.kbd_wait <- true;
   t.kbd_requests <- t.kbd_requests + 1
+
+(* 콘솔에 읽을 글자가 있는가(INT 21h AH=0Bh, IOCTL 4406h). 없으면 게스트가
+   키를 기다리는 중이다 — [starve] 로 알린다. *)
+let console_ready t =
+  let available = t.ext_scan_pending <> 0 || key_pending t in
+  if available then t.kbd_wait <- false else starve t;
+  available
 
 let interrupts_enabled t = Cpu86.flags t.cpu land Cpu86.f_interrupt <> 0

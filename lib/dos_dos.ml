@@ -16,7 +16,6 @@ open Dos_state
 
 let dos_version_major = 5
 let dos_version_minor = 0
-let default_drive = 2                  (* C: *)
 let conv_mem_top = 0x9FFF              (* 비디오 메모리 바로 앞 *)
 
 (* ---------- 이름과 와일드카드 ---------- *)
@@ -726,10 +725,7 @@ let service_immediate t =
       if c = Char.code '$' then stop := true
       else begin put_char t c 0x07; incr i end
     done
-  | 0x0B ->
-    let available = t.ext_scan_pending <> 0 || key_pending t in
-    Cpu86.set_reg8 cpu 0 (if available then 0xFF else 0x00);
-    if available then t.kbd_wait <- false else starve t
+  | 0x0B -> Cpu86.set_reg8 cpu 0 (if console_ready t then 0xFF else 0x00)
   | 0x0D -> ()                              (* 디스크 리셋 *)
   | 0x0E -> Cpu86.set_reg8 cpu 0 (default_drive + 1)
   | 0x19 -> Cpu86.set_reg8 cpu 0 default_drive
@@ -917,19 +913,7 @@ let service_immediate t =
       ok t
     end
     else fail t 2
-  | 0x44 ->
-    (* IOCTL. 전부 실패시키면 런타임이 핸들을 무효로 보고 죽는다(실측).
-       콘솔은 문자 장치 비트, 파일은 읽기·쓰기 가능. *)
-    (match Cpu86.reg8 cpu 0 with
-     | 0x00 ->
-       let h = Cpu86.reg16 cpu 3 in
-       if is_console h then begin Cpu86.set_reg16 cpu 2 0x80D3; ok t end
-       else if Hashtbl.mem t.handles h then begin
-         Cpu86.set_reg16 cpu 2 0x0002; ok t
-       end
-       else fail t 6
-     | 0x06 | 0x07 -> Cpu86.set_reg8 cpu 0 0xFF; ok t
-     | _ -> fail t 1)
+  | 0x44 -> Dos_ioctl.service t
   | 0x47 ->
     (* 현재 디렉터리는 늘 루트다 — 빈 문자열이 루트를 뜻한다. *)
     wr8 t (seg_off t 3 6) 0;
