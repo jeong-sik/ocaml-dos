@@ -455,6 +455,21 @@ let test_dac_ports () =
   check "DAC 파랑" (peek m scratch) 0x33;
   check "DAC 빨강" (peek m (scratch + 3)) 0x11
 
+(* 게임 포트(201h): 조이스틱이 없다. 버튼 비트(4~7)는 0 이 눌림이라 1 로
+   떠 있어야 하고, 축 비트(0~3)는 트리거 직후에도 0 이라 축을 세는 루프가
+   바로 끝난다(ZZT 실측). *)
+let test_game_port_without_joystick () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           mov_dx 0x201 ^ "\xee"                    (* out dx,al: 축 트리거 *)
+           ^ "\xec" ^ store_ax scratch ^ quit)      (* in al,dx *)
+         "")
+  in
+  check "버튼 넷이 떼어져 있다" (peek m scratch land 0xF0) 0xF0;
+  check "축은 바로 방전된다" (peek m scratch land 0x0F) 0x00
+
 let test_word_port_in_reads_two_bytes () =
   let m =
     run_com
@@ -580,6 +595,7 @@ let () =
   test_video_scroll_clears ();
   test_typed_keys_read_back ();
   test_dac_ports ();
+  test_game_port_without_joystick ();
   test_word_port_in_reads_two_bytes ();
   test_timer_ticks ();
   test_cli_holds_the_tick ();
