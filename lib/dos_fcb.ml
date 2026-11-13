@@ -6,13 +6,18 @@ open Dos_state
 (* 확장 FCB: FFh, 예약 5 바이트, 속성 1 바이트. 그 뒤가 보통 FCB 다. *)
 let extended_mark = 0xFF
 let extended_header = 7
+let attribute = 6
 
 let drive = 0x00
+let name = 0x01
 let extent = 0x0C
 let record_size = 0x0E
 let file_size = 0x10
 let next_record = 0x20
 let random_record = 0x21
+
+(* 17h: 새 이름의 이름 8 + 확장자 3 칸 *)
+let rename_target = 0x11
 
 let default_record_size = 128
 let records_per_extent = 128
@@ -23,6 +28,10 @@ let wide_record_limit = 64
 
 let locate t addr =
   if rd8 t addr = extended_mark then addr + extended_header else addr
+
+(* TransFCB 의 SAttrib — 보통 FCB 는 0 *)
+let search_attribute t addr =
+  if rd8 t addr = extended_mark then rd8 t (addr + attribute) else 0
 
 (* GetExtent: 블록 × 128 + 다음 레코드의 낮은 7 비트 *)
 let current t fcb =
