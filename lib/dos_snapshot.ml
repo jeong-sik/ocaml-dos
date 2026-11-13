@@ -21,8 +21,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    5: suspended BIOS input services carry their return boundary, and both
    input and EXEC carry their owned ROM service return frame.
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
-   console bytes are carried explicitly. *)
-let format_version = 6
+   console bytes are carried explicitly.
+   7: whether an MPU-401 is in the machine, and its mode and waiting
+   answers, after the OPL2 timers. *)
+let format_version = 7
 
 let digest_hex_len = 32
 let checksum_len = 16
