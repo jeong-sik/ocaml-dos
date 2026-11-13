@@ -81,3 +81,7 @@
 (test
  (name dos_seek_test)
  (libraries dosmachine))
+
+(test
+ (name dos_open_mode_test)
+ (libraries dosmachine))

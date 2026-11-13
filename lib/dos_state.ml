@@ -45,9 +45,20 @@ type target =
    offsets; a device has one too, which only AH=42h moves. [dup]
    (AH=45h/46h) instead shares the whole record under a second number,
    [pos] included -- that is a different number naming the same open,
-   not a second open. *)
+   not a second open.
+   [access] is what the open allows (the low nibble of AH=3Dh's AL,
+   DOS/FILEMODE.INC). [inheritable] is false for an open made with AL
+   bit 7: EXEC's child does not get it ($Dup_PDB skips sf_no_inherit,
+   DOS/MISC.ASM). *)
+type access =
+  | Read_only
+  | Write_only
+  | Read_write
+
 type handle = {
   target : target;
+  access : access;
+  inheritable : bool;
   mutable pos : int;
 }
 
@@ -57,10 +68,9 @@ type handle = {
    as 4. Without these, C runtimes stop at their first write with
    invalid handle (6). *)
 let standard_handles () =
-  let con = { target = Device Con; pos = 0 } in
-  [ (0, con); (1, con); (2, con);
-    (3, { target = Device Aux; pos = 0 });
-    (4, { target = Device Prn; pos = 0 }) ]
+  let device target access = { target = Device target; access; inheritable = true; pos = 0 } in
+  let con = device Con Read_write in
+  [ (0, con); (1, con); (2, con); (3, device Aux Read_write); (4, device Prn Write_only) ]
 
 (* INT 33h AX=0x0C 로 건 마우스 이벤트 핸들러의 등록. [mouse_handler_mask]
    0 은 미등록 — 마스크가 0 이면 주소가 남아 있어도 부르지 않는다. 세 값은

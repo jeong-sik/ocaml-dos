@@ -23,8 +23,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
    console bytes are carried explicitly.
    7: the standard devices are handle records too: a record is a file
-   (name, buffer) or CON, AUX or PRN, then its position. *)
-let format_version = 7
+   (name, buffer) or CON, AUX or PRN, then its position.
+   8: a handle record carries its access mode and whether EXEC's child
+   gets it, between the target and the position. *)
+let format_version = 8
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -218,7 +220,7 @@ let handle_pool t =
       | File { hname; data } -> Saved_file (hname, buffer_index data)
       | Device d -> Saved_device d
     in
-    (target, h.pos)
+    (target, h.access, h.inheritable, h.pos)
   in
   let handles = List.map saved (List.rev_map fst !pool) in
   (handles, List.rev_map fst !buffers, live, frames)
@@ -227,7 +229,9 @@ let put_buffer w buf = C.put_bytes w !buf
 
 let target_tag = C.range 0 3
 
-let put_handle w (target, pos) =
+let access_tag = C.range 0 2
+
+let put_handle w (target, access, inheritable, pos) =
   let tag = C.put w ~what:"handle target" target_tag in
   (match target with
    | Saved_file (hname, buffer_idx) ->
@@ -235,6 +239,9 @@ let put_handle w (target, pos) =
    | Saved_device Con -> tag 1
    | Saved_device Aux -> tag 2
    | Saved_device Prn -> tag 3);
+  C.put w ~what:"handle access" access_tag
+    (match access with Read_only -> 0 | Write_only -> 1 | Read_write -> 2);
+  C.put_bool w inheritable;
   C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
@@ -443,7 +450,15 @@ let read_payload r =
              | 3 -> Device Prn
              | _ -> C.fail "invalid handle target"
            in
-           { target; pos = get "handle position" file_pos }))
+           let access =
+             match get "handle access" access_tag with
+             | 0 -> Read_only
+             | 1 -> Write_only
+             | 2 -> Read_write
+             | _ -> C.fail "invalid handle access"
+           in
+           let inheritable = C.get_bool r in
+           { target; access; inheritable; pos = get "handle position" file_pos }))
   in
   let resolve = List.map (fun (n, i) ->
       if i >= Array.length pool then C.fail "a handle names no record" else (n, pool.(i)))

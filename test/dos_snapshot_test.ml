@@ -270,8 +270,8 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
   c "DTA" (a.dta = b.dta);
   c "find queue" (a.find_queue = b.find_queue);
   c "handles"
-    (List.map (fun (n, h) -> (n, h.target, h.pos)) (sorted_bindings a.handles)
-     = List.map (fun (n, h) -> (n, h.target, h.pos)) (sorted_bindings b.handles));
+    (List.map (fun (n, h) -> (n, h.target, h.access, h.inheritable, h.pos)) (sorted_bindings a.handles)
+     = List.map (fun (n, h) -> (n, h.target, h.access, h.inheritable, h.pos)) (sorted_bindings b.handles));
   c "psp" (a.psp_seg = b.psp_seg);
   c "blocks" (a.blocks = b.blocks)
 
@@ -350,7 +350,7 @@ let () =
   check "a closed number is reused" (word 16 = 7);
   ignore (restore_exn (save_exn t));
   Hashtbl.replace t.Dos_state.handles Dos_state.max_handles
-    { Dos_state.target = File { hname = "F.DAT"; data = ref Bytes.empty }; pos = 0 };
+    { Dos_state.target = File { hname = "F.DAT"; data = ref Bytes.empty }; access = Read_write; inheritable = true; pos = 0 };
   refused_at_save "a handle number past the table" t
 
 (* 255 EMS allocations: handles 1..254, then 85h. Freeing 3 and allocating
