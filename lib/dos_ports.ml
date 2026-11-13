@@ -142,15 +142,32 @@ let pit0_count t =
   let elapsed = (t.now / cpu_cycles_per_pit_tick) mod d in
   (d - elapsed) land 0xffff
 
-(* CRTC 커서 레지스터(0x0E/0x0F)는 화면 시작부터의 글자 수다. BIOS 는
-   같은 값을 BDA 0x450/0x451 에 행·열로 둔다 — 커서의 진실 원천이
-   둘로 갈라지지 않게 여기서 같이 맞춘다. *)
+(* BIOS 데이터 영역에서 쪽과 커서가 사는 자리(SeaBIOS std/bda.h 의
+   video_pagesize·video_pagestart·cursor_pos[8]·video_page). 쪽 p 의 커서는
+   [bda_cursor_pos] + 2p 에 열, 그 다음 바이트에 행이다. *)
+let bda_page_size = 0x44C
+let bda_page_start = 0x44E
+let bda_cursor_pos = 0x450
+let bda_active_page = 0x462
+let page_count = 8
+
+(* CRTC 커서 레지스터(0x0E/0x0F)는 화면 메모리 처음부터의 글자 수다. BIOS
+   는 보이는 쪽의 커서를 그 쪽 처음부터의 열·행으로 BDA 에 둔다 — 커서의
+   진실 원천이 둘로 갈라지지 않게 여기서 같이 맞춘다. 쪽 처음(0x44E)은
+   바이트 수라 2 로 나눠 글자 수로 뺀다. 보이는 쪽 번호가 0-7 밖이면 맞출
+   칸이 없다. *)
 let sync_cursor_to_bda t =
   let reg i = Dos_video.crtc t.video i land 0xff in
-  let linear = (reg 0x0E lsl 8) lor reg 0x0F in
-  let cols = max 1 (Dos_video.text_cols t.video) in
-  Bytes.set t.mem 0x450 (Char.chr (linear mod cols));
-  Bytes.set t.mem 0x451 (Char.chr ((linear / cols) land 0xff))
+  let byte a = Char.code (Bytes.get t.mem a) in
+  let page = byte bda_active_page in
+  if page < page_count then begin
+    let start = (byte bda_page_start lor (byte (bda_page_start + 1) lsl 8)) / 2 in
+    let linear = (((reg 0x0E lsl 8) lor reg 0x0F) - start) land 0xffff in
+    let cols = max 1 (Dos_video.text_cols t.video) in
+    let slot = bda_cursor_pos + (2 * page) in
+    Bytes.set t.mem slot (Char.chr (linear mod cols));
+    Bytes.set t.mem (slot + 1) (Char.chr ((linear / cols) land 0xff))
+  end
 
 (* CRTC 는 비디오 어댑터가 가진다. 커서 위치(0x0E/0x0F)와 모양(0x0A/0x0B)
    은 BIOS 도 BDA 에 두므로, 어댑터가 쓰기를 받은 뒤 여기서 BDA 를 맞춘다. *)

@@ -81,3 +81,7 @@
 (test
  (name dos_text_scan_test)
  (libraries dosmachine))
+
+(test
+ (name dos_text_page_test)
+ (libraries dosmachine))
