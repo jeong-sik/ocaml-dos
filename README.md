@@ -72,7 +72,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
-  읽기·쓰기, IOCTL, DOS 버전 5.0
+  읽기·쓰기, IOCTL, DOS 버전 5.0. PSP 에는 IVT 22h-24h 사본(0Ah),
+  부모(16h, 루트는 자기), 이전 PSP FFFFFFFFh(38h), INT 21h·RETF(50h)가
+  있다. 자식이 끝나면 IVT 22h-24h 를 그 자식 PSP 의 사본으로 되돌린다
 - **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), PIC 마스크,
   VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
   EMS 4.0(INT 67h 스텁 — 프레임 0xD000, 페이지 실체는 겹칠 때 만든다),

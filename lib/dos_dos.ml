@@ -198,6 +198,17 @@ let init_memory t ~psp_seg =
   t.free_top <- conv_mem_top;
   t.blocks <- [ (psp_seg, conv_mem_top - psp_seg) ]
 
+(* PSP 칸(RBIL INT 21/AH=26h 표 01378). 값은 MS-DOS 4.0 MISC.ASM SETMEM·
+   $Dup_PDB 가 적는 것이다. *)
+let psp_saved_vectors = 0x0A   (* IVT 22h·23h·24h 사본: 종료, Ctrl-Break, 치명 오류 *)
+let psp_parent = 0x16
+let psp_previous = 0x38        (* 이전 PSP. SHARE 가 쓰고 기본은 FFFFFFFFh *)
+let psp_dos_call = 0x50        (* INT 21h; RETF — far call 로 부르는 DOS 입구 *)
+let dos_call_code = [ 0xCD; 0x21; 0xCB ]
+let no_previous_psp = 0xFFFF
+let saved_vectors_ivt = 0x22 * 4
+let saved_vectors_len = 3 * 4
+
 (* ---------- 로더 ----------
 
    Dos_machine 이 루트 프로그램을 싣는 데 쓰던 코드가 EXEC 자식도
@@ -216,8 +227,15 @@ let write_psp ?(init = true) t psp_seg =
   wr8 t psp 0xCD;                      (* int 20h *)
   wr8 t (psp + 1) 0x20;
   wr16 t (psp + 2) conv_mem_top;       (* 가진 메모리의 끝 *)
-  wr16 t (psp + 0x0A) 0;               (* 종료 주소 *)
-  wr16 t (psp + 0x0C) 0;
+  for i = 0 to saved_vectors_len - 1 do
+    wr8 t (psp + psp_saved_vectors + i) (rd8 t (saved_vectors_ivt + i))
+  done;
+  (* 자식은 부른 쪽, 루트는 자기 자신이 부모다. COMMAND.COM 처럼 사슬의
+     끝이 저를 가리켜, 부모를 따라가는 프로그램이 여기서 멈춘다. *)
+  wr16 t (psp + psp_parent) (if init then psp_seg else t.psp_seg);
+  wr16 t (psp + psp_previous) no_previous_psp;
+  wr16 t (psp + psp_previous + 2) no_previous_psp;
+  List.iteri (fun i b -> wr8 t (psp + psp_dos_call + i) b) dos_call_code;
   wr16 t (psp + 0x2C) env_seg;         (* 환경 세그먼트 *)
   wr8 t (psp + 0x80) 0;                (* 커맨드라인 길이 0 *)
   wr8 t (psp + 0x81) 0x0D;
@@ -347,6 +365,14 @@ let restore_cpu t s =
 let exe_child_psp t ~img_paras ~minalloc =
   find_free t (0x10 + img_paras + minalloc)
 
+(* 끝나는 프로세스의 PSP 사본을 IVT 22h-24h 로 되돌린다(MS-DOS 4.0
+   PROC.ASM $ABORT). 자식이 건 Ctrl-Break·치명 오류 처리기가 부모에게
+   남지 않는다. *)
+let restore_saved_vectors t psp_seg =
+  for i = 0 to saved_vectors_len - 1 do
+    wr8 t (saved_vectors_ivt + i) (rd8 t ((psp_seg * 16) + psp_saved_vectors + i))
+  done
+
 (* 자식 종료. 프레임이 없으면(루트) 기계가 멈춘다. 있으면 부모를
    되살린다 — [keep] 은 TSR(AH=31h·INT 27h) 이 자기 블록을 남기는
    크기다. 자식이 연 핸들은 닫는다(쓴 데이터는 마운트 표로 돌아간다),
@@ -387,6 +413,7 @@ let child_exit t ~code ~keep =
      | None -> t.blocks <- f.parent_blocks);
     t.free_base <- f.parent_free_base;
     t.free_top <- f.parent_free_top;
+    restore_saved_vectors t t.psp_seg;
     t.psp_seg <- f.parent_psp;
     t.dta <- f.parent_dta;
     restore_cpu t f.parent;
