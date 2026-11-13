@@ -77,3 +77,7 @@
 (test
  (name dos_country_test)
  (libraries dosmachine))
+
+(test
+ (name dos_nls_test)
+ (libraries dosmachine))
