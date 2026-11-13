@@ -175,6 +175,12 @@ val screen_digest : t -> int
     키를 먹고 곧바로 다시 묻는다(ZZT 실측 631 명령). 그때 화면은 아직
     그리는 중이다. *)
 
+val frame_digest : t -> int
+(** [frame_rgb] 가 읽는 것 전부의 지문: 화면 메모리([screen_digest]), 모드,
+    CGA 색 선택, 속성 팔레트, DAC. 두 번 같으면 [frame_rgb] 도 같다 — 지문이
+    우연히 겹칠 때만 빼고. DAC 만 바꾸는 페이드는 [screen_digest] 에 잡히지
+    않으니, 화면을 다시 그릴지 정할 때는 이것을 쓴다. *)
+
 val pixel : t -> x:int -> y:int -> int
 (** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는
     0-255. 텍스트 모드에서는 늘 0 이다. *)

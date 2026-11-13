@@ -200,6 +200,39 @@ let dac_set idx (r, g, bl) =
   mov_dx 0x3C8 ^ mov_al idx ^ "\xee"
   ^ mov_dx 0x3C9 ^ mov_al r ^ "\xee" ^ mov_al g ^ "\xee" ^ mov_al bl ^ "\xee"
 
+(* 프레임 지문은 [frame_rgb] 가 읽는 것을 다 봐야 한다. 색만 바꾸는 세 길
+   (DAC, 속성 팔레트, CGA 색 선택)은 화면 메모리를 건드리지 않아 화면
+   지문이 못 본다 — 그래서 프레임 지문이 따로 있다. *)
+let test_frame_digest_sees_the_picture () =
+  let differs name ~memory mode change =
+    let plain = run_com (set_mode mode ^ quit) in
+    let changed = run_com (set_mode mode ^ change ^ quit) in
+    check_true (name ^ ": 화면 지문")
+      ((Dos_machine.screen_digest plain <> Dos_machine.screen_digest changed) = memory);
+    check_true (name ^ ": 그림은 바뀐다")
+      (Dos_machine.frame_rgb plain <> Dos_machine.frame_rgb changed);
+    check_true (name ^ ": 프레임 지문도 바뀐다")
+      (Dos_machine.frame_digest plain <> Dos_machine.frame_digest changed)
+  in
+  (* AH=0Ch: AL 색, CX·DX 좌표 *)
+  differs "점 하나" ~memory:true 0x13 (mov_bx 0 ^ mov_cx 1 ^ mov_dx 1 ^ mov_ax 0x0C0F ^ int_ 0x10);
+  List.iter
+    (fun (name, rgb) -> differs ("DAC " ^ name) ~memory:false 0x13 (dac_set 0 rgb))
+    [ ("빨강", (63, 0, 0)); ("초록", (0, 63, 0)); ("파랑", (0, 0, 63)) ];
+  (* AX=1000h: BL 색 번호를 BH DAC 자리로 *)
+  differs "속성 팔레트" ~memory:false 0x12 (mov_ax 0x1000 ^ mov_bx 0x3F00 ^ int_ 0x10);
+  (* 포트 3D9h 아래 네 비트가 배경색 — 빈 화면이 그 색이 된다 *)
+  differs "CGA 색 선택" ~memory:false 0x04 (mov_dx 0x3D9 ^ mov_al 0x01 ^ "\xee");
+  (* 0Dh 와 0Eh 의 빈 화면은 메모리도 팔레트도 같고 크기만 다르다 *)
+  let d = run_com (set_mode 0x0D ^ quit) in
+  let e = run_com (set_mode 0x0E ^ quit) in
+  check_true "모드: 화면 지문은 같다" (Dos_machine.screen_digest d = Dos_machine.screen_digest e);
+  check_true "모드: 그림 크기는 다르다" (Dos_machine.frame_dims d <> Dos_machine.frame_dims e);
+  check_true "모드: 프레임 지문도 다르다" (Dos_machine.frame_digest d <> Dos_machine.frame_digest e);
+  let a = run_com (set_mode 0x13 ^ quit) in
+  let b = run_com (set_mode 0x13 ^ quit) in
+  check "같은 화면은 같은 지문" (Dos_machine.frame_digest a) (Dos_machine.frame_digest b)
+
 (* 실기 BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다. 앞
    프로그램이 페이드아웃으로 DAC 을 검게 두고 끝나도, 다음 프로그램이
    모드만 세우면 기본색이 보인다(삼국지3 카피프로텍션 화면이 이 길이다).
@@ -326,6 +359,7 @@ let () =
   test_cga_mode_4 ();
   test_cga_mode_6 ();
   test_forty_column_text ();
+  test_frame_digest_sees_the_picture ();
   if !failed = 0 then print_endline "dos 그래픽: all passed"
   else begin
     Printf.eprintf "dos 그래픽: %d failures\n%!" !failed;
