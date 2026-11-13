@@ -78,6 +78,8 @@ let invalid_handle = 6
 let file_not_found = 2
 let path_not_found = 3
 let access_denied = 5
+let invalid_function = 1
+let error_file_exists = 0x50
 let invalid_drive = 15
 let removing_current_directory = 16
 let no_more_files = 18
@@ -748,6 +750,91 @@ let resume_input t request =
 
 (* ---------- INT 21h ---------- *)
 
+(* 3Ch·5Bh·6Ch 의 몸통: [name] 을 비우거나 새로 만들고 핸들을 연다.
+   핸들이 모자라면 [None]. *)
+let create_file t name =
+  match open_handle t name Bytes.empty with
+  | None -> None
+  | Some h ->
+    Hashtbl.replace t.host_files name Bytes.empty;
+    (* [open_handle] joins a buffer already shared by another live
+       handle on [name] instead of seeding a fresh empty one -- create
+       truncates regardless, so force it empty here too, visible to
+       whoever else already has [name] open. *)
+    (match Hashtbl.find_opt t.handles h with
+     | Some hd -> hd.data := Bytes.empty
+     | None -> ());
+    Some h
+
+(* AH=6Ch 확장 열기 — MS-DOS 4.0 FILE.ASM $Extended_Open, 상수는
+   FILEMODE.INC. DX 의 아래 4 비트는 파일이 있을 때(0 실패, 1 열기,
+   2 비우고 열기), 위 4 비트는 없을 때(0 실패, 1 만들기) 할 일이다.
+   FE00h 비트가 켜졌거나, 둘 다 실패거나, 범위를 넘으면 에러 1. *)
+let ext_reserved_bits = 0xFE00
+let ext_exists_mask = 0x0F
+let ext_absent_mask = 0xF0
+
+type if_exists = Exists_fail | Exists_open | Exists_replace
+type if_absent = Absent_fail | Absent_create
+type ext_action = Opened | Created | Replaced
+
+(* CX 로 돌려주는 값: action_opened·action_created_opened·
+   action_replaced_opened *)
+let ext_action_code = function Opened -> 1 | Created -> 2 | Replaced -> 3
+
+let parse_ext_flag dx =
+  let if_exists =
+    match dx land ext_exists_mask with
+    | 0 -> Some Exists_fail
+    | 1 -> Some Exists_open
+    | 2 -> Some Exists_replace
+    | _ -> None
+  and if_absent =
+    match dx land ext_absent_mask with
+    | 0x00 -> Some Absent_fail
+    | 0x10 -> Some Absent_create
+    | _ -> None
+  in
+  if dx land ext_reserved_bits <> 0 then None
+  else
+    match if_exists, if_absent with
+    | Some Exists_fail, Some Absent_fail -> None
+    | Some e, Some a -> Some (e, a)
+    | None, _ | _, None -> None
+
+(* 이름은 DS:SI. 열기 모드(BX)와 속성(CL)은 3Dh·3Ch 처럼 보지 않는다.
+   디렉터리 이름이면 3Ch·3Dh 와 같이 접근 거부다. *)
+let extended_open t =
+  let cpu = t.cpu in
+  match parse_ext_flag (Cpu86.reg16 cpu 2) with
+  | None -> fail t invalid_function
+  | Some (if_exists, if_absent) ->
+    (match guest_file t (seg_off t 3 6) with
+     | Error e -> fail t e
+     | Ok p ->
+       let name = Dos_path.key p in
+       let opened action h =
+         Cpu86.set_reg16 cpu 0 h;
+         Cpu86.set_reg16 cpu 1 (ext_action_code action);
+         ok t
+       in
+       let create action =
+         match create_file t name with
+         | None -> fail t too_many_open_files
+         | Some h -> opened action h
+       in
+       (match Hashtbl.find_opt t.host_files name, if_exists, if_absent with
+        | Some _, Exists_fail, _ -> fail t error_file_exists
+        | Some data, Exists_open, _ ->
+          (match open_handle t name data with
+           | Some h -> opened Opened h
+           | None -> fail t too_many_open_files)
+        | Some _, Exists_replace, _ -> create Replaced
+        | None, _, Absent_fail ->
+          fail t (if dir_exists t p then access_denied else file_not_found)
+        | None, _, Absent_create ->
+          if dir_exists t p then fail t access_denied else create Created))
+
 let service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
@@ -861,21 +948,11 @@ let service_immediate t =
      | Ok p when dir_exists t p -> fail t access_denied
      | Ok p ->
     let name = Dos_path.key p in
-    if ah = 0x5B && Hashtbl.mem t.host_files name then fail t 0x50
+    if ah = 0x5B && Hashtbl.mem t.host_files name then fail t error_file_exists
     else begin
-      match open_handle t name Bytes.empty with
+      match create_file t name with
       | None -> fail t too_many_open_files
-      | Some h ->
-        Hashtbl.replace t.host_files name Bytes.empty;
-        (* [open_handle] joins a buffer already shared by another live
-           handle on [name] instead of seeding a fresh empty one -- create
-           truncates regardless, so force it empty here too, visible to
-           whoever else already has [name] open. *)
-        (match Hashtbl.find_opt t.handles h with
-         | Some hd -> hd.data := Bytes.empty
-         | None -> ());
-        Cpu86.set_reg16 cpu 0 h;
-        ok t
+      | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
     end)
   | 0x3D ->
     (match guest_file t (seg_off t 3 2) with
@@ -1087,6 +1164,7 @@ let service_immediate t =
     else fail t 6
   | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg
   | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
+  | 0x6C -> extended_open t
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
   | _ -> ()
 
