@@ -387,13 +387,20 @@ let clock t =
 let mouse_driver_installed = 0xFFFF
 let mouse_buttons_reported = 2
 
+(* AX=2Ah 가 DX 로 알리는 마우스 종류. 04h 는 IBM(PS/2) 마우스다(RBIL
+   INT 33/002A 표 03179). 이 기계의 마우스는 하네스가 움직여 실제 포트가
+   없다. DOSBox-X 와 같은 값을 준다. *)
+let mouse_type_ps2 = 0x04
+
 (* 00h 와 21h 가 함께 되돌리는 드라이버 상태. HelpPC 2.10 INT 33,0: 커서를
-   숨기고, 사용자 핸들러 마스크를 0 으로 하고, 범위를 모드 최대로 한다.
-   마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이 건 핸들러가
-   그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로 옮기지는
-   않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
+   숨기고 모양을 기본으로 하고, 사용자 핸들러 마스크를 0 으로 하고, 범위를
+   모드 최대로 한다. 마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이
+   건 핸들러가 그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로
+   옮기지는 않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
 let reset_mouse_driver m =
-  m.mouse_visible <- false;
+  m.mouse_cursor_flag <- cursor_flag_after_reset;
+  m.mouse_graphics_cursor <- Default_arrow;
+  m.mouse_text_cursor <- default_text_cursor;
   m.mouse_handler_mask <- 0;
   m.mouse_range_x <- None;
   m.mouse_range_y <- None;
@@ -417,8 +424,11 @@ let mouse t =
       Cpu86.set_reg16 cpu 3 mouse_buttons_reported;
       reset_mouse_driver m
     end
-  | 0x01 -> m.mouse_visible <- true
-  | 0x02 -> m.mouse_visible <- false
+  | 0x01 ->
+    (* 깃발을 하나 올리되 0 에서 멈춘다. 02h 를 n 번 불렀으면 01h 도 n 번
+       불러야 보인다(RBIL INT 33/0002, DOSBox-X mouse.cpp). *)
+    if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1
+  | 0x02 -> m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
   | 0x03 ->
     Cpu86.set_reg16 cpu 1 m.mouse_x;
     Cpu86.set_reg16 cpu 2 m.mouse_y;
@@ -460,6 +470,37 @@ let mouse t =
     Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);
     m.mouse_dx <- 0;
     m.mouse_dy <- 0
+  | 0x09 ->
+    (* 그래픽 커서: BX·CX 핫스폿, ES:DX 마스크 서른두 워드. 오프셋은
+       세그먼트 안에서 돈다. 돌려주는 값은 없다. *)
+    let seg = Cpu86.seg cpu 0 lsl 4 and off = Cpu86.reg16 cpu 2 in
+    let row k = rd16 t (seg + ((off + (2 * k)) land 0xffff)) in
+    m.mouse_graphics_cursor <-
+      Custom_cursor
+        { hot_x = Cpu86.reg16 cpu 3; hot_y = Cpu86.reg16 cpu 1;
+          screen_mask = Array.init cursor_rows row;
+          cursor_mask = Array.init cursor_rows (fun k -> row (cursor_rows + k)) }
+  | 0x0A ->
+    (* 텍스트 커서: BX=0 이면 CX·DX 가 마스크, 아니면 스캔 줄이다. RBIL 은
+       BX 0·1 만 적는다. 그 밖의 값은 DOSBox-X 처럼 하드웨어로 본다. CRTC 의
+       커서 모양은 바꾸지 않는다 — 마우스 커서를 그리는 곳이 아직 없다. *)
+    let cx = Cpu86.reg16 cpu 1 and dx = Cpu86.reg16 cpu 2 in
+    m.mouse_text_cursor <-
+      (match Cpu86.reg16 cpu 3 with
+       | 0 -> Software_text { screen_mask = cx; cursor_mask = dx }
+       | _ -> Hardware_text { first_line = cx; last_line = dx })
+  | 0x2A ->
+    (* GET CURSOR HOT SPOT(RBIL INT 33/002A): AX 깃발, BX·CX 핫스폿, DX 종류.
+       RBIL 은 깃발을 AX 로 적는다. DOSBox-X 는 AL 만 쓴다. *)
+    let hot_x, hot_y =
+      match m.mouse_graphics_cursor with
+      | Default_arrow -> default_hot_spot
+      | Custom_cursor { hot_x; hot_y; _ } -> (hot_x, hot_y)
+    in
+    Cpu86.set_reg16 cpu 0 (m.mouse_cursor_flag land 0xffff);
+    Cpu86.set_reg16 cpu 3 hot_x;
+    Cpu86.set_reg16 cpu 1 hot_y;
+    Cpu86.set_reg16 cpu 2 mouse_type_ps2
   | 0x0C ->
     (* DEFINE INTERRUPT SUBROUTINE PARAMETERS — CX 마스크, ES:DX 루틴.
        돌려주는 값은 없다(Ralf Brown rb-5968: Return 없음). AX 를 건드리면

@@ -52,12 +52,49 @@ let new_button_logs () =
    기계는 화면 크기로 자르지 않고 하네스가 준 좌표를 그대로 쓴다. *)
 let clamp_to range v = match range with None -> v | Some (lo, hi) -> max lo (min hi v)
 
+(* 커서 깃발(HelpPC 2.10 INT 33,1): 0 이면 커서가 보이고 음수면 숨는다.
+   드라이버를 리셋하면 -1 이다. *)
+let cursor_flag_after_reset = -1
+
+(* AX=09h 그래픽 커서는 열여섯 줄이고 줄마다 16비트 워드 하나다. 화면
+   마스크 열여섯 워드 뒤에 커서 마스크 열여섯 워드가 온다(RBIL INT 33/0009
+   표 03170). *)
+let cursor_rows = 16
+
+type graphics_cursor =
+  | Default_arrow
+      (** 리셋 뒤 드라이버에 든 화살표다. 이 기계는 그 비트맵을 지어내지
+          않는다. 무엇을 그릴지는 커서를 그리는 쪽이 정한다(이슈 #77). *)
+  | Custom_cursor of {
+      hot_x : int;  (** BX 그대로 *)
+      hot_y : int;  (** CX 그대로 *)
+      screen_mask : int array;  (** [cursor_rows] 워드, 화면과 AND *)
+      cursor_mask : int array;  (** [cursor_rows] 워드, 그 뒤 XOR *)
+    }
+
+(* 화살표의 핫스폿은 왼쪽 위 (0, 0)이다(DOSBox-X mouse.cpp 의 리셋이
+   hotx·hoty 를 0 으로 둔다). *)
+let default_hot_spot = (0, 0)
+
+(* AX=0Ah 텍스트 커서(RBIL INT 33/000A). 소프트웨어 커서는 커서 자리의
+   글자·속성 워드를 화면 마스크와 AND 한 뒤 커서 마스크와 XOR 한다.
+   하드웨어 커서는 CRTC 커서의 시작·끝 스캔 줄이다. *)
+type text_cursor =
+  | Software_text of { screen_mask : int; cursor_mask : int }
+  | Hardware_text of { first_line : int; last_line : int }
+
+(* 리셋 뒤 텍스트 커서는 속성 바이트만 뒤집는 소프트웨어 커서다(DOSBox-X
+   mouse.cpp defaultTextAndMask 77FFh·defaultTextXorMask 7700h). *)
+let default_text_cursor = Software_text { screen_mask = 0x77FF; cursor_mask = 0x7700 }
+
 type mouse = {
   mutable mouse_present : bool;
   mutable mouse_x : int;
   mutable mouse_y : int;
   mutable mouse_buttons : int;
-  mutable mouse_visible : bool;
+  mutable mouse_cursor_flag : int;  (** 0 이하. 0 이면 보인다 *)
+  mutable mouse_graphics_cursor : graphics_cursor;
+  mutable mouse_text_cursor : text_cursor;
   mutable mouse_dx : int;
   mutable mouse_dy : int;
   mutable mouse_handler_mask : int;
