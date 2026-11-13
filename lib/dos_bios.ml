@@ -51,6 +51,38 @@ let equipment_word =
      아무 일도 하지 않는다), bits4-5 = 10b 컬러 80x25, bits14-15 프린터 1 개 *)
   0x0001 lor 0x0020 lor 0x4000
 
+(* 비디오 BIOS 의 정적 기능 표(RBIL INT 10/AH=1Bh, 표 00045). INT 10h
+   AH=1Bh 가 이 자리를 가리킨다. 실기 VGA BIOS 는 C000 세그먼트에 살고
+   DOSBox-staging 도 이 표를 C000 에 둔다. 앞 256 바이트는 ROM 머리글
+   자리로 비워 둔다. *)
+let video_rom_seg = 0xC000
+let static_table_off = 0x0100
+
+(* 모드 0-7·0Dh-13h — Dos_video 의 모드표가 아는 번호다. SeaBIOS 가
+   stdvga 모드 목록으로 만드는 값과 같다. DOSBox-staging 은 PCjr·Tandy
+   모드(8-0Ch)까지 켠 FFh FFh 0Fh 를 낸다. *)
+let static_modes = [ 0xFF; 0xE0; 0x0F ]
+let static_scan_lines = 0x07           (* 200·350·400 *)
+
+(* 글꼴은 ROM 8x8 하나뿐이다. AH=11h 의 글꼴 싣기가 없다. *)
+let static_char_blocks = 1
+
+(* 기능 지원 깃발(표 00046). 이 기계가 하는 것만 켠다. *)
+let fn_gray_summing = 0x0002           (* AH=12h BL=33h, AX=101Bh *)
+let fn_palette_loading = 0x0008        (* AH=12h BL=31h *)
+let fn_cursor_emulation = 0x0010       (* AH=12h BL=34h — 비트만 저장한다 *)
+let fn_ega_palette = 0x0020            (* AX=1000h·1002h·1007h·1009h *)
+let fn_color_palette = 0x0040          (* AX=1010h·1012h·1015h·1017h *)
+let fn_dcc = 0x0800                    (* AX=1A00h *)
+let static_functions =
+  fn_gray_summing lor fn_palette_loading lor fn_cursor_emulation
+  lor fn_ega_palette lor fn_color_palette lor fn_dcc
+
+let static_table =
+  static_modes
+  @ [ 0; 0; 0; 0; static_scan_lines; static_char_blocks; static_char_blocks;
+      static_functions land 0xff; static_functions lsr 8; 0; 0; 0; 0 ]
+
 let install t =
   (* EMM 디바이스 헤더(Dos_ems). 진입 스텁 "int 사설벡터; iret" 뒤에,
      DOS 디바이스 관례대로 +0x0A 에 드라이버 이름이 온다. EMS 런타임은
@@ -90,6 +122,7 @@ let install t =
   wr8 t 0x462 0;                    (* 활성 페이지 *)
   wr8 t 0x460 7; wr8 t 0x461 6;     (* 커서 모양 *)
   set_cursor t 0 0;
+  List.iteri (fun i b -> wr8 t ((video_rom_seg * 16) + static_table_off + i) b) static_table;
   (* 호스트가 서빙하는 벡터도 IVT 에 실주소가 있어야 한다 — Turbo
      Pascal 의 Intr 썽크는 INT 명령 없이 IVT 를 직접 읽어 그 주소로
      retf 한다(실측: 빈 IVT[10h] 로 0000:0000 추락). 스텁 본체는
@@ -200,6 +233,85 @@ let sum_to_gray pal ~first ~count =
 let set_bda_bit t addr bit on =
   let v = rd8 t addr in
   wr8 t addr (if on then v lor bit else v land lnot bit)
+
+(* 디스플레이 조합 코드(AX=1A00h) 08h = VGA 컬러 *)
+let dcc_vga_color = 0x08
+
+(* INT 10h AH=1Bh BX=0 이 ES:DI 에 쓰는 64 바이트(RBIL 표 00040) *)
+let state_size = 64
+let state_bda_low = 0x449              (* 모드 ~ 3x9 사본, 30 바이트 *)
+let state_bda_low_len = 30
+let state_bda_rows = 0x484             (* 행 수 - 1, 글자 높이, 3 바이트 *)
+let state_bda_rows_len = 3
+let at_bda_low = 0x04
+let at_bda_rows = 0x22
+let at_dcc = 0x25                      (* 26h(다른 화면)는 00h = 없음, 지운 값 그대로 *)
+let at_colors = 0x27
+let at_pages = 0x29
+let at_scan_lines = 0x2A
+let at_misc = 0x2D
+let at_video_mem = 0x31
+let video_mem_256k = 3
+
+let scan_200 = 0
+let scan_350 = 1
+let scan_400 = 2
+let scan_480 = 3
+
+(* 지금 모드의 색 수, 쪽 수, 주사선 번호. 쪽 수는 DOSBox-staging
+   int10_modes.cpp ModeList_VGA 의 ptotal 이다. 흑백 모드(7, 0Fh)의 색
+   수는 0 이다(RBIL 표 00040 27h). 텍스트 그림은 늘 400 줄이다. *)
+let mode_shape t =
+  match Dos_video.kind t.video with
+  | Dos_video.Text -> ((if Dos_video.mode t.video = 7 then 0 else 16), 8, scan_400)
+  | Dos_video.Cga4 -> (4, 1, scan_200)
+  | Dos_video.Cga2 -> (2, 1, scan_200)
+  | Dos_video.Planar ->
+    (match Dos_video.mode t.video with
+     | 0x0D -> (16, 8, scan_200)
+     | 0x0E -> (16, 4, scan_200)
+     | 0x0F -> (0, 2, scan_350)
+     | 0x10 -> (16, 2, scan_350)
+     | 0x11 -> (2, 1, scan_480)
+     | _ -> (16, 1, scan_480)          (* 12h — 16색 모드는 0Dh-12h 뿐이다 *)
+    )
+  | Dos_video.Linear256 -> (256, 1, scan_200)
+
+(* 상태 깃발(표 00041). bit 1-3(회색 합산, 흑백 모니터, 기본 팔레트 싣기
+   끔)은 BDA 0x489 의 같은 비트다. bit 4 는 커서 모양 흉내가 켜져 있으면
+   (0x487 bit 0 이 0) 선다. bit 5(1 = 깜박임, 0 = 바탕 밝기)는 텍스트
+   모드에서 선다. Dos_render 가 속성 bit 7 을 바탕색에 쓰지 않기 때문이다.
+   깜박이게 그리지는 않는다. bit 0 을 정하는 BDA 자리는 확인하지 못해 0 으로
+   둔다. *)
+let misc_cursor_emulation = 0x10
+let misc_blink = 0x20
+
+let state_misc t =
+  (rd8 t bda_vga_flags
+   land (vga_flag_gray_summing lor vga_flag_mono_display lor vga_flag_keep_palette))
+  lor (if rd8 t bda_ega_misc land ega_misc_no_cursor_emulation = 0 then misc_cursor_emulation
+       else 0)
+  lor (match Dos_video.kind t.video with
+       | Dos_video.Text -> misc_blink
+       | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar | Dos_video.Linear256 -> 0)
+
+(* ES:DI 부터 64 바이트. 주소는 세그먼트 안에서 돈다. 정해지지 않은 칸은
+   0 이다(SeaBIOS handle_101b 처럼 먼저 다 지운다). *)
+let write_state_info t ~seg ~off =
+  let put i v = wr8 t ((seg lsl 4) + ((off + i) land 0xFFFF)) (v land 0xff) in
+  let put16 i v = put i v; put (i + 1) (v lsr 8) in
+  for i = 0 to state_size - 1 do put i 0 done;
+  put16 0 static_table_off;
+  put16 2 video_rom_seg;
+  for i = 0 to state_bda_low_len - 1 do put (at_bda_low + i) (rd8 t (state_bda_low + i)) done;
+  for i = 0 to state_bda_rows_len - 1 do put (at_bda_rows + i) (rd8 t (state_bda_rows + i)) done;
+  put at_dcc dcc_vga_color;
+  let colors, pages, scan = mode_shape t in
+  put16 at_colors colors;
+  put at_pages pages;
+  put at_scan_lines scan;
+  put at_misc (state_misc t);
+  put at_video_mem video_mem_256k
 
 let video t =
   let cpu = t.cpu in
@@ -333,6 +445,14 @@ let video t =
          wr8 t (dst + (i * 3) + 2) b
        done
      | _ -> ())
+  | 0x1B ->
+    (* 기능·상태 정보. BX=0 만 정의돼 있다(RBIL). 다른 BX 는 AL=0 으로
+       돌아간다(DOSBox-staging int10.cpp). *)
+    if Cpu86.reg16 cpu 3 = 0 then begin
+      write_state_info t ~seg:(Cpu86.seg cpu 0) ~off:(Cpu86.reg16 cpu 7);
+      Cpu86.set_reg8 cpu 0 0x1B
+    end
+    else Cpu86.set_reg8 cpu 0 0
   | 0x11 ->
     (* AL=30h 폰트 정보: ES:BP=ROM 8x8 폰트, CX=높이, DL=행-1.
        비디오 초기화가 이 포인터로 분기한다(실측: 빈 값이면 추락). *)
@@ -392,9 +512,9 @@ let video t =
     done;
     if al land 0x01 = 0 then set_cursor t (fst saved) (snd saved)
   | 0x1A ->
-    (* 디스플레이 조합 코드: 08h = VGA 컬러 *)
+    (* 디스플레이 조합 코드: BL = 지금 화면, BH = 다른 화면(00h = 없음) *)
     Cpu86.set_reg8 cpu 0 0x1A;
-    Cpu86.set_reg8 cpu 3 0x08;
+    Cpu86.set_reg8 cpu 3 dcc_vga_color;
     Cpu86.set_reg8 cpu 7 0x00
   | _ -> ()
 
