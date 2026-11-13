@@ -88,6 +88,12 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
+(* 읽기-되돌림 명령의 비트(82C54 데이터시트 Figure 10) *)
+let read_back_no_count = 0x20
+let read_back_no_status = 0x10
+let read_back_channel2 = 0x08
+let read_back_channel0 = 0x02
+
 (* 채널 0 의 GATE 는 PC 에서 늘 높다. *)
 let channel0_gate = true
 
@@ -262,14 +268,22 @@ let port_out t p v =
   | 0x42 -> Dos_pit.write t.pit2 ~tick:(pit_tick t) ~gate:(gate2 t) v
   | 0x43 ->
     (* 제어 워드: bit7-6 채널(3 은 읽기-되돌림 명령), bit5-4 접근
-       모드(0=래치). 채널 1 은 DRAM 리프레시라 게스트가 쓰지 않는다.
-       읽기-되돌림은 아직 없다. *)
+       모드(0=래치). 채널 1 은 DRAM 리프레시라 게스트가 쓰지 않는다 — 이
+       기계에는 채널 1 이 없다. *)
     (match v lsr 6 with
      | 0 ->
        Dos_pit.control t.pit0 ~tick:(pit_tick t) v;
        pit0_changed t
+     | 1 -> ()
      | 2 -> Dos_pit.control t.pit2 ~tick:(pit_tick t) v
-     | _ -> ())
+     | _ ->
+       (* 읽기-되돌림: bit 5 가 0 이면 카운트, bit 4 가 0 이면 상태를 잡는다.
+          bit 1·2·3 이 채널 0·1·2 를 고른다. 잡기만 해서 OUT 은 그대로다. *)
+       let count = v land read_back_no_count = 0
+       and status = v land read_back_no_status = 0 in
+       let tick = pit_tick t in
+       if v land read_back_channel0 <> 0 then Dos_pit.read_back t.pit0 ~tick ~count ~status;
+       if v land read_back_channel2 <> 0 then Dos_pit.read_back t.pit2 ~tick ~count ~status)
   | 0x61 ->
     let was = gate2 t in
     t.port_b <- v;

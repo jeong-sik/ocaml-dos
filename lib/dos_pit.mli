@@ -24,7 +24,15 @@ val write : t -> tick:int -> gate:bool -> int -> unit
 (** 카운터 포트에 쓴 바이트. [gate] 는 지금 GATE 레벨이다. *)
 
 val read : t -> tick:int -> int
-(** 카운터 포트에서 읽은 바이트. 래치가 있으면 래치 값을 낸다. *)
+(** 카운터 포트에서 읽은 바이트. 읽기-되돌림이 잡은 상태 바이트가 있으면 그것을
+    먼저 내고, 그다음 래치한 카운트, 없으면 지금 카운트를 낸다. *)
+
+val read_back : t -> tick:int -> count:bool -> status:bool -> unit
+(** 읽기-되돌림 명령(제어 워드 bit 7-6 = 11)이 이 카운터를 골랐다. [count] 면
+    카운터 래치 명령과 같이 카운트를 잡는다. [status] 면 상태 바이트를 잡는다:
+    bit 7 OUT, bit 6 NULL COUNT(마지막에 쓴 카운트가 아직 CE 에 안 실렸다), bit
+    5-0 마지막 제어 워드의 그 비트. 읽기 전에 다시 잡으면 둘 다 무시한다
+    (데이터시트 Read-Back Command, Figure 11~13). *)
 
 val gate_edge : t -> tick:int -> high:bool -> unit
 (** GATE 레벨이 바뀌었다. 같은 레벨로 다시 부르지 않는다. *)
