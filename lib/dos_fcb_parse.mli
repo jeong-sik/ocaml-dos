@@ -32,6 +32,3 @@ val parse :
     읽지 않는다 — 남기라고 한 칸은 쓰지 않을 뿐이다. 읽기와 쓰기는 DOS 와
     같은 순서로 일어난다. *)
 
-val upcase : int -> int
-(** 파일 이름 글자의 대문자. a-z 와, 80h 이상은 MS-DOS 4.0 COUNTRY.SYS
-    미국 437 표([MKCNTRY.ASM] [us_ucase])를 따른다. *)

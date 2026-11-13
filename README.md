@@ -71,7 +71,8 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB(29h 이름 나누기 포함), findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
-  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
+  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 국가 정보(38h,
+  미국 437만), 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
 - **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), PIC 마스크,
   VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
@@ -222,6 +223,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/16h/1Ah/33h |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
 | `Dos_fcb_parse` | INT 21h AH=29h — 글자열을 FCB 의 드라이브·이름·확장자로 나눈다(MS-DOS 4.0 `MakeFcb`) |
+| `Dos_country` | 미국(국가 1) 437 의 대문자 표와 INT 21h AH=38h 가 주는 24 바이트 표 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |
 | `Dos_machine` | 배선·로더와 바깥에 보이는 얼굴 |
 | `Dos_snapshot` | 기계 전체를 바이트로 저장하고 새 기계로 되살린다. 형식 번호가 다르면 거절하고, 코어 digest 는 보여 주기만 한다 |
