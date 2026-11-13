@@ -692,6 +692,13 @@ let resume_input t request =
 
 (* ---------- INT 21h ---------- *)
 
+(* MS-DOS 4.0 의 마지막 기능 번호(MS_TABLE.ASM MAXCOM, $Extended_Open).
+   그 위는 DISP.ASM BADCALL 이 AL=0 만 쓰고 IRET 한다. 다른 레지스터와
+   CF 는 그대로다 — 소스 주석: CF 를 세우면 프로그램이 깨질 수 있다.
+   AX=71A0h(긴 파일 이름 지원?)를 부르고 AX=7100h 를 보고 「없음」을 아는
+   프로그램이 이 값을 읽는다. *)
+let max_function = 0x6C
+
 let service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
@@ -980,9 +987,15 @@ let service_immediate t =
       ok t
     end
     else fail t 6
-  | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg
-  | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
+  | 0x51 | 0x62 ->
+    (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET *)
+    Cpu86.set_reg16 cpu 3 t.psp_seg
+  | 0x68 | 0x6A -> ok t                     (* 파일 반영($Commit) — 메모리라 즉시 *)
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
+  | 0x18 | 0x1D | 0x1E | 0x20 | 0x61 ->
+    (* MS_TABLE.ASM 의 빈 칸 CPMFunc: XOR AL,AL 뒤 LEAVEDOS *)
+    Cpu86.set_reg8 cpu 0 0
+  | ah when ah > max_function -> Cpu86.set_reg8 cpu 0 0
   | _ -> ()
 
 let terminate t = child_exit t ~code:0 ~keep:None
