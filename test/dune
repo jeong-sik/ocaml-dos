@@ -73,3 +73,7 @@
 (test
  (name dos_vga_alt_select_test)
  (libraries dosmachine))
+
+(test
+ (name dos_vga_gray_test)
+ (libraries dosmachine))

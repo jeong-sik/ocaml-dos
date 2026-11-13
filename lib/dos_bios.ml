@@ -164,10 +164,38 @@ let ega_misc_no_cursor_emulation = 0x01
 let vga_flag_200_lines = 0x80
 let vga_flag_400_lines = 0x10
 let vga_flag_keep_palette = 0x08
+(* bit 1 = 회색 합산 켬, bit 2 = 흑백 모니터. 둘 중 하나라도 서 있으면
+   AX=1010h·1012h 가 색을 회색으로 바꿔 싣는다(DOSBox-staging int10_pal.cpp
+   INT10_SetSingleDACRegister 의 0x06 마스크). 모드 세우기는 bit 1 만 본다. *)
+let vga_flag_gray_summing = 0x02
+let vga_flag_mono_display = 0x04
 let switches_kept = 0xF0
 let switches_cga_emulation = 0x08
 let switches_ega_enhanced = 0x09
 let alt_select_done = 0x12
+
+(* 회색 = 0.30 R + 0.59 G + 0.11 B 를 256 단위로 반올림한다(SeaBIOS
+   stdvga_perform_gray_scale_summing, DOSBox-staging
+   INT10_PerformGrayScaleSumming 이 같은 식이다). 세 무게의 합이 256 이라
+   6비트 색에서 나온 값은 6비트를 넘지 않는다. 두 구현의 0x3F 자르기는
+   여기서 닿지 않아 두지 않는다. *)
+let gray_red = 77
+let gray_green = 151
+let gray_blue = 28
+let gray_round = 0x80
+let gray_shift = 8
+
+let gray (r, g, b) =
+  let v = ((gray_red * r) + (gray_green * g) + (gray_blue * b) + gray_round) lsr gray_shift in
+  (v, v, v)
+
+(* DAC [first] 부터 [count] 자리를 회색으로. 번호는 DAC 끝에서 0 으로 돈다. *)
+let sum_to_gray pal ~first ~count =
+  let n = Array.length pal in
+  for i = 0 to min count n - 1 do
+    let k = (first + i) mod n in
+    pal.(k) <- gray pal.(k)
+  done
 
 let set_bda_bit t addr bit on =
   let v = rd8 t addr in
@@ -184,7 +212,12 @@ let video t =
     (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
        AL bit7(화면 보존)과는 상관없다. 막는 길은 BDA 0x489 bit3
        (기본 팔레트 싣기 금지, AX=1201h BL=31h 가 켜는 비트) 하나다. *)
-    if rd8 t bda_vga_flags land vga_flag_keep_palette = 0 then Dos_ports.reset_dac t.ports;
+    if rd8 t bda_vga_flags land vga_flag_keep_palette = 0 then begin
+      Dos_ports.reset_dac t.ports;
+      if rd8 t bda_vga_flags land vga_flag_gray_summing <> 0 then
+        let pal = Dos_ports.palette t.ports in
+        sum_to_gray pal ~first:0 ~count:(Array.length pal)
+    end;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
     wr8 t 0x484 (rows - 1);
@@ -243,6 +276,8 @@ let video t =
     Cpu86.set_reg8 cpu 7 (rd8 t 0x462)
   | 0x10 ->
     let pal = Dos_ports.palette t.ports in
+    let summing = rd8 t bda_vga_flags land (vga_flag_gray_summing lor vga_flag_mono_display) <> 0 in
+    let load rgb = if summing then gray rgb else rgb in
     (match al with
      | 0x00 ->
        (* 색 번호 하나를 DAC 자리로: BL=색 번호, BH=DAC 자리 *)
@@ -265,8 +300,9 @@ let video t =
        (* 한 색: BX=번호, DH=R CH=G CL=B *)
        let idx = Cpu86.reg16 cpu 3 land 0xff in
        pal.(idx) <-
-         (Cpu86.reg8 cpu 6 land 0x3f, Cpu86.reg8 cpu 5 land 0x3f,
-          Cpu86.reg8 cpu 1 land 0x3f)
+         load
+           (Cpu86.reg8 cpu 6 land 0x3f, Cpu86.reg8 cpu 5 land 0x3f,
+            Cpu86.reg8 cpu 1 land 0x3f)
      | 0x12 ->
        (* 여러 색: BX=첫 번호, CX=개수, ES:DX=R,G,B 배열 *)
        let first = Cpu86.reg16 cpu 3 land 0xff in
@@ -275,10 +311,14 @@ let video t =
        for i = 0 to count - 1 do
          let k = (first + i) land 0xff in
          pal.(k) <-
-           (rd8 t (src + (i * 3)) land 0x3f,
-            rd8 t (src + (i * 3) + 1) land 0x3f,
-            rd8 t (src + (i * 3) + 2) land 0x3f)
+           load
+             (rd8 t (src + (i * 3)) land 0x3f,
+              rd8 t (src + (i * 3) + 1) land 0x3f,
+              rd8 t (src + (i * 3) + 2) land 0x3f)
        done
+     | 0x1B ->
+       (* BX 부터 CX 자리를 회색으로. 깃발과 상관없이 바꾼다 *)
+       sum_to_gray pal ~first:(Cpu86.reg16 cpu 3) ~count:(Cpu86.reg16 cpu 1)
      | 0x15 ->
        let r, g, b = pal.(Cpu86.reg16 cpu 3 land 0xff) in
        Cpu86.set_reg8 cpu 6 r; Cpu86.set_reg8 cpu 5 g; Cpu86.set_reg8 cpu 1 b
@@ -304,7 +344,7 @@ let video t =
     end
   | 0x12 ->
     (* 대체 선택. BL=10h 는 EGA/VGA 정보: BH=0(컬러), BL=3(256KB).
-       BL=30h·31h·34h·36h 는 받으면 AL=12h, AL 이 범위 밖이면 AL=0 이다
+       BL=30h·31h·33h·34h·36h 는 받으면 AL=12h, AL 이 범위 밖이면 AL=0 이다
        (RBIL INT 10/AH=12h BL=30h~36h). 그 밖의 BL 은 AL 을 두고 돌아간다. *)
     let al_in n f = if al > n then Cpu86.set_reg8 cpu 0 0 else (f (); Cpu86.set_reg8 cpu 0 alt_select_done) in
     (match Cpu86.reg8 cpu 3 with
@@ -327,6 +367,10 @@ let video t =
            wr8 t bda_switches ((rd8 t bda_switches land switches_kept) lor switches))
      | 0x31 ->
        al_in 1 (fun () -> set_bda_bit t bda_vga_flags vga_flag_keep_palette (al = 1))
+     | 0x33 ->
+       (* AL=0 이 합산을 켠다. 31h·34h 의 비트는 "끔" 이라 AL=1 이 세우고,
+          이 비트는 "켬" 이라 AL=0 이 세운다. *)
+       al_in 1 (fun () -> set_bda_bit t bda_vga_flags vga_flag_gray_summing (al = 0))
      | 0x34 ->
        (* 커서 모양 바꾸기(AH=01h)는 이 비트와 상관없이 CRTC 에 그대로 쓴다. *)
        al_in 1 (fun () -> set_bda_bit t bda_ega_misc ega_misc_no_cursor_emulation (al = 1))
