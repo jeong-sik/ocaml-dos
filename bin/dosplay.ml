@@ -27,7 +27,6 @@ let max_lag = 0.25
    Kitty 프로토콜을 쓰는 터미널은 Esc 를 [CSI 27 u] 로 보내므로 이 길을 타지
    않는다. *)
 let lone_escape_frames = 2
-let read_size = 4096
 
 (* 답을 받기 전 칸 크기. 흔한 고정폭 글꼴의 비율이다. *)
 let default_cols = 80
@@ -35,93 +34,11 @@ let default_rows = 24
 let default_cell_w = 8
 let default_cell_h = 16
 
-let enter_terminal =
-  String.concat ""
-    [ "\027[?1049h";  (* 다른 화면으로 *)
-      "\027[?25l";  (* 커서 숨김 *)
-      "\027[>1u";  (* Kitty 키보드: disambiguate 를 스택에 넣는다 *)
-      "\027[?1003h";  (* 버튼 없이 움직여도 알린다 *)
-      "\027[?1006h";  (* SGR 마우스 *)
-      "\027[?1016h";  (* 좌표를 픽셀로 *)
-      "\027[14t";  (* 텍스트 영역 픽셀 크기를 묻는다 *)
-      "\027[18t" (* 칸 수를 묻는다 *) ]
-
-let leave_terminal =
-  String.concat ""
-    [ "\027[?1016l"; "\027[?1006l"; "\027[?1003l";
-      "\027[<u";  (* 넣었던 키보드 플래그를 뺀다 *)
-      "\027_Ga=d,d=A,q=2\027\\";  (* 그림을 모두 지운다 *)
-      "\027[?25h"; "\027[?1049l" ]
-
-let out s =
-  print_string s;
-  flush stdout
-
-let raw_mode saved =
-  { saved with
-    Unix.c_icanon = false; c_echo = false; c_isig = false; c_ixon = false;
-    c_icrnl = false; c_vmin = 0; c_vtime = 0 }
-
-let read_available () =
-  let buf = Bytes.create read_size in
-  let acc = Buffer.create 64 in
-  let rec go () =
-    match Unix.select [ Unix.stdin ] [] [] 0.0 with
-    | [], _, _ -> ()
-    | _ :: _, _, _ ->
-      let n = Unix.read Unix.stdin buf 0 read_size in
-      Buffer.add_subbytes acc buf 0 n;
-      if n = read_size then go ()
-  in
-  (try go () with Unix.Unix_error (Unix.EINTR, _, _) -> ());
-  Buffer.contents acc
-
-(* 끝낼 때 DA1 을 묻는다. 터미널은 받은 차례대로 답하므로, DA1 답이 오면
-   그 앞의 그래픽 이스케이프는 다 처리됐다 — 마지막 프레임 파일도 읽고
-   지웠다. 그 사이 온 답(그래픽 에러 등)은 여기서 버린다. 버리지 않으면
-   터미널 설정을 되돌린 뒤 셸 입력으로 샌다. DA1 은 VT100 부터 있는
-   질문이라 답하지 않는 터미널은 드물다. 그래도 [exit_sync_timeout] 넘게
-   기다리지는 않는다. *)
-let ask_attributes = "\027[c"
-let exit_sync_timeout = 1.0
-
-let drain_until_attributes () =
-  let deadline = Unix.gettimeofday () +. exit_sync_timeout in
-  let rec go tail =
-    let left = deadline -. Unix.gettimeofday () in
-    if left > 0.0 then
-      match Unix.select [ Unix.stdin ] [] [] left with
-      | [], _, _ -> ()
-      | _ :: _, _, _ -> (
-        (* 읽을 수 있다는데 아무것도 없으면 터미널이 닫혔다(EOF). *)
-        match read_available () with
-        | "" -> ()
-        | got ->
-          let events, tail = Dosterm.parse (tail ^ got) in
-          if not (List.mem Dosterm.Device_attributes events) then go tail)
-  in
-  go ""
-
-(* 터미널을 게임용으로 바꾸고 [f] 를 부른 뒤 되돌린다. 되돌리다 난 예외가
-   [f] 의 예외를 덮지 않게 여기서 삼킨다. 비차단 모드는 셸과 같은 터미널
-   파일에 걸리므로 반드시 푼다. 터미널이 다 처리한 뒤 남은 임시 파일을
-   지운다. *)
-let with_terminal o f =
-  let saved = Unix.tcgetattr Unix.stdin in
-  Unix.tcsetattr Unix.stdin Unix.TCSANOW (raw_mode saved);
-  out enter_terminal;
-  Unix.set_nonblock Unix.stdout;
-  Fun.protect f ~finally:(fun () ->
-      (try Unix.clear_nonblock Unix.stdout with Unix.Unix_error _ -> ());
-      (try Frame_out.finish o with Unix.Unix_error _ -> ());
-      (try out (leave_terminal ^ ask_attributes) with Sys_error _ -> ());
-      (try drain_until_attributes () with Unix.Unix_error _ -> ());
-      (try Unix.tcsetattr Unix.stdin Unix.TCSANOW saved with Unix.Unix_error _ -> ());
-      Frame_out.cleanup o)
 
 type state = {
-  m : Dos_machine.t;
+  mutable m : Dos_machine.t;  (** Shift+F11 이 저장한 기계로 바꾼다 *)
   out : Frame_out.t;
+  state_file : Quicksave.t option;  (** [--state] — 없으면 F11 은 버리는 키다 *)
   fps : int;
   mutable cols : int;
   mutable rows : int;
@@ -147,6 +64,16 @@ let apply st = function
   | Dosterm.Key w -> Dos_machine.push_key st.m w
   | Dosterm.Unmapped _ -> st.unmapped <- st.unmapped + 1
   | Dosterm.Quit -> st.quit <- true
+  | Dosterm.Save_state -> (
+    match st.state_file with
+    | Some q -> Quicksave.save q st.m
+    | None -> st.unmapped <- st.unmapped + 1)
+  | Dosterm.Load_state -> (
+    match st.state_file with
+    | Some q ->
+      (* 화면이 다르면 프레임 지문이 달라 다시 그린다. *)
+      Option.iter (fun m -> st.m <- m) (Quicksave.load q)
+    | None -> st.unmapped <- st.unmapped + 1)
   | Dosterm.Text_area { width; height } ->
     st.area <- Some (width, height);
     st.redraw <- true
@@ -165,7 +92,7 @@ let apply st = function
     Dos_machine.set_mouse st.m ~x ~y ~buttons:st.buttons
 
 let poll_input st =
-  let events, tail = Dosterm.parse (st.tail ^ read_available ()) in
+  let events, tail = Dosterm.parse (st.tail ^ Terminal.read_available ()) in
   List.iter (apply st) events;
   if tail <> "" && tail = st.tail then st.tail_age <- st.tail_age + 1 else st.tail_age <- 0;
   st.tail <- tail;
@@ -204,7 +131,7 @@ let draw st =
    벽시계다. 버린 빚만큼 뒤로 민다. *)
 (* 터미널 창을 닫으면 SIGHUP 이 온다. 기본 동작대로 바로 죽으면 터미널
    설정을 되돌리지 못하고 /tmp 의 임시 파일도 남는다. 신호는 표시만 하고
-   루프가 보통처럼 끝나 [with_terminal] 의 정리를 거치게 한다. *)
+   루프가 보통처럼 끝나 [Terminal.with_terminal] 의 정리를 거치게 한다. *)
 let stop_signal = ref None
 
 let watch_signals () =
@@ -252,7 +179,7 @@ let mount_dir m dir =
 
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
-  let fps = ref default_fps and mouse = ref true in
+  let fps = ref default_fps and mouse = ref true and state = ref "" in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
@@ -260,48 +187,64 @@ let () =
        "DIR  폴더의 파일을 모두 대문자 이름으로 마운트한다");
       ("--mount", Arg.String (fun s -> mounts := s :: !mounts), "NAME=PATH  파일 하나를 마운트");
       ("--fps", Arg.Set_int fps, "N  초당 프레임(기본 30)");
-      ("--no-mouse", Arg.Clear mouse, "  마우스 드라이버를 붙이지 않는다") ]
+      ("--no-mouse", Arg.Clear mouse, "  마우스 드라이버를 붙이지 않는다");
+      ("--state", Arg.Set_string state,
+       "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다") ]
   in
   Arg.parse specs (fun a -> raise (Arg.Bad ("unexpected " ^ a)))
-    "dosplay [--dir DIR] (--com PATH | --exe PATH) — Kitty 그래픽 터미널에서 실행, F12 로 끝";
+    "dosplay [--dir DIR] (--com PATH | --exe PATH | --state FILE) — Kitty 그래픽 터미널에서 실행, F12 로 끝";
   if not (Unix.isatty Unix.stdin && Unix.isatty Unix.stdout) then begin
     prerr_endline "dosplay needs a terminal on stdin and stdout";
     exit 2
   end;
-  let m = Dos_machine.create () in
-  List.iter (mount_dir m) (List.rev !dirs);
-  List.iter
-    (fun spec ->
-      match String.index_opt spec '=' with
-      | Some i ->
-        Dos_machine.mount_file m (String.sub spec 0 i)
-          (read_file (String.sub spec (i + 1) (String.length spec - i - 1)))
-      | None -> prerr_endline ("bad --mount (want NAME=PATH): " ^ spec))
-    (List.rev !mounts);
-  if !com <> "" then Dos_machine.load_com m (read_file !com)
-  else if !exe <> "" then Dos_machine.load_exe m (read_file !exe)
-  else begin
-    prerr_endline "need --com PATH or --exe PATH";
-    exit 2
-  end;
-  if !mouse then Dos_machine.attach_mouse m;
+  let fresh () =
+    let m = Dos_machine.create () in
+    List.iter (mount_dir m) (List.rev !dirs);
+    List.iter
+      (fun spec ->
+        match String.index_opt spec '=' with
+        | Some i ->
+          Dos_machine.mount_file m (String.sub spec 0 i)
+            (read_file (String.sub spec (i + 1) (String.length spec - i - 1)))
+        | None -> prerr_endline ("bad --mount (want NAME=PATH): " ^ spec))
+      (List.rev !mounts);
+    if !com <> "" then Dos_machine.load_com m (read_file !com)
+    else Dos_machine.load_exe m (read_file !exe);
+    if !mouse then Dos_machine.attach_mouse m;
+    m
+  in
+  let m =
+    if !com <> "" || !exe <> "" then fresh ()
+    else if !state <> "" then (
+      match Quicksave.restore !state with
+      | Ok m -> m
+      | Error e ->
+        prerr_endline ("cannot resume from " ^ !state ^ ": " ^ e);
+        exit 2)
+    else begin
+      prerr_endline "need --com PATH, --exe PATH or --state FILE";
+      exit 2
+    end
+  in
+  let state_file = if !state = "" then None else Some (Quicksave.create !state) in
   let o = Frame_out.create () in
   let st =
-    { m; out = o; fps = max 1 !fps; cols = default_cols; rows = default_rows; area = None;
+    { m; out = o; state_file; fps = max 1 !fps; cols = default_cols; rows = default_rows; area = None;
       tail = ""; tail_age = 0; buttons = 0; box = (0, 0); last = ""; last_digest = 0;
       redraw = true; quit = false; unmapped = 0; guest_cycles = 0 }
   in
   watch_signals ();
-  let wall = with_terminal o (fun () -> play st) in
+  let wall = Terminal.with_terminal o (fun () -> play st) in
   (match !stop_signal with
    | Some name -> Printf.eprintf "stopped by %s\n" name
    | None ->
-     if Dos_machine.exited m then
-       Printf.eprintf "program exited with code %d\n" (Dos_machine.exit_code m)
+     if Dos_machine.exited st.m then
+       Printf.eprintf "program exited with code %d\n" (Dos_machine.exit_code st.m)
      else prerr_endline "stopped with F12");
   (* 게스트 시간이 벽시계보다 많이 짧으면 이 호스트가 실시간을 못 따라갔다. *)
   Printf.eprintf "guest time %.2fs, wall time %.2fs, frames sent %d (%d via temp files)\n"
     (float_of_int st.guest_cycles /. float_of_int cpu_hz) wall o.sent o.via_files;
   Option.iter (Printf.eprintf "temp-file frames not used: %s\n") o.gave_up;
+  Option.iter Quicksave.report st.state_file;
   if st.unmapped > 0 then
     Printf.eprintf "%d key(s) had no BIOS word and were dropped\n" st.unmapped

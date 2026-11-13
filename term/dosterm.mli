@@ -29,6 +29,8 @@ type event =
   | Device_attributes
       (** DA1 답 [CSI ? … c]. 터미널은 받은 차례대로 답하므로, 이 답이 오면
           그 앞에 보낸 것은 다 처리됐다. *)
+  | Save_state  (** F11 — 기계 상태를 저장한다 *)
+  | Load_state  (** Shift+F11 — 저장한 상태로 돌아간다 *)
   | Quit  (** F12 — 실행기를 끝낸다 *)
 
 val parse : string -> event list * string
