@@ -85,14 +85,14 @@ let test_ports () =
   check "fast refresh not yet flipped at 200 cycles" (not (refresh_bit f));
   Dos_ports.set_now f 400;
   check "fast refresh flipped by 400 cycles" (refresh_bit f);
-  (* 수직 귀선은 PC 에서 70000 사이클, 10 배 기계에서 175000 사이클 칸의
-     첫 칸에 켜진다. *)
-  Dos_ports.set_now p 100_000;
-  Dos_ports.set_now f 100_000;
-  check "PC vsync over by 100000 cycles" (not (vsync_bit p));
-  check "fast vsync still on at 100000 cycles" (vsync_bit f);
-  Dos_ports.set_now f 200_000;
-  check "fast vsync over by 200000 cycles" (not (vsync_bit f))
+  (* 수직 귀선은 412 번째 줄(13.09ms)에서 켜진다. PC 에서는 62486 사이클,
+     10 배 기계에서는 156215 사이클이다. *)
+  Dos_ports.set_now p 62_600;
+  Dos_ports.set_now f 62_600;
+  check "PC vsync on at 62600 cycles" (vsync_bit p);
+  check "fast vsync not yet on at 62600 cycles" (not (vsync_bit f));
+  Dos_ports.set_now f 156_500;
+  check "fast vsync on at 156500 cycles" (vsync_bit f)
 
 (* OPL 타이머 1: 레지스터 2 = FFh 면 80µs 스텝 256 개. PC 는 382×256 =
    97792 사이클, 10 배 기계는 955×256 = 244480 사이클 뒤에 끝난다. *)

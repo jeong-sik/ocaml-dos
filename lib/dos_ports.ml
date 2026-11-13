@@ -47,10 +47,6 @@ let speed_of_mhz mhz =
    사이클로 약 158. 지연 루프가 이 비트를 세며 시간을 잰다. *)
 let refresh_toggle_cycles = 158
 
-(* 포트 0x3DA bit3(수직 귀선)은 이 길이의 칸 8 개 중 한 칸 동안 켜진다. *)
-let vsync_slot_cycles = 70000
-let vsync_slots = 8
-
 (* YM3812(OPL2) 타이머 한 스텝 — T1 은 80µs, T2 는 320µs 를 CPU
    사이클(4.77MHz)로 환산한 값. *)
 let opl_t1_step = 382
@@ -173,6 +169,46 @@ let reset_dac t =
 let set_now t n = t.now <- n
 let cpu_hz t = speed_hz t.speed
 let at_speed t pc_cycles = pc_cycles * t.speed / pc_speed
+
+(* 포트 0x3DA bit3(수직 귀선)은 VGA 한 프레임에 한 번 켜진다. 줄 수와
+   귀선 자리는 SeaBIOS stdvgamodes.c 의 모드별 CRTC 표에서 셌다. 세는
+   법은 DOSBox vga_draw.cpp 와 같다.
+   - 프레임 줄 수 = 수직 전체(06h, 07h 비트 0·5) + 2
+   - 귀선 시작 = 10h(07h 비트 2·7)
+   - 귀선 끝 = 시작 + ((11h 아래 4 비트 - 시작) land 0Fh)
+   한 줄은 800 도트 / 25.175MHz = 31.78µs 다. 9 도트 글자의 텍스트
+   모드는 900 도트 / 28.322MHz 라서 0.0005% 짧지만 같은 길이로 둔다.
+   시간 값이 줄 단위라서 [at_speed] 대신 [cpu_hz] 로 사이클을 낸다. *)
+type vga_frame = { lines : int; retrace_start : int; retrace_lines : int }
+
+let vga_dot_hz = 25_175_000
+let vga_line_dots = 800
+
+(* 200·400 줄 모드: VT 1BFh, VRS 19Ch, VRE Eh. 70.09Hz *)
+let frame_400 = { lines = 449; retrace_start = 412; retrace_lines = 2 }
+
+(* 350 줄 모드(0Fh·10h): VT 1BFh, VRS 183h, VRE 5h. 70.09Hz *)
+let frame_350 = { lines = 449; retrace_start = 387; retrace_lines = 2 }
+
+(* 480 줄 모드(11h·12h): VT 20Bh, VRS 1EAh, VRE Ch. 59.94Hz *)
+let frame_480 = { lines = 525; retrace_start = 490; retrace_lines = 2 }
+
+(* 모르는 모드는 [Dos_video.spec] 처럼 텍스트(400 줄)로 본다. *)
+let frame_of_mode = function
+  | 0x0F | 0x10 -> frame_350
+  | 0x11 | 0x12 -> frame_480
+  | _ -> frame_400
+
+(* 프레임 첫 줄 첫머리부터 [line] 번째 줄까지의 CPU 사이클. 프레임은
+   사이클 0 에서 시작한다. *)
+let line_cycles t line = cpu_hz t * line * vga_line_dots / vga_dot_hz
+
+let in_vertical_retrace t =
+  let f = frame_of_mode (Dos_video.mode t.video) in
+  let pos = t.now mod line_cycles t f.lines in
+  pos >= line_cycles t f.retrace_start
+  && pos < line_cycles t (f.retrace_start + f.retrace_lines)
+
 let palette t = t.pal
 let set_scancode t sc = t.scancode <- sc land 0xff
 let irq0_masked t = t.pic_mask land 1 <> 0
@@ -250,14 +286,12 @@ let port_in t p =
     (* 재주사 상태: 읽을 때마다 bit0(디스플레이 인에이블)을 뒤집는다.
        CRT 루틴이 VRAM 직접 쓰기 전에 "clear 대기 → set 대기" 상승
        에지를 본다 — 고정값이면 한쪽 대기가 안 풀린다(ZZT 실측).
-       bit3(수직 귀선)은 그보다 느리게 켜진다. *)
+       bit3(수직 귀선)은 [in_vertical_retrace] 가 프레임 시각으로 정한다. *)
     (* 실기에서는 이 레지스터를 읽으면 속성 컨트롤러의 index/data
        번갈이도 index 로 돌아간다. 그 부수효과에 기대는 코드가 있다. *)
     Dos_video.reset_attr_flip t.video;
     t.cga_status <- not t.cga_status;
-    let vsync =
-      if (t.now / at_speed t vsync_slot_cycles) mod vsync_slots = 0 then 0x08 else 0x00
-    in
+    let vsync = if in_vertical_retrace t then 0x08 else 0x00 in
     (if t.cga_status then 0x01 else 0x00) lor vsync
   | 0x388 ->
     (* 만료는 읽는 순간에 갱신한다 — 감지 루틴은 쓰기와 읽기 사이에
