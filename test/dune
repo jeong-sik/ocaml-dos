@@ -77,3 +77,7 @@
 (test
  (name dos_dma_test)
  (libraries dosmachine cpu86core))
+
+(test
+ (name dos_sb_test)
+ (libraries dosmachine))
