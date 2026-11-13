@@ -19,10 +19,13 @@ type t
 
 (** The lines a device of this machine raises. A closed set: an IRQ no
     device raises cannot be asked for. *)
-type line = Timer  (** IRQ0, the PIT channel 0 *) | Keyboard  (** IRQ1 *)
+type line =
+  | Timer  (** IRQ0, the PIT channel 0 *)
+  | Keyboard  (** IRQ1 *)
+  | Sound_blaster  (** IRQ7, the card's DOSBox default ([irq=7]) *)
 
 val vector : line -> int
-(** 08h for [Timer], 09h for [Keyboard]. *)
+(** 08h for [Timer], 09h for [Keyboard], 0Fh for [Sound_blaster]. *)
 
 val create : unit -> t
 (** Nothing asked, nothing in service, nothing masked. *)
@@ -31,6 +34,11 @@ val raise_irq : t -> line -> unit
 (** The line asks. Asking again before the CPU takes it is the same ask. *)
 
 val requested : t -> line -> bool
+
+val lower_irq : t -> line -> unit
+(** The line falls before the CPU took it: the request goes away (DOSBox
+    [PIC_DeActivateIRQ]). A line already in service stays there until
+    its EOI. *)
 
 val pending : t -> bool
 (** A line asks and is not masked. Cheaper than {!next}, for the check
