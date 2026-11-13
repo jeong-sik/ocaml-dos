@@ -152,6 +152,7 @@ type t = {
         (** 핸들(1 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB) *)
   mutable ems_mapped : (int * int) array;
         (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지) *)
+  xms : Dos_xms.t;                            (** XMS 드라이버(INT 2Fh AH=43h) *)
   mouse : mouse;
 }
 

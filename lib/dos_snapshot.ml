@@ -21,8 +21,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    5: suspended BIOS input services carry their return boundary, and both
    input and EXEC carry their owned ROM service return frame.
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
-   console bytes are carried explicitly. *)
-let format_version = 6
+   console bytes are carried explicitly.
+   7: the XMS driver's blocks (place, size, lock count, bytes) follow the
+   clock, before EMS. *)
+let format_version = 7
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -247,7 +249,7 @@ let write_payload w t =
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
         epoch_min; epoch_sec; ems_pages; ems_mapped;
-        mouse } = t
+        mouse; xms } = t
   in
   let put what r v = C.put w ~what r v in
   let { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted;
@@ -294,6 +296,7 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  Dos_xms.write_state w xms;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
       put "EMS handle" ems_handle_key k;
@@ -488,6 +491,7 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  Dos_xms.read_state r t.xms;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in

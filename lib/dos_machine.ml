@@ -38,7 +38,16 @@ let host_service t ~return_to v =
   | 0x21 -> Dos_dos.service t ~return_to
   | 0x27 -> Dos_dos.int27 t; Control_transferred
   | 0x67 -> Dos_ems.service t; Completed
+  | 0x2F ->
+    Dos_xms.multiplex t.cpu ~entry:(Dos_bios.rom_seg, Dos_bios.xms_entry_off);
+    Completed
   | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
+  | v when v = Dos_bios.xms_control_id ->
+    (* A move copies the way HIMEM's own MOVSW does: through the CPU's
+       bus, so the planar video window takes it like guest stores. *)
+    Dos_xms.control t.xms t.cpu ~read:(Cpu86.bus_read t.cpu)
+      ~write:(Cpu86.bus_write t.cpu);
+    Completed
   | _ -> Completed
 
 let service_status_mask t v =
@@ -103,6 +112,7 @@ let create () =
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
       ems_pages = Hashtbl.create 2;
       ems_mapped = Array.make 4 (0, 0);
+      xms = Dos_xms.create ();
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
