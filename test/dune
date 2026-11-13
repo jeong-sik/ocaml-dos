@@ -56,6 +56,10 @@
  (libraries dosmachine))
 
 (test
+ (name dos_ems_handles_test)
+ (libraries dosmachine cpu86core))
+
+(test
  (name core_identity_test)
  (deps
   (glob_files %{project_root}/lib/*.ml)
