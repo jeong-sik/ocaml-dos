@@ -859,7 +859,7 @@ let service_immediate t =
        | Some hd ->
          let chunk = Bytes.create n in
          for i = 0 to n - 1 do
-           Bytes.set chunk i (Char.chr (rd8 t (src + i)))
+           Bytes.set chunk i (Char.chr (bus_rd8 t (src + i)))
          done;
          let len = Bytes.length !(hd.data) in
          let grown =
