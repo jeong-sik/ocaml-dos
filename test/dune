@@ -27,6 +27,10 @@
  (libraries dosmachine))
 
 (test
+ (name dos_refresh_test)
+ (libraries dosmachine))
+
+(test
  (name cpu86_vtest)
  (deps sst8086-baseline.txt)
  (libraries cpu86core unix yojson))
