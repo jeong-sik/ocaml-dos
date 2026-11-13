@@ -30,6 +30,14 @@ val text_cols : t -> int
 (** 이 모드의 BIOS 열 수(BDA 0x44A) — 40 또는 80. 그래픽 모드도 값을
     가진다: 모드 0Dh 는 40, 12h 는 80 이다. *)
 
+val text_rows : t -> int
+(** 이 모드의 BIOS 글자 행 수(BDA 0x484 + 1). 480줄 모드(11h, 12h)는 30,
+    나머지는 25. *)
+
+val char_height : t -> int
+(** BIOS 글자 한 칸의 픽셀 높이(BDA 0x485). 200줄 그래픽 모드는 8,
+    350줄은 14, 480줄과 텍스트는 16. *)
+
 val set_mode : t -> int -> clear:bool -> unit
 (** INT 10h AH=00h. 모드에 맞는 화면 메모리를 지우고(요청하면) 레지스터를
     그 모드의 부팅값으로 되돌린다. 모르는 번호는 텍스트로 본다. *)
@@ -63,9 +71,13 @@ val screen_digest : t -> int
     픽셀을 다 만들어 비교하는 것보다 싸다. 충돌하면 "안 변했다" 고 잘못
     읽을 뿐이라 암호학적 강도가 필요하지 않다. *)
 
+val xor_pixel : int
+(** 색의 bit7(0x80). 256색이 아닌 모드에서 "이미 있는 점과 XOR" 이다. *)
+
 val put_pixel : t -> x:int -> y:int -> color:int -> unit
 val get_pixel : t -> x:int -> y:int -> int
-(** INT 10h AH=0Ch/0Dh. 텍스트 모드에서는 아무 일도 하지 않는다. *)
+(** INT 10h AH=0Ch/0Dh. 텍스트 모드에서는 아무 일도 하지 않는다. 256색이
+    아닌 모드에서 [color] 의 bit7 이 서 있으면 이미 있는 점과 XOR 한다. *)
 
 val cga_color_select : t -> int
 val set_cga_color_select : t -> int -> unit
