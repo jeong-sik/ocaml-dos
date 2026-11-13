@@ -92,9 +92,13 @@ let drain_until_attributes () =
     if left > 0.0 then
       match Unix.select [ Unix.stdin ] [] [] left with
       | [], _, _ -> ()
-      | _ :: _, _, _ ->
-        let events, tail = Dosterm.parse (tail ^ read_available ()) in
-        if not (List.mem Dosterm.Device_attributes events) then go tail
+      | _ :: _, _, _ -> (
+        (* 읽을 수 있다는데 아무것도 없으면 터미널이 닫혔다(EOF). *)
+        match read_available () with
+        | "" -> ()
+        | got ->
+          let events, tail = Dosterm.parse (tail ^ got) in
+          if not (List.mem Dosterm.Device_attributes events) then go tail)
   in
   go ""
 
@@ -198,13 +202,24 @@ let draw st =
 
 (* 돌린 시간(벽시계 초)을 돌려준다. [origin] 은 게스트 사이클 0 에 해당하는
    벽시계다. 버린 빚만큼 뒤로 민다. *)
+(* 터미널 창을 닫으면 SIGHUP 이 온다. 기본 동작대로 바로 죽으면 터미널
+   설정을 되돌리지 못하고 /tmp 의 임시 파일도 남는다. 신호는 표시만 하고
+   루프가 보통처럼 끝나 [with_terminal] 의 정리를 거치게 한다. *)
+let stop_signal = ref None
+
+let watch_signals () =
+  List.iter
+    (fun (signal, name) ->
+      Sys.set_signal signal (Sys.Signal_handle (fun _ -> stop_signal := Some name)))
+    [ (Sys.sighup, "SIGHUP"); (Sys.sigterm, "SIGTERM") ]
+
 let play st =
   let frame = 1.0 /. float_of_int st.fps in
   let start = Unix.gettimeofday () in
   let origin = ref start in
   let next_draw = ref start in
   let cycles_at now = int_of_float ((now -. !origin) *. float_of_int cpu_hz) in
-  while not (st.quit || Dos_machine.exited st.m) do
+  while not (st.quit || Option.is_some !stop_signal || Dos_machine.exited st.m) do
     poll_input st;
     let now = Unix.gettimeofday () in
     let behind = float_of_int (cycles_at now - st.guest_cycles) /. float_of_int cpu_hz in
@@ -276,10 +291,14 @@ let () =
       tail = ""; tail_age = 0; buttons = 0; box = (0, 0); last = ""; last_digest = 0;
       redraw = true; quit = false; unmapped = 0; guest_cycles = 0 }
   in
+  watch_signals ();
   let wall = with_terminal o (fun () -> play st) in
-  if Dos_machine.exited m then
-    Printf.eprintf "program exited with code %d\n" (Dos_machine.exit_code m)
-  else prerr_endline "stopped with F12";
+  (match !stop_signal with
+   | Some name -> Printf.eprintf "stopped by %s\n" name
+   | None ->
+     if Dos_machine.exited m then
+       Printf.eprintf "program exited with code %d\n" (Dos_machine.exit_code m)
+     else prerr_endline "stopped with F12");
   (* 게스트 시간이 벽시계보다 많이 짧으면 이 호스트가 실시간을 못 따라갔다. *)
   Printf.eprintf "guest time %.2fs, wall time %.2fs, frames sent %d (%d via temp files)\n"
     (float_of_int st.guest_cycles /. float_of_int cpu_hz) wall o.sent o.via_files;
