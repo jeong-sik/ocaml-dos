@@ -73,3 +73,7 @@
 (test
  (name dos_in_dos_test)
  (libraries dosmachine))
+
+(test
+ (name dos_ext_error_test)
+ (libraries dosmachine))
