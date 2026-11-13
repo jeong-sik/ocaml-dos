@@ -115,7 +115,9 @@ let create () =
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
         mouse_presses = Dos_state.new_button_logs ();
         mouse_releases = Dos_state.new_button_logs ();
-        mouse_range_x = None; mouse_range_y = None;
+        (* 범위와 자리는 [Dos_bios.install] 이 BDA 를 채운 뒤 부팅 모드의
+           가상 화면에 맞춰 다시 쓴다 *)
+        mouse_range_x = (0, 0); mouse_range_y = (0, 0);
       };
     }
   in
@@ -432,6 +434,10 @@ let set_mouse t ~x ~y ~buttons =
   m.mouse_dy <- m.mouse_dy + (y - m.mouse_y);
   m.mouse_x <- x;
   m.mouse_y <- y;
+  (* 게임에 알리는 좌표는 칸 단위다 — 버튼 기록과 핸들러 인자도 03h 와 같다
+     (CuteMouse 는 칸으로 내린 자리 granpos 를 기록하고 건넨다) *)
+  let space = Dos_mouse_space.current t.mem in
+  let cell_x = Dos_mouse_space.cell_x space x and cell_y = Dos_mouse_space.cell_y space y in
   let old_buttons = m.mouse_buttons in
   m.mouse_buttons <- buttons;
   for i = 0 to Dos_state.mouse_button_count - 1 do
@@ -445,8 +451,8 @@ let set_mouse t ~x ~y ~buttons =
     Option.iter
       (fun (l : Dos_state.button_log) ->
         l.times <- l.times + 1;
-        l.last_x <- m.mouse_x;
-        l.last_y <- m.mouse_y)
+        l.last_x <- cell_x;
+        l.last_y <- cell_y)
       log
   done;
   (* AX=0x0C 등록에 닿은 이벤트를 핸들러에 far call 로 건넨다. 비트 번호는
@@ -468,8 +474,8 @@ let set_mouse t ~x ~y ~buttons =
     let cpu = t.cpu in
     Cpu86.set_reg16 cpu 0 events;
     Cpu86.set_reg16 cpu 3 m.mouse_buttons;
-    Cpu86.set_reg16 cpu 1 x;
-    Cpu86.set_reg16 cpu 2 y;
+    Cpu86.set_reg16 cpu 1 cell_x;
+    Cpu86.set_reg16 cpu 2 cell_y;
     Cpu86.set_reg16 cpu 6 m.mouse_dx;
     Cpu86.set_reg16 cpu 7 m.mouse_dy;
     (* 이동량은 호출이 소비한다 — AX=0x0B 와 같은 읽기다. *)

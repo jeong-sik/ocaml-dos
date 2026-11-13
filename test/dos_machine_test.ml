@@ -126,10 +126,10 @@ let () =
     (Dos_machine.exit_code m1 = 0xFF) true;
   let m2 = Dos_machine.create () in
   Dos_machine.load_com m2 "\xb8\x03\x00\xcd\x33\x89\xc8\xb4\x4c\xcd\x21";
-  Dos_machine.set_mouse m2 ~x:100 ~y:50 ~buttons:1;
+  Dos_machine.set_mouse m2 ~x:104 ~y:48 ~buttons:1;
   Dos_machine.run m2 ~max_steps:1000;
   checkb "int33 position returns injected x"
-    (Dos_machine.exit_code m2 = 100) true;
+    (Dos_machine.exit_code m2 = 104) true;
   (* INT 21h AH=08 확장키 2바이트 계약 — 실기 DOS 는 방향키를 첫 읽기에
      0x00, 다음 읽기에 스캔코드로 내준다. MSC getch 기반 게임 입력
      (삼국지3 전투 배치의 커서 이동)의 전제. COM 은 게임과 같은

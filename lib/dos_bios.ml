@@ -46,6 +46,19 @@ let bios_int8 =
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
 
+(* CuteMouse setupvideo(ctmouse.asm): 범위를 지금 모드의 가상 화면 전체로,
+   커서를 그 가운데로. 드라이버가 상주할 때, 00h·21h 리셋, INT 10h 모드
+   세우기가 부른다(HelpPC 2.10 INT 33,0: "mouse is positioned to screen
+   center", "max width and height are set to maximum for video mode"). *)
+let mouse_fit_screen t =
+  let m = t.mouse in
+  let space = Dos_mouse_space.current t.mem in
+  m.mouse_range_x <- Dos_mouse_space.range_x space;
+  m.mouse_range_y <- Dos_mouse_space.range_y space;
+  let x, y = Dos_mouse_space.center space in
+  m.mouse_x <- x;
+  m.mouse_y <- y
+
 let equipment_word =
   (* bit0 디스켓 있음, bit1 코프로세서 없음(8087 미장착 — ESC 명령은
      아무 일도 하지 않는다), bits4-5 = 10b 컬러 80x25, bits14-15 프린터 1 개 *)
@@ -128,7 +141,9 @@ let install t =
       (fun row b ->
         wr8 t ((rom_seg * 16) + rom_font_off + (ch * 8) + row) b)
       (Font8x8.glyph ch)
-  done
+  done;
+  (* 상주한 마우스 드라이버는 설치할 때 부팅 모드에 맞춘다 *)
+  mouse_fit_screen t
 
 (* IVT[v] 가 아직 우리 스텁이면(게스트가 AH=25h 로 안 바꿨으면) 호스트
    구현으로 바로 간다 — deliver 로 다시 스텁에 들어가면 무한루프다. *)
@@ -167,7 +182,14 @@ let video t =
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
     wr8 t 0x484 (rows - 1);
-    set_cursor t 0 0
+    set_cursor t 0 0;
+    (* 마우스 드라이버가 모드 세우기를 가로챈다(CuteMouse int10handler):
+       커서를 숨기고(깃발 -1) 새 모드의 가상 화면에 맞춘다. 커서 모양,
+       핸들러, 버튼 기록은 그대로다. *)
+    if t.mouse.mouse_present then begin
+      t.mouse.mouse_cursor_flag <- cursor_flag_after_reset;
+      mouse_fit_screen t
+    end
   | 0x01 ->
     (* 커서 모양: CH=시작 스캔라인, CL=끝 *)
     Dos_ports.port_out t.ports 0x3D4 0x0A;
@@ -392,18 +414,27 @@ let mouse_buttons_reported = 2
    없다. DOSBox-X 와 같은 값을 준다. *)
 let mouse_type_ps2 = 0x04
 
+(* AX=24h 의 판 번호(BH.BL). CuteMouse 가 흉내 내는 7.05 를 쓴다 — 26h 가
+   7.05 식이다(ctmouse.asm driverversion). DOSBox-X 는 8.05 를 준다. *)
+let mouse_driver_version = 0x0705
+let mouse_irq_ps2 = 0  (* RBIL INT 33/0024: CL = 0 은 PS/2 *)
+let mouse_enabled = 0  (* AX=26h BX: 0 이면 드라이버가 켜져 있다 *)
+
 (* 00h 와 21h 가 함께 되돌리는 드라이버 상태. HelpPC 2.10 INT 33,0: 커서를
    숨기고 모양을 기본으로 하고, 사용자 핸들러 마스크를 0 으로 하고, 범위를
    모드 최대로 한다. 마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이
-   건 핸들러가 그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로
-   옮기지는 않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
-let reset_mouse_driver m =
+   건 핸들러가 그 메모리를 놓은 뒤에 불리지 않는다. 범위와 커서 자리는
+   [mouse_fit_screen] 이 맞춘다. 이동량도 0 으로 한다 — CuteMouse 21h 가
+   지우는 칸(ClearArea3)에 들고, DOSBox-X Mouse_Reset 도 지운다. *)
+let reset_mouse_driver t =
+  let m = t.mouse in
   m.mouse_cursor_flag <- cursor_flag_after_reset;
   m.mouse_graphics_cursor <- Default_arrow;
   m.mouse_text_cursor <- default_text_cursor;
   m.mouse_handler_mask <- 0;
-  m.mouse_range_x <- None;
-  m.mouse_range_y <- None;
+  m.mouse_dx <- 0;
+  m.mouse_dy <- 0;
+  mouse_fit_screen t;
   List.iter
     (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
     [ m.mouse_presses; m.mouse_releases ]
@@ -415,14 +446,14 @@ let mouse t =
   | 0x00 ->
     Cpu86.set_reg16 cpu 0 (if m.mouse_present then mouse_driver_installed else 0x0000);
     Cpu86.set_reg16 cpu 3 (if m.mouse_present then mouse_buttons_reported else 0);
-    reset_mouse_driver m
+    reset_mouse_driver t
   | 0x21 ->
     (* SOFTWARE RESET (RBIL INT 33/0021): 00h 와 같되 하드웨어는 건드리지
        않는다. 드라이버가 없으면 AX 는 0021h 그대로다. *)
     if m.mouse_present then begin
       Cpu86.set_reg16 cpu 0 mouse_driver_installed;
       Cpu86.set_reg16 cpu 3 mouse_buttons_reported;
-      reset_mouse_driver m
+      reset_mouse_driver t
     end
   | 0x01 ->
     (* 깃발을 하나 올리되 0 에서 멈춘다. 02h 를 n 번 불렀으면 01h 도 n 번
@@ -430,8 +461,9 @@ let mouse t =
     if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1
   | 0x02 -> m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
   | 0x03 ->
-    Cpu86.set_reg16 cpu 1 m.mouse_x;
-    Cpu86.set_reg16 cpu 2 m.mouse_y;
+    let space = Dos_mouse_space.current t.mem in
+    Cpu86.set_reg16 cpu 1 (Dos_mouse_space.cell_x space m.mouse_x);
+    Cpu86.set_reg16 cpu 2 (Dos_mouse_space.cell_y space m.mouse_y);
     Cpu86.set_reg16 cpu 3 m.mouse_buttons
   | 0x04 ->
     m.mouse_x <- clamp_to m.mouse_range_x (Cpu86.reg16 cpu 1);
@@ -456,7 +488,7 @@ let mouse t =
        창이라 지금 자리도 그 안으로 옮긴다. 텍스트 모드에서 셀 크기 배수로
        내리는 일(RBIL 의 메모)은 하지 않는다. *)
     let a = Cpu86.reg16 cpu 1 and b = Cpu86.reg16 cpu 2 in
-    let range = Some (min a b, max a b) in
+    let range = (min a b, max a b) in
     if fn = 0x07 then begin
       m.mouse_range_x <- range;
       m.mouse_x <- clamp_to range m.mouse_x
@@ -501,6 +533,20 @@ let mouse t =
     Cpu86.set_reg16 cpu 3 hot_x;
     Cpu86.set_reg16 cpu 1 hot_y;
     Cpu86.set_reg16 cpu 2 mouse_type_ps2
+  | 0x24 ->
+    (* GET SOFTWARE VERSION, MOUSE TYPE, AND IRQ NUMBER(RBIL INT 33/0024):
+       BH.BL 판, CH 종류, CL IRQ(PS/2 는 0). AX 는 그대로다. *)
+    Cpu86.set_reg16 cpu 3 mouse_driver_version;
+    Cpu86.set_reg8 cpu 5 mouse_type_ps2;
+    Cpu86.set_reg8 cpu 1 mouse_irq_ps2
+  | 0x26 ->
+    (* GET MAXIMUM VIRTUAL COORDINATES(RBIL INT 33/0026): BX 꺼짐 깃발, CX·DX
+       최대 좌표. 7.05 부터는 07h·08h 범위가 아니라 모드의 가상 화면 끝이다.
+       1Fh(드라이버 끄기)가 없어 BX 는 늘 0 이다. *)
+    let space = Dos_mouse_space.current t.mem in
+    Cpu86.set_reg16 cpu 3 mouse_enabled;
+    Cpu86.set_reg16 cpu 1 (snd (Dos_mouse_space.range_x space));
+    Cpu86.set_reg16 cpu 2 (snd (Dos_mouse_space.range_y space))
   | 0x0C ->
     (* DEFINE INTERRUPT SUBROUTINE PARAMETERS — CX 마스크, ES:DX 루틴.
        돌려주는 값은 없다(Ralf Brown rb-5968: Return 없음). AX 를 건드리면

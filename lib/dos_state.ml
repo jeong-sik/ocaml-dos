@@ -48,9 +48,9 @@ let mouse_button_count = 3
 let new_button_logs () =
   Array.init mouse_button_count (fun _ -> { times = 0; last_x = 0; last_y = 0 })
 
-(* AX=07h·08h 의 범위. None 은 드라이버의 기본값인 화면 전체다 — 이
-   기계는 화면 크기로 자르지 않고 하네스가 준 좌표를 그대로 쓴다. *)
-let clamp_to range v = match range with None -> v | Some (lo, hi) -> max lo (min hi v)
+(* AX=07h·08h 의 범위. 드라이버가 상주할 때, 리셋할 때, INT 10h 로 모드를
+   세울 때 가상 화면 전체({!Dos_mouse_space})로 돌아간다. *)
+let clamp_to (lo, hi) v = max lo (min hi v)
 
 (* 커서 깃발(HelpPC 2.10 INT 33,1): 0 이면 커서가 보이고 음수면 숨는다.
    드라이버를 리셋하면 -1 이다. *)
@@ -102,8 +102,8 @@ type mouse = {
   mutable mouse_handler_off : int;
   mouse_presses : button_log array;
   mouse_releases : button_log array;
-  mutable mouse_range_x : (int * int) option;
-  mutable mouse_range_y : (int * int) option;
+  mutable mouse_range_x : int * int;
+  mutable mouse_range_y : int * int;
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
