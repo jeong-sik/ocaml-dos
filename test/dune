@@ -81,3 +81,7 @@
 (test
  (name dos_xms_test)
  (libraries dosmachine cpu86core))
+
+(test
+ (name dos_xms_machine_test)
+ (libraries dosmachine cpu86core))
