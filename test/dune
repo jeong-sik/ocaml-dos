@@ -73,3 +73,7 @@
 (test
  (name dos_ioctl_test)
  (libraries dosmachine))
+
+(test
+ (name dos_std_handles_test)
+ (libraries dosmachine))
