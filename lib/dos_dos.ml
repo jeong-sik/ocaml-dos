@@ -692,6 +692,29 @@ let resume_input t request =
 
 (* ---------- INT 21h ---------- *)
 
+(* GETSET.ASM $CHAR_OPER 의 AL *)
+type char_oper = Get_switch_char | Set_switch_char | Get_availdev | Set_availdev
+
+let char_oper_of_al = function
+  | 0 -> Some Get_switch_char
+  | 1 -> Some Set_switch_char
+  | 2 -> Some Get_availdev
+  | 3 -> Some Set_availdev
+  | _ -> None
+
+(* 0..3 은 AL·DH 를 그대로 두고, 그 밖은 AL=FFh. \DEV\ 생략 여부는 늘
+   FFh(생략 가능)이고 바꾸기는 받기만 한다. CF 는 어느 쪽이든 그대로다. *)
+let char_oper t =
+  let cpu = t.cpu in
+  match char_oper_of_al (Cpu86.reg8 cpu 0) with
+  | Some Get_switch_char -> Cpu86.set_reg8 cpu 2 (rd8 t (sda pre_swap_switch_char))
+  | Some Set_switch_char -> wr8 t (sda pre_swap_switch_char) (Cpu86.reg8 cpu 2)
+  | Some Get_availdev -> Cpu86.set_reg8 cpu 2 byte_max
+  | Some Set_availdev -> ()
+  | None -> Cpu86.set_reg8 cpu 0 byte_max
+
+let verify_on = 1
+
 let service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
@@ -990,6 +1013,14 @@ let service_immediate t =
     Cpu86.set_reg16 cpu 7 (word sda_exterr_pointer);
     Cpu86.set_seg cpu 0 (word (sda_exterr_pointer + 2));
     ok t
+  | 0x2E ->
+    (* GETSET.ASM $SET_VERIFY_ON_WRITE: AND AL,1 을 VERFLG 에 두고, 그 AL 을
+       DISP.ASM LEAVEDOS 가 돌려준다. CF 는 그대로 *)
+    let flag = Cpu86.reg8 cpu 0 land verify_on in
+    wr8 t (sda pre_swap_verify) flag;
+    Cpu86.set_reg8 cpu 0 flag
+  | 0x54 -> Cpu86.set_reg8 cpu 0 (rd8 t (sda pre_swap_verify))   (* $GET_VERIFY_ON_WRITE *)
+  | 0x37 -> char_oper t
   | 0x34 ->
     (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
     Cpu86.set_seg cpu 0 sda_seg;

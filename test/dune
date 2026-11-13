@@ -77,3 +77,7 @@
 (test
  (name dos_ext_error_test)
  (libraries dosmachine))
+
+(test
+ (name dos_switch_verify_test)
+ (libraries dosmachine))
