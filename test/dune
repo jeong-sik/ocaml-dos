@@ -73,3 +73,7 @@
 (test
  (name dos_mouse_cursor_test)
  (libraries dosmachine))
+
+(test
+ (name dos_mouse_space_test)
+ (libraries dosmachine))
