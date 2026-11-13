@@ -15,7 +15,10 @@
 
 type t = Dos_state.t
 
-val create : unit -> t
+val create : ?sound_blaster:bool -> unit -> t
+(** 640KB 기계. [sound_blaster] 이면(기본 아님) 220h·IRQ 7·DMA 1 에 Sound
+    Blaster 2.0 을 꽂는다. 기본으로 꺼 둔다 — 카드를 찾은 게임이 모델에 없는
+    전송(ADPCM 등)을 고르면 IRQ 를 기다리다 멈추기 때문이다. *)
 
 (** {1 적재} *)
 
