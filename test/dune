@@ -81,3 +81,7 @@
 (test
  (name dos_switch_verify_test)
  (libraries dosmachine))
+
+(test
+ (name dos_alloc_strategy_test)
+ (libraries dosmachine))

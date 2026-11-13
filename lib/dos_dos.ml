@@ -75,6 +75,7 @@ let free_handle t =
 
 let too_many_open_files = 4
 let invalid_handle = 6
+let invalid_function = 1
 
 (* [name]을 아직 물고 있는 핸들이 있는지 — 살아있는 [t.handles] 뿐 아니라
    EXEC 로 잠든 부모 핸들(자식이 실행되는 동안은 [t.handles] 밖에 있다)도
@@ -125,35 +126,60 @@ let close_handle t h =
 
 let block_end (seg, paras) = seg + paras
 
-let largest_free t =
-  let sorted = List.sort compare t.blocks in
-  let best = ref 0 and cursor = ref t.free_base in
-  List.iter
-    (fun b ->
-      let seg, _ = b in
-      if seg - !cursor > !best then best := seg - !cursor;
-      if block_end b > !cursor then cursor := block_end b)
-    sorted;
-  if t.free_top - !cursor > !best then best := t.free_top - !cursor;
-  max 0 !best
+(* 블록 사이의 빈 틈 (시작, 크기)을 주소 순으로. 마지막은 맨 위 블록에서
+   [free_top] 까지다. 블록이 겹치면 크기가 0 이하일 수 있다. *)
+let free_gaps t =
+  let cursor = ref t.free_base in
+  let gaps =
+    List.map
+      (fun b ->
+        let seg, _ = b in
+        let gap = (!cursor, seg - !cursor) in
+        if block_end b > !cursor then cursor := block_end b;
+        gap)
+      (List.sort compare t.blocks)
+  in
+  gaps @ [ (!cursor, t.free_top - !cursor) ]
+
+let largest_free t = List.fold_left (fun acc (_, size) -> max acc size) 0 (free_gaps t)
+
+(* ALLOC.ASM alloc_do_split: AllocMethod 를 1 과 견줘 작으면 first, 같으면
+   best, 크면 last. 4.0 은 BL 을 무엇이든 받으니 80h 도 last 다. *)
+type fit = First_fit | Best_fit | Last_fit
+
+let best_fit_method = 1
+
+let fit_of_method m =
+  if m < best_fit_method then First_fit
+  else if m = best_fit_method then Best_fit
+  else Last_fit
+
+(* 들어가는 틈 가운데 first 는 맨 앞, best 는 가장 작은 것(크기가 같으면
+   앞의 것 — alloc_best 의 JBE), last 는 맨 뒤 틈의 위쪽 끝
+   (alloc_do_split_high). *)
+let place fit paras gaps =
+  match List.filter (fun (_, size) -> size >= paras) gaps with
+  | [] -> None
+  | first :: rest ->
+    let start, size =
+      match fit with
+      | First_fit -> first
+      | Best_fit ->
+        List.fold_left (fun best g -> if snd best <= snd g then best else g) first rest
+      | Last_fit -> List.fold_left (fun _ g -> g) first rest
+    in
+    (match fit with
+     | First_fit | Best_fit -> Some start
+     | Last_fit -> Some (start + size - paras))
 
 (* 자리를 찾기만 한다 — 블록 표를 고치지 않는다. EXEC 는 배치를 정한
    뒤에야 부모 프레임(블록 표 포함)을 찍는다. [allocate] 를 그대로 쓰면
    자식 몫이 프레임에 새어 들어가, 자식이 죽어도 블록이 남는다. *)
-let find_free t paras =
-  let sorted = List.sort compare t.blocks in
-  let cursor = ref t.free_base and placed = ref None in
-  List.iter
-    (fun b ->
-      let seg, _ = b in
-      if !placed = None && seg - !cursor >= paras then placed := Some !cursor;
-      if block_end b > !cursor then cursor := block_end b)
-    sorted;
-  if !placed = None && t.free_top - !cursor >= paras then placed := Some !cursor;
-  !placed
+let find_free t paras = place First_fit paras (free_gaps t)
 
 let allocate t paras =
-  match find_free t paras with
+  let fit = fit_of_method (rd8 t (sda pre_swap_alloc_method)) in
+  match place fit paras (free_gaps t) with
   | Some seg -> t.blocks <- (seg, paras) :: t.blocks; Some seg
   | None -> None
 
@@ -715,6 +741,23 @@ let char_oper t =
 
 let verify_on = 1
 
+(* ALLOC.ASM $AllocOper 의 AL *)
+type alloc_oper = Get_strategy | Set_strategy
+
+let alloc_oper_of_al = function
+  | 0 -> Some Get_strategy
+  | 1 -> Some Set_strategy
+  | _ -> None
+
+(* AL=0 은 AX=AllocMethod(AH=0), AL=1 은 AllocMethod=BL 이고 AX 는 그대로.
+   둘 다 SYS_RET_OK 라 CF=0. 그 밖은 locus 를 Mem 으로 두고 에러 1. *)
+let alloc_oper t =
+  let cpu = t.cpu in
+  match alloc_oper_of_al (Cpu86.reg8 cpu 0) with
+  | Some Get_strategy -> Cpu86.set_reg16 cpu 0 (rd8 t (sda pre_swap_alloc_method)); ok t
+  | Some Set_strategy -> wr8 t (sda pre_swap_alloc_method) (Cpu86.reg8 cpu 3); ok t
+  | None -> set_locus t Dos_error.Memory; fail t invalid_function
+
 let service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
@@ -1021,6 +1064,7 @@ let service_immediate t =
     Cpu86.set_reg8 cpu 0 flag
   | 0x54 -> Cpu86.set_reg8 cpu 0 (rd8 t (sda pre_swap_verify))   (* $GET_VERIFY_ON_WRITE *)
   | 0x37 -> char_oper t
+  | 0x58 -> alloc_oper t
   | 0x34 ->
     (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
     Cpu86.set_seg cpu 0 sda_seg;
