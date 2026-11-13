@@ -85,10 +85,15 @@ let () =
   get "AL=FFh, BX=0 is the current country" ~ax:0x38FF ~bx:0 ();
   refused "United Kingdom (44)" ~ax:0x382C ~dx:buf ();
   refused "Korea (82) by BX" ~ax:0x38FF ~bx:82 ~dx:buf ();
-  (* DX=FFFFh: 나라 바꾸기 *)
-  let regs, _, _ = run (call 0 ~ax:0x3801 ~dx:0xFFFF ()) in
+  (* DX=FFFFh: 나라 바꾸기. 성공해도 BX 는 들어온 값 그대로다. *)
+  let regs, _, _ = run (call 0 ~ax:0x3801 ~bx:0x1234 ~dx:0xFFFF ()) in
   let a, b, c = regs 0 in
-  check "set country 1: AX" a 1; check "set country 1: BX" b 1; check "set country 1: CF" c 0;
+  check "set country 1: AX" a 1; check "set country 1: BX kept" b 0x1234;
+  check "set country 1: CF" c 0;
+  let regs, _, _ = run (call 0 ~ax:0x38FF ~bx:1 ~dx:0xFFFF ()) in
+  let a, b, c = regs 0 in
+  check "set country 1 by BX: AX" a 1; check "set country 1 by BX: BX" b 1;
+  check "set country 1 by BX: CF" c 0;
   refused "set country 0" ~ax:0x3800 ~dx:0xFFFF ();
   refused "set country 2" ~ax:0x3802 ~dx:0xFFFF ()
 

@@ -534,8 +534,10 @@ let parse_fcb_service t =
 (* INT 21h AH=38h — MS-DOS 4.0 GETSET.ASM $INTERNATIONAL. 나라는 미국
    하나다. 다른 나라는 NLSFUNC 가 있어야 하는데, 없으면 1(잘못된 기능)
    이다(RBIL 은 2 로 적지만 소스를 따른다). DX=FFFFh 면 「나라 바꾸기」로,
-   지금 나라와 같을 때만 된다 — AL=0 도 거절이다. 성공하면 AX=BX=나라
-   번호이고, 얻기는 DS:DX 에 24 바이트를 쓴다(DI 는 16 비트에서 돈다). *)
+   지금 나라와 같을 때만 된다 — AL=0 도 거절이다. 성공하면 AX=나라
+   번호다. 얻기는 BX 도 나라 번호로 바꾸고(international_ok3), DS:DX 에
+   24 바이트를 쓴다(DI 는 16 비트에서 돈다). 바꾸기는 BX 를 그대로 둔다
+   (international_set 은 international_ok 로 바로 간다). *)
 let error_invalid_function = 1
 let set_country_marker = 0xFFFF
 
@@ -545,11 +547,7 @@ let international_service t =
   let requested = if al = 0xFF then Cpu86.reg16 cpu 3 else al in
   let current = Dos_country.country_code in
   let dx = Cpu86.reg16 cpu 2 in
-  let succeed () =
-    Cpu86.set_reg16 cpu 3 current;
-    Cpu86.set_reg16 cpu 0 current;
-    ok t
-  in
+  let succeed () = Cpu86.set_reg16 cpu 0 current; ok t in
   if dx = set_country_marker then
     (if requested = current then succeed () else fail t error_invalid_function)
   else if requested = 0 || requested = current then begin
@@ -557,6 +555,7 @@ let international_service t =
     String.iteri
       (fun i c -> wr8 t (physical ds ((dx + i) land 0xffff)) (Char.code c))
       (Dos_country.info ~case_map:Dos_bios.case_map_entry);
+    Cpu86.set_reg16 cpu 3 current;
     succeed ()
   end
   else fail t error_invalid_function
