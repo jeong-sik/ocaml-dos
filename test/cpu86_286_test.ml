@@ -903,14 +903,24 @@ let test_386_0f_32 () =
   check "bt eax,3Fh takes the immediate mod 32" (carry t) 1;
   let _, mem = run_with "\x66\x0f\xba\x36\x00\x01\x1f" nothing_386 in
   check "btr dword [100h],31" (word mem 0x102) 0;
+  let _, mem = run_with "\x66\x0f\xba\x36\x00\x01\x00" nothing_386 in
+  check "btr dword [100h],0 keeps the upper word" (word mem 0x102) 0x8000;
+  let t, _ = run_with "\x67\x66\x0f\xa3\x03" (regs [ (3, 0x104); (0, 0xffffffff) ]) in
+  check "a32 bt [ebx],eax with -1 reads bit 31 of the dword below" (carry t) 1;
   let t, _ = run_with "\x66\x0f\xa4\xd8\x04" (regs [ (0, 0x12345678); (3, 0x9abcdef0) ]) in
   check "shld eax,ebx,4" (r32 t 0) 0x23456789;
   check "shld eax,ebx,4 CF" (carry t) 1;
   let t, _ = run_with "\x66\x0f\xa4\xd8\x1f" (regs [ (0, 1); (3, 0x80000000) ]) in
   check "shld eax,ebx,31" (r32 t 0) 0xc0000000;
+  check "shld eax,ebx,31 SF" (Bool.to_int (Cpu86.flags t land Cpu86.f_sign <> 0)) 1;
+  (* SDM: a 1-bit shift sets OF on a sign change (the data masks OF) *)
+  let t, _ = run_with "\x66\x0f\xa4\xd8\x01" (regs [ (0, 0x40000000) ]) in
+  check "shld eax,ebx,1 OF at bit 31" (Bool.to_int (Cpu86.flags t land Cpu86.f_overflow <> 0)) 1;
   let t, _ = run_with "\x66\x0f\xac\xd8\x04" (regs [ (0, 0x12345678); (3, 0x9abcdef1) ]) in
   check "shrd eax,ebx,4" (r32 t 0) 0x11234567;
   check "shrd eax,ebx,4 CF" (carry t) 1;
+  let t, _ = run_with "\x66\x0f\xac\xd8\x04" (regs [ (0, 8) ]) in
+  check "shrd eax,ebx,4 CF is bit 3" (carry t) 1;
   let t, _ = run_with "\x66\x0f\xaf\xca" (regs [ (1, 0x10000); (2, 0x10000) ]) in
   check "imul ecx,edx low dword" (r32 t 1) 0;
   check "imul ecx,edx overflow" (carry t) 1;
