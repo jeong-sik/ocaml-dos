@@ -370,7 +370,7 @@ let operand_sized =
   List.iter (fun op -> table.(op) <- true) operand_sized_opcodes;
   table
 
-(* 접두를 읽어 문맥을 만든다. [ovr]·[rep] 은 지금까지 본 접두다 — 같은
+(* 접두를 읽어 문맥을 만든다. [addr]·[rep] 은 지금까지 본 접두다 — 같은
    종류의 접두가 여럿이면 마지막 것이 남는다. LOCK 이 있을 때만
    [check_lock] 을 부른다 — 명령마다 부르면 삼국지3 3천만 스텝의 기계어
    명령이 2.2% 는다. 66h 를 보면 [prefixes_after_66] 로 넘어가, 66h 가 없는
