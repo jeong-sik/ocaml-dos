@@ -22,6 +22,11 @@ let opl_t2_step = 1527
 let crtc_regs = 25
 let dac_entries = 256
 
+(* OPL2 타이머 하나의 플래그. 마스크된 타이머는 넘쳐도 플래그를 세우지
+   않고, 마스크를 걸면 선 플래그도 지운다(DOSBox Staging opl.cpp
+   Timer::SetMask). 그래서 마스크된 채 선 플래그는 없다. *)
+type opl_flag = Opl_clear | Opl_raised | Opl_masked
+
 type t = {
   mem : Bytes.t;
   video : Dos_video.t;          (** 비디오 어댑터의 포트는 여기로 넘긴다 *)
@@ -50,14 +55,14 @@ type t = {
   mutable mode_control : int;           (** 0x3D8 *)
   mutable color_select : int;           (** 0x3D9 *)
   mutable cmos_index : int;
-  (* OPL2 — 감지 계약만 지닌다(FMDRV.COM 실측). 소리는 없다. *)
+  (* OPL2 — 타이머 둘과 상태 포트만 있다. 소리는 없다. *)
   mutable opl_reg : int;                (** 0x388 로 고른 레지스터 *)
   mutable opl_t1_count : int;           (** 레지스터 02h *)
   mutable opl_t2_count : int;           (** 레지스터 03h *)
-  mutable opl_t1_at : int;              (** 만료 사이클 — 0 은 미무장 *)
-  mutable opl_t2_at : int;
-  mutable opl_t1_exp : bool;
-  mutable opl_t2_exp : bool;
+  mutable opl_t1_at : int option;       (** 다음 넘침 사이클. None 이면 멈춤 *)
+  mutable opl_t2_at : int option;
+  mutable opl_t1_exp : opl_flag;
+  mutable opl_t2_exp : opl_flag;
 }
 
 (* 기본 VGA 256색: 0-15 CGA, 16-31 회색 램프, 32-247 6x6x6 RGB 큐브,
@@ -112,10 +117,10 @@ let create ~mem ~video =
     opl_reg = 0;
     opl_t1_count = 0;
     opl_t2_count = 0;
-    opl_t1_at = 0;
-    opl_t2_at = 0;
-    opl_t1_exp = false;
-    opl_t2_exp = false;
+    opl_t1_at = None;
+    opl_t2_at = None;
+    opl_t1_exp = Opl_clear;
+    opl_t2_exp = Opl_clear;
   }
 
 (* 모드를 세우면 BIOS 가 DAC 을 기본값으로 다시 싣는다. 앞 프로그램이
@@ -130,6 +135,118 @@ let reset_dac t =
   t.dac_read_index <- 0;
   t.dac_phase <- 0;
   t.dac_mask <- 0xFF
+
+(* ---------- OPL2 타이머 ---------- *)
+
+(* 상태(0x388 읽기)와 레지스터 04h 의 비트. Jeffrey S. Lee,
+   "Programming the AdLib/Sound Blaster FM Music Chips" 2.0 의 표다.
+   상태의 아래 비트는 OPL2 에서 06h 다. 이 값을 06h 와 AND 해 0 이면
+   OPL3 로 본다(YMF289B 데이터시트, ModdingWiki "OPL chip" 에서 재인용).
+   DOSBox Staging opl.cpp Opl::PortRead 도 06h 를 더한다. *)
+let opl_status_irq = 0x80
+let opl_status_t1 = 0x40
+let opl_status_t2 = 0x20
+let opl2_status_low = 0x06
+let opl_ctl_reset = 0x80
+let opl_ctl_mask_t1 = 0x40
+let opl_ctl_mask_t2 = 0x20
+let opl_ctl_start_t2 = 0x02
+let opl_ctl_start_t1 = 0x01
+
+(* 타이머는 레지스터 값에서 한 칸씩 올라가 256 에서 넘친다. *)
+let opl_overflow = 256
+
+let opl_period ~step ~count = step * (opl_overflow - count)
+
+let opl_raise = function
+  | Opl_clear | Opl_raised -> Opl_raised
+  | Opl_masked -> Opl_masked
+
+let opl_clear = function
+  | Opl_clear | Opl_raised -> Opl_clear
+  | Opl_masked -> Opl_masked
+
+let opl_mask ~masked flag =
+  match masked, flag with
+  | true, (Opl_clear | Opl_raised | Opl_masked) -> Opl_masked
+  | false, Opl_masked -> Opl_clear
+  | false, Opl_clear -> Opl_clear
+  | false, Opl_raised -> Opl_raised
+
+(* [at] 에 넘칠 타이머가 [now] 까지 넘쳤으면 [now] 뒤 첫 주기 끝으로
+   옮기고 플래그를 세운다. 여러 번 넘쳤어도 플래그는 하나다. *)
+let opl_timer_update ~step ~count ~now (at, flag) =
+  match at with
+  | Some due when now >= due ->
+    let p = opl_period ~step ~count in
+    (Some (due + (p * (((now - due) / p) + 1))), opl_raise flag)
+  | Some _ | None -> (at, flag)
+
+(* 레지스터 04h 의 시작·마스크 비트를 타이머 하나에 건다. 돌던 타이머는
+   시작 비트를 다시 써도 그대로 돈다. 새로 시작하면 DOSBox 처럼 지난 칸
+   경계부터 세고 플래그를 지운다. *)
+let opl_timer_control ~step ~count ~now ~on ~masked (at, flag) =
+  let at, flag =
+    match on, at with
+    | true, Some _ -> (at, flag)
+    | true, None -> (Some ((now / step * step) + opl_period ~step ~count), opl_clear flag)
+    | false, (Some _ | None) -> (None, flag)
+  in
+  (at, opl_mask ~masked flag)
+
+(* 넘침은 읽는 때가 아니라 넘친 때 일어난다. 상태를 읽거나 레지스터를
+   쓰기 전에 그때까지 지난 넘침을 반영한다. *)
+let opl_update t =
+  let at, flag =
+    opl_timer_update ~step:opl_t1_step ~count:t.opl_t1_count ~now:t.now (t.opl_t1_at, t.opl_t1_exp)
+  in
+  t.opl_t1_at <- at;
+  t.opl_t1_exp <- flag;
+  let at, flag =
+    opl_timer_update ~step:opl_t2_step ~count:t.opl_t2_count ~now:t.now (t.opl_t2_at, t.opl_t2_exp)
+  in
+  t.opl_t2_at <- at;
+  t.opl_t2_exp <- flag
+
+let opl_control t v =
+  if v land opl_ctl_reset <> 0 then begin
+    (* bit7 이 서면 플래그만 지우고 나머지 비트는 보지 않는다. *)
+    t.opl_t1_exp <- opl_clear t.opl_t1_exp;
+    t.opl_t2_exp <- opl_clear t.opl_t2_exp
+  end
+  else begin
+    let at, flag =
+      opl_timer_control ~step:opl_t1_step ~count:t.opl_t1_count ~now:t.now
+        ~on:(v land opl_ctl_start_t1 <> 0) ~masked:(v land opl_ctl_mask_t1 <> 0)
+        (t.opl_t1_at, t.opl_t1_exp)
+    in
+    t.opl_t1_at <- at;
+    t.opl_t1_exp <- flag;
+    let at, flag =
+      opl_timer_control ~step:opl_t2_step ~count:t.opl_t2_count ~now:t.now
+        ~on:(v land opl_ctl_start_t2 <> 0) ~masked:(v land opl_ctl_mask_t2 <> 0)
+        (t.opl_t2_at, t.opl_t2_exp)
+    in
+    t.opl_t2_at <- at;
+    t.opl_t2_exp <- flag
+  end
+
+let opl_status t =
+  opl_update t;
+  let bit flag b =
+    match flag with
+    | Opl_raised -> opl_status_irq lor b
+    | Opl_clear | Opl_masked -> 0
+  in
+  opl2_status_low lor bit t.opl_t1_exp opl_status_t1 lor bit t.opl_t2_exp opl_status_t2
+
+let opl_write t v =
+  opl_update t;
+  match t.opl_reg with
+  | 0x02 -> t.opl_t1_count <- v
+  | 0x03 -> t.opl_t2_count <- v
+  | 0x04 -> opl_control t v
+  | _ -> ()                            (* 음색 레지스터 — 소리가 없어 무시 *)
 
 let set_now t n = t.now <- n
 let palette t = t.pal
@@ -216,22 +333,7 @@ let port_in t p =
     t.cga_status <- not t.cga_status;
     let vsync = if (t.now / 70000) land 7 = 0 then 0x08 else 0x00 in
     (if t.cga_status then 0x01 else 0x00) lor vsync
-  | 0x388 ->
-    (* 만료는 읽는 순간에 갱신한다 — 감지 루틴은 쓰기와 읽기 사이에
-       지연 루프를 두고 그 시간에 타이머가 끝나기를 기대한다. 만료한
-       적 있으면 상위 두 비트(0xC0)와 타이머 플래그를 함께 띄운다. *)
-    if t.opl_t1_at > 0 && t.now >= t.opl_t1_at then begin
-      t.opl_t1_exp <- true;
-      t.opl_t1_at <- 0                   (* 만료는 한 번 — 스탬프를 소비한다 *)
-    end;
-    if t.opl_t2_at > 0 && t.now >= t.opl_t2_at then begin
-      t.opl_t2_exp <- true;
-      t.opl_t2_at <- 0
-    end;
-    let flags =
-      (if t.opl_t1_exp then 1 else 0) lor (if t.opl_t2_exp then 2 else 0)
-    in
-    if flags <> 0 then 0xC0 lor flags else 0x00
+  | 0x388 -> opl_status t
   | _ -> 0xff
 
 let port_out t p v =
@@ -297,28 +399,7 @@ let port_out t p v =
   | 0x3D8 -> t.mode_control <- v
   | 0x3D9 -> t.color_select <- v; Dos_video.set_cga_color_select t.video v
   | 0x388 -> t.opl_reg <- v              (* 레지스터 선택 *)
-  | 0x389 ->
-    (match t.opl_reg with
-     | 0x02 -> t.opl_t1_count <- v
-     | 0x03 -> t.opl_t2_count <- v
-     | 0x04 ->
-       (* bit0/1 = 타이머 시작(플래그를 지우고 다시 만다), bit7 = 플래그
-         리셋(감지 루틴이 reg4=0x80 을 쓰는 쪽). bit5/6(마스크)는 플래그가
-         아니라 IRQ 만 가린다 — 감지 루틴은 마스크를 건 채 플래그를
-         기대한다. *)
-       if v land 0x80 <> 0 then begin
-         t.opl_t1_exp <- false;
-         t.opl_t2_exp <- false
-       end;
-       if v land 1 <> 0 then begin
-         t.opl_t1_exp <- false;
-         t.opl_t1_at <- t.now + (opl_t1_step * (t.opl_t1_count + 1))
-       end;
-       if v land 2 <> 0 then begin
-         t.opl_t2_exp <- false;
-         t.opl_t2_at <- t.now + (opl_t2_step * (t.opl_t2_count + 1))
-       end
-     | _ -> ())                        (* 음색 레지스터 — 소리가 없어 무시 *)
+  | 0x389 -> opl_write t v
   | _ -> ()
 
 (* ---------- snapshot ---------- *)
@@ -330,6 +411,22 @@ module C = Dos_snap_codec
 let cycle = C.count
 let pit_access = C.range 0 3
 let dac_phase_r = C.range 0 2
+let opl_flag_r = C.range 0 2
+
+let opl_flag_tag = function Opl_clear -> 0 | Opl_raised -> 1 | Opl_masked -> 2
+
+let opl_flag_of_tag = function
+  | 0 -> Opl_clear
+  | 1 -> Opl_raised
+  | 2 -> Opl_masked
+  | n -> C.fail (Printf.sprintf "OPL flag %d" n)
+
+let put_opl_at w = function
+  | None -> C.put_bool w false
+  | Some at -> C.put_bool w true; C.put w ~what:"opl next overflow" cycle at
+
+let get_opl_at r =
+  if C.get_bool r then Some (C.get r ~what:"opl next overflow" cycle) else None
 
 (* The full pattern fails the build when a field is added, until the
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
@@ -370,10 +467,10 @@ let write_state w t =
   put "opl_reg" C.byte opl_reg;
   put "opl_t1_count" C.byte opl_t1_count;
   put "opl_t2_count" C.byte opl_t2_count;
-  put "opl_t1_at" cycle opl_t1_at;
-  put "opl_t2_at" cycle opl_t2_at;
-  C.put_bool w opl_t1_exp;
-  C.put_bool w opl_t2_exp
+  put_opl_at w opl_t1_at;
+  put_opl_at w opl_t2_at;
+  put "opl_t1_exp" opl_flag_r (opl_flag_tag opl_t1_exp);
+  put "opl_t2_exp" opl_flag_r (opl_flag_tag opl_t2_exp)
 
 let read_state r t =
   let get what rng = C.get r ~what rng in
@@ -407,7 +504,7 @@ let read_state r t =
   t.opl_reg <- get "opl_reg" C.byte;
   t.opl_t1_count <- get "opl_t1_count" C.byte;
   t.opl_t2_count <- get "opl_t2_count" C.byte;
-  t.opl_t1_at <- get "opl_t1_at" cycle;
-  t.opl_t2_at <- get "opl_t2_at" cycle;
-  t.opl_t1_exp <- C.get_bool r;
-  t.opl_t2_exp <- C.get_bool r
+  t.opl_t1_at <- get_opl_at r;
+  t.opl_t2_at <- get_opl_at r;
+  t.opl_t1_exp <- opl_flag_of_tag (get "opl_t1_exp" opl_flag_r);
+  t.opl_t2_exp <- opl_flag_of_tag (get "opl_t2_exp" opl_flag_r)
