@@ -50,7 +50,7 @@ let service_status_mask t v =
   | 0x21, _ -> Cpu86.f_carry
   | _ -> 0
 
-let create () =
+let create ?(model = Cpu86.I80286) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
   let ports = Dos_ports.create ~mem ~video in
@@ -77,10 +77,10 @@ let create () =
     else Bytes.set mem a (Char.chr (v land 0xff))
   in
   let cpu =
-    (* 1990년대 DOS 게임은 286 이상에서 돌았고 Borland 컴파일러가 186
-       명령을 낸다. 실칩 8086 검증은 Cpu86 쪽 스위트가 I8086 으로 따로
-       돈다. *)
-    Cpu86.create ~model:Cpu86.I80286 ~read ~write
+    (* 기본은 286 이다. 1990년대 DOS 게임은 286 이상에서 돌았고 Borland
+       컴파일러가 186 명령을 낸다. 기본을 바꾸면 게임의 CPU 판별 결과가 모두
+       바뀌므로, 386 은 부르는 쪽이 고른다(RFC 0001 4 단계). *)
+    Cpu86.create ~model ~read ~write
       ~port_in:(fun p -> Dos_ports.port_in ports p)
       ~port_out:(fun p v -> Dos_ports.port_out ports p v)
       ()

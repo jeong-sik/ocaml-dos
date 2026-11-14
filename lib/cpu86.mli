@@ -165,12 +165,23 @@ val f_interrupt : int
 val f_direction : int
 val f_overflow : int
 
+val model : t -> model
+(** The model [create] was given. *)
+
 (** {1 Saved state}
 
     What a machine snapshot needs from the CPU: the registers, the flags word,
     HLT and the cycle count the machine's clock derives from. The model and
     the memory, port and interrupt callbacks belong to whoever creates the
     CPU and are not part of it. *)
+
+(** What an 80386 holds beyond the 286 registers. IOPL and NT (FLAGS bits
+    12-14) travel in [saved_flags]. *)
+type saved_386 = {
+  saved_regs_hi : int array;  (** 8 × upper 16 bits, AX CX DX BX SP BP SI DI *)
+  saved_fs : int;
+  saved_gs : int;
+}
 
 type saved = {
   saved_regs : int array;  (** 8 × 16-bit, AX CX DX BX SP BP SI DI *)
@@ -179,12 +190,12 @@ type saved = {
   saved_flags : int;  (** as {!flags} returns it *)
   saved_halted : bool;
   saved_cycles : int;
+  saved_386 : saved_386 option;  (** [Some] exactly when the model is [I80386] *)
 }
 
 val save_state : t -> saved
-(** [I80386] 이면 [Invalid_argument]: 위 16 비트·FS·GS·IOPL·NT 를 담을 자리가
-    아직 없다(RFC 0001 4 단계). 기계는 아직 286 으로 돈다. *)
 
 val load_state : t -> saved -> unit
-(** Values are masked as the setters mask them. [Invalid_argument] unless
-    there are 8 registers and 4 segments. *)
+(** Values are masked as the setters mask them. [Invalid_argument], with the
+    CPU left as it was, unless there are 8 registers and 4 segments and
+    [saved_386] is [Some] (with 8 upper halves) exactly for an [I80386]. *)

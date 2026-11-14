@@ -127,7 +127,14 @@ let hex s =
   let s = if String.length s > 2 && String.sub s 0 2 = "0x" then s else "0x" ^ s in
   int_of_string s
 
+(* --cpu 의 값: 정확히 같은 글자만 받는다. *)
+let model_of_flag = function
+  | "286" -> Some Cpu86.I80286
+  | "386" -> Some Cpu86.I80386
+  | _ -> None
+
 let () =
+  let cpu = ref None in
   let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
@@ -147,6 +154,13 @@ let () =
       ("--save", Arg.String (fun m -> saves := m :: !saves),
        "NAME=PATH  끝난 뒤 게스트가 쓴 파일을 호스트로 꺼낸다");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 machine step 수 (입력 대기·idle 포함)");
+      ("--cpu", Arg.String (fun s ->
+         match model_of_flag s with
+         | Some model -> cpu := Some model
+         | None ->
+           prerr_endline ("bad --cpu " ^ s ^ " (want 286 or 386)");
+           exit 2),
+       "286|386  CPU 모델 (기본 286). 386 이면 32 비트 레지스터·FS·GS·0Fh 명령이 돈다");
       ("--feed", Arg.Set_string feed,
        "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
       ("--feed-sync", Arg.Set_string feed_sync,
@@ -176,7 +190,7 @@ let () =
       ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
-  let m = Dos_machine.create () in
+  let m = Dos_machine.create ?model:!cpu () in
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
