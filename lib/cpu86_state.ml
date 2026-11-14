@@ -58,10 +58,11 @@ let sreg_fs = 4
 let sreg_gs = 5
 
 (* 명령 앞에 붙는 바이트의 종류. [Rep true] 는 rep/repz, [Rep false] 는
-   repnz 다. 386 만 64h·65h 를 FS·GS override 로 읽는다. [prefix_table] 이
+   repnz 다. 386 만 64h·65h 를 FS·GS override 로, 66h 를 피연산자 크기
+   바꾸기로 읽는다. [prefix_table] 이
    모델마다 256 칸으로 펼쳐 두어 바이트 하나를 한 번 찾아 가른다 — 함수로
    가르면 삼국지3 3천만 스텝의 기계어 명령이 0.75% 는다. *)
-type prefix = Not_prefix | Segment of int | Lock | Rep of bool
+type prefix = Not_prefix | Segment of int | Lock | Rep of bool | Operand_size
 
 let prefix_of_byte model b =
   match b with
@@ -72,6 +73,10 @@ let prefix_of_byte model b =
   | 0x64 | 0x65 ->
     (match model with
      | I80386 -> Segment (if b = 0x64 then sreg_fs else sreg_gs)
+     | I8086 | I80186 | I80286 -> Not_prefix)
+  | 0x66 ->
+    (match model with
+     | I80386 -> Operand_size
      | I8086 | I80186 | I80286 -> Not_prefix)
   | 0xf0 -> Lock
   | 0xf2 -> Rep false
@@ -170,16 +175,22 @@ let set_reg16 t n v = t.regs.(n) <- v land 0xffff
 let no_upper_half what =
   invalid_arg (Printf.sprintf "Cpu86.%s: only the 80386 has 32-bit registers" what)
 
+(* 386 의 32 비트 레지스터. [get32]·[put32] 는 모델을 보지 않는다 — 66h 가
+   붙은 명령만 부르고, 66h 는 386 에서만 접두다. *)
+let get32 t n = (t.regs_hi.(n) lsl 16) lor t.regs.(n)
+
+let put32 t n v =
+  t.regs.(n) <- v land 0xffff;
+  t.regs_hi.(n) <- (v lsr 16) land 0xffff
+
 let reg32 t n =
   match t.model with
-  | I80386 -> (t.regs_hi.(n) lsl 16) lor t.regs.(n)
+  | I80386 -> get32 t n
   | I8086 | I80186 | I80286 -> no_upper_half "reg32"
 
 let set_reg32 t n v =
   match t.model with
-  | I80386 ->
-    t.regs.(n) <- v land 0xffff;
-    t.regs_hi.(n) <- (v lsr 16) land 0xffff
+  | I80386 -> put32 t n v
   | I8086 | I80186 | I80286 -> no_upper_half "set_reg32"
 
 let reg8 t n =
@@ -235,8 +246,18 @@ let parity_even v =
 (* 명령 하나의 문맥. 접두를 다 읽고 나면 바뀌지 않는다. [base_ip] 는 첫
    접두 바이트의 IP 다 — 결함과 Unsupported 가 그 자리로 되돌린다. [ovr] 는
    세그먼트 override, [rep] 은 Some true(rep/repz)·Some false(repnz). LOCK 은
-   접두를 읽는 동안 [Cpu86_decode.check_lock] 이 따지고 끝난다. *)
+   접두를 읽는 동안 [Cpu86_decode.check_lock] 이 따지고 끝난다. [opcode] 는
+   opcode 바이트이고, 386 에서 66h 가 붙어 폭이 32 비트가 되는 명령이면
+   [operand32_form] 이 더해져 있다. *)
 type ctx = { base_ip : int; opcode : int; ovr : int option; rep : bool option }
+
+(* [ctx.opcode] 의 bit 8. 필드 대신 opcode 값에 싣는 것은 16 비트 명령이 이
+   표시를 따질 일이 없어서다: [step] 의 match 에서 0xFF 를 넘는 값은 마지막
+   갈래에만 닿는다. 삼국지3 3천만 스텝의 기계어 명령이 66h 전 24.06G 이고,
+   bool 필드·접두 인자·갈래 검사로 들고 다니면 24.33G, 이렇게 실으면 24.15G
+   다. *)
+let operand32_form = 0x100
+let opcode_byte = 0xff
 
 (* [t.ip] already passed the opcode and modrm bytes [decode_prefixes]/the
    dispatch consumed while deciding this instruction is unsupported. Left
