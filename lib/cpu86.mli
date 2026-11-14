@@ -28,8 +28,17 @@
     SMSW(0F 01 /4)만 있다 — 0xFFF0 을 돌려준다. 1990년대 DOS 게임은 286
     이상을 요구하고 이 자리로 확인한다. 나눗셈 오류(DIV·IDIV·AAM 0)는
     286 에서 결함이다 — INT 0 이 돌아갈 자리가 다음 명령이 아니라 그
-    나눗셈 자신이다. *)
-type model = I8086 | I80186 | I80286
+    나눗셈 자신이다.
+
+    [I80386] 은 286 의 실모드에 세 가지를 더한다: 범용 레지스터의 위 16
+    비트({!reg32}), FS·GS(세그먼트 4·5, 접두 64h·65h, MOV sreg), 실모드에서도
+    POPF·IRET 로 쓸 수 있는 FLAGS bit12-14(IOPL·NT). bit15 는 0 이다. 게임은
+    bit12-14 가 남는지로 386 을 가른다. 명령 길이는 15 바이트까지다. 결함도
+    286 과 다르다: 받지 않는 명령의 LOCK 은 INT 6, SS 로 세그먼트 끝을 넘으면
+    INT 12, 결함 난 문자열 명령은 그 반복을 처음부터 다시 한다. 32 비트
+    피연산자·주소(66h·67h)와 0x0F 확장은 아직 없어 [Unsupported] 다(RFC 0001
+    2·3 단계). 근거는 SingleStepTests/80386 실모드다. *)
+type model = I8086 | I80186 | I80286 | I80386
 
 exception Unsupported of string
 (** 아직 구현되지 않은 명령을 만났다. 메시지는 명령 위치와 opcode.
@@ -72,12 +81,23 @@ val set_reg16 : t -> int -> int -> unit
 val reg8 : t -> int -> int
 val set_reg8 : t -> int -> int -> unit
 
+val reg32 : t -> int -> int
+(** [I80386] 의 32 비트 레지스터 0..7 = EAX ECX EDX EBX ESP EBP ESI EDI. 16·8
+    비트 쓰기는 위 16 비트를 그대로 둔다. 다른 모델에서는 [Invalid_argument]. *)
+
+val set_reg32 : t -> int -> int -> unit
+(** 아래 32 비트만 쓴다. 다른 모델에서는 [Invalid_argument]. *)
+
 val seg : t -> int -> int
-(** 세그먼트 레지스터 0..3 = ES CS SS DS. *)
+(** 세그먼트 레지스터 0..3 = ES CS SS DS, [I80386] 은 4·5 = FS GS 까지. 그
+    밖의 번호는 [Invalid_argument]. *)
 
 val set_seg : t -> int -> int -> unit
 
 val dump_ip : t -> int
+(** [I80386] 은 FFFF 의 마지막 바이트를 지난 뒤 10000h 를 돌려준다. EIP 가
+    32 비트라서다. 다음 페치는 CS 한계 밖이라 INT 13 이다. *)
+
 val set_ip : t -> int -> unit
 
 val physical : t -> seg:int -> off:int -> int
@@ -137,6 +157,8 @@ type saved = {
 }
 
 val save_state : t -> saved
+(** [I80386] 이면 [Invalid_argument]: 위 16 비트·FS·GS·IOPL·NT 를 담을 자리가
+    아직 없다(RFC 0001 4 단계). 기계는 아직 286 으로 돈다. *)
 
 val load_state : t -> saved -> unit
 (** Values are masked as the setters mask them. [Invalid_argument] unless
