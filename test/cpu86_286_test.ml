@@ -776,8 +776,8 @@ let test_386_0f_bits () =
   check "bt ax,cx takes the number mod 16" (carry t) 1;
   let t, _ = run_with "\x0f\xa3\x06\x00\x01" (regs [ (0, 31) ]) in
   check "bt [100h],ax moves a word up" (carry t) 1;
-  let t, _ = run_with "\x0f\xa3\x06\x02\x01" (regs [ (0, 0xffff) ]) in
-  check "bt [102h],ax with -1 reads bit 15 of [100h]" (carry t) 0;
+  let t, _ = run_with "\x0f\xa3\x06\x02\x01" (regs [ (0, 0xfff0) ]) in
+  check "bt [102h],ax with -16 reads bit 0 of [100h]" (carry t) 1;
   let _, mem = run_with "\x0f\xab\x06\x00\x01" (regs [ (0, 4) ]) in
   check "bts [100h],ax" (word mem 0x100) 0x0011;
   let _, mem = run_with "\x0f\xb3\x06\x00\x01" (regs [ (0, 0) ]) in
@@ -786,6 +786,8 @@ let test_386_0f_bits () =
   check "btc [100h],ax lands in [102h]" (word mem 0x102) 0;
   let t, _ = run_with "\x0f\xba\x26\x02\x01\x1f" nothing_386 in
   check "bt [102h],1Fh takes the immediate mod 16" (carry t) 1;
+  let _, mem = run_with "\x0f\xba\x26\x00\x01\x01" nothing_386 in
+  check "bt [100h],1 leaves the word" (word mem 0x100) 1;
   let _, got = fault_of m386 "\x0f\xba\x06\x00\x01\x00" nothing_386 in
   check_taken "0f ba /0 is INT 6" got (Some (6, 0));
   let lock_fault code = snd (fault_of m386 code nothing_386) in
@@ -798,6 +800,9 @@ let test_386_0f_bits () =
   let t, _ = run_with "\x0f\xa4\xd8\x04" (regs [ (0, 0x1234); (3, 0xabcd) ]) in
   check "shld ax,bx,4" (ax t) 0x234a;
   check "shld ax,bx,4 CF" (carry t) 1;
+  (* SDM: a 1-bit shift sets OF on a sign change (the data masks OF) *)
+  let t, _ = run_with "\x0f\xa4\xd8\x01" (regs [ (0, 0x4000); (3, 0x8000) ]) in
+  check "shld ax,bx,1 OF" (Bool.to_int (Cpu86.flags t land Cpu86.f_overflow <> 0)) 1;
   let t, _ = run_with "\x0f\xa5\xd8" (regs [ (0, 0x1234); (3, 0xabcd); (1, 0x24) ]) in
   check "shld ax,bx,cl takes CL mod 32" (ax t) 0x234a;
   let t, _ = run_with "\x0f\xa4\xd8\x12" (regs [ (0, 0); (3, 0x4088) ]) in
@@ -822,6 +827,9 @@ let test_386_0f_bits () =
   let t, _ = run_with "\x0f\xaf\xca" (regs [ (1, 0x100); (2, 0x100) ]) in
   check "imul cx,dx low word" (cx t) 0;
   check "imul cx,dx overflow" (carry t) 1;
+  check "imul cx,dx OF" (Bool.to_int (Cpu86.flags t land Cpu86.f_overflow <> 0)) 1;
+  let t, _ = run_with "\x6b\xc1\xfe" (regs [ (1, 3) ]) in
+  check "6b imul ax,cx,-2 shares imul16" (ax t) 0xfffa;
   let t, _ = run_with "\x0f\xaf\xca" (regs [ (1, 0xffff); (2, 2) ]) in
   check "imul -1 by 2" (cx t) 0xfffe;
   check "imul -1 by 2 fits" (carry t) 0;
@@ -834,6 +842,12 @@ let test_386_0f_bits () =
   let t, _ = run_with "\x0f\xbc\xc3" (regs [ (0, 0x1234); (3, 0) ]) in
   check "bsf of 0 sets ZF" (Bool.to_int (Cpu86.flags t land zf <> 0)) 1;
   check "bsf of 0 keeps AX" (ax t) 0x1234;
+  let t, _ =
+    run_with "\x0f\xbc\xc3" (fun t ->
+        regs [ (3, 1) ] t;
+        Cpu86.set_flags t (Cpu86.flags t lor zf))
+  in
+  check "bsf of 1 clears ZF" (Bool.to_int (Cpu86.flags t land zf <> 0)) 0;
   let t, _ = run_with "\x0f\xb4\x06\x00\x01" nothing_386 in
   check "lfs ax,[100h] AX" (ax t) 1;
   check "lfs ax,[100h] FS" (Cpu86.seg t 4) 0x8000;
@@ -849,6 +863,8 @@ let test_386_0f_bits () =
   check "lfs ax,[bx] at FFFEh takes FS from offset 0" (Cpu86.seg t 4) 0xb40f;
   let _, got = fault_of m386 "\x0f\xb4\x07" (regs [ (3, 0xfffd) ]) in
   check_taken "lfs ax,[bx] at FFFDh reads a word at FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\x0f\xb4\x03" (regs [ (3, 0xfffe) ]) in
+  check_taken "a32 lfs across FFFFh" got (Some (13, 0));
   let t, _ = run_with "\x0f\x06" nothing_386 in
   check "clts is two bytes" (Cpu86.dump_ip t) 2
 
