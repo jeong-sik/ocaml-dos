@@ -201,6 +201,10 @@ let within t sreg off size =
 (* 16 비트 far 포인터 m16:16 이 차지하는 바이트(LES·LDS·LSS·LFS·LGS, FF /3·/5). *)
 let far_pointer16_bytes = 4
 
+(* 32 비트 far 포인터 m16:32 가 차지하는 바이트(66h 의 LES·LDS·LSS·LFS·LGS,
+   FF /3·/5). *)
+let far_pointer32_bytes = 6
+
 (* 한 피연산자를 여러 번 나눠 읽는 명령(far 포인터, BOUND, ESC)이 먼저 부른다:
    [Mem32] 면 [size] 바이트 전체가 한계 안인지 따진다. [Mem] 은 지금처럼 접근
    하나하나가 따진다. *)
