@@ -57,15 +57,18 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_sst286.exe
 
 `I80386` 은 Intel 386EX 에서 뽑은
 [SingleStepTests/80386](https://github.com/SingleStepTests/80386) 실모드로
-잰다. 아직 16 비트 명령만 있어 66h·67h·0Fh 로 시작하지 않는 325 파일,
-58만 300 케이스만 돌린다. fail 은 0 이다. 포트 22h·23h 는 CPU 가 아니라
+잰다. 0Fh 확장은 아직 없어 0Fh 로 시작하지 않는 780 파일, 149만 8,600
+케이스를 돌린다. 66h·67h 가 없는 325 파일, 66h 194 파일, 67h 261 파일이다.
+fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문자열이
+칩이 이미 가져온 자기 코드를 덮는 경우라, 프리페치 큐가 없는 이 모델로는
+맞출 수 없다(#159). 포트 22h·23h 는 CPU 가 아니라
 386EX 칩 안 주변장치 레지스터(REMAPCFG)라, 러너가 시험 기계에서 읽힌 값
 7Fh·42h 를 돌려준다. 다른 포트는 FFh 다. 데이터셋 옆 `revocation_list.txt`
 가 적은 테스트는 건너뛴다.
 
 ```sh
 # 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)
-ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67|0F)' | sed 's/\.MOO\.gz$//' | paste -sd, -)
+ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67)*0F' | sed 's/\.MOO\.gz$//' | paste -sd, -)
 SST_FILES="$ALL" dune exec --root . test/cpu86_sst386.exe
 ```
 
@@ -122,9 +125,24 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 | BOUND 하한 밖 | 상한을 읽지 않는다 | 상한도 읽는다(FFFF 면 INT 13) |
 | 바이트 SHL·SHR 를 16·24 번 | CF=0 | 8 번일 때의 CF |
 | 명령 길이 | 10 바이트 | 15 바이트 |
+| 66h·67h | opcode 자리(Unsupported) | 피연산자·주소 크기 접두 |
 
-기계는 아직 `I80286` 으로 돈다. 32 비트 피연산자·주소와 0Fh 확장(RFC
-0001 2·3 단계)이 있어야 386 을 요구하는 게임이 돈다.
+66h 는 [80386.csv](https://github.com/SingleStepTests/80386/blob/main/80386.csv)
+의 `66` 열이 고른 한 바이트 opcode 155 개를 32 비트 피연산자로 돌린다.
+67h 는 주소를 32 비트로 센다(SIB·disp32, 문자열의 ESI·EDI·ECX). 실모드
+한계는 FFFFh 그대로라, 끝 바이트가 그 위인 접근은 INT 13 이고 SS 면 INT 12
+다. 설명서를 글자 그대로 읽은 것과 데이터가 다른 자리는 이렇다.
+
+| 명령 | 실칩 |
+|---|---|
+| 66h PUSH/POP sreg | SP 는 4 움직이고 워드 하나만 오간다 |
+| 66h POPAD | ESP 위 16 비트를 스택의 ESP 자리에서 가져온다 |
+| 66h PUSHAD | EDI 부터 위로 쓰고, 세그먼트 끝을 넘는 첫 자리에서 INT 12 다 |
+| 66h RET | FFFFh 위 EIP 는 INT 13 이다 |
+| 67h SIB 인덱스 없음(4) | 배율이 베이스에 곱해진다 |
+
+기계는 아직 `I80286` 으로 돈다. 0Fh 확장(RFC 0001 3 단계)과 스냅숏·
+`dosboot --cpu 386`(4 단계)이 있어야 386 을 요구하는 게임이 돈다.
 
 바이트 IDIV 는 286·386 모두 몫이 음수이고 |피젯수| >> 7 이 |젯수| + 80h
 이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도 INT 0 이 아니다.
