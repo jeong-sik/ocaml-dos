@@ -38,13 +38,19 @@
     INT 12, 결함 난 문자열 명령은 그 반복을 처음부터 다시 한다.
 
     66h 는 80386.csv 의 66 열이 고른 155 opcode 의 피연산자를 32 비트로
-    바꾼다. 주소는 16 비트 그대로다. 실칩이 설명서를 글자 그대로 읽은 것과
+    바꾼다. 실칩이 설명서를 글자 그대로 읽은 것과
     다른 자리가 셋 있다. 세그먼트 레지스터의 32 비트 PUSH·POP 은 SP 를 4
     움직이고 워드 하나만 오간다. POPAD 는 ESP 의 위 16 비트를 스택의 ESP
     자리에서 가져온다. PUSHAD 는 EDI 부터 쓰고 세그먼트 끝을 넘는 첫 자리에서
-    INT 12 다. EIP 가 FFFFh 를 넘는 RET·점프는 CS 한계 밖이라 INT 13 이다. 67h 와
-    0x0F 확장은 아직 없어 [Unsupported] 다(RFC 0001 2·3 단계). 근거는
-    SingleStepTests/80386 실모드다. *)
+    INT 12 다. EIP 가 FFFFh 를 넘는 RET·점프는 CS 한계 밖이라 INT 13 이다.
+
+    67h 는 주소를 32 비트로 센다: modrm 의 SIB·disp32, A0h-A3h 의 moffs32,
+    문자열 명령의 ESI·EDI·ECX, LOOP·JECXZ 의 ECX, XLAT 의 EBX 다. 실모드
+    세그먼트 한계는 FFFFh 그대로라, 접근의 끝 바이트가 그 위면 SS 는 INT 12,
+    나머지는 INT 13 이다. 설명서가 말하지 않는 규칙이 하나 있다: SIB 에
+    인덱스가 없으면 배율이 베이스에 곱해진다. POP r/m 의 [esp+...] 는 pop 한
+    뒤의 ESP 로 센다. 0x0F 확장은 아직 없어 [Unsupported] 다(RFC 0001 3 단계).
+    근거는 SingleStepTests/80386 실모드다. *)
 type model = I8086 | I80186 | I80286 | I80386
 
 exception Unsupported of string
