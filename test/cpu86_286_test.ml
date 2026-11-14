@@ -551,6 +551,156 @@ let test_386_operand32 () =
   let _, got = fault_of m386 "\xf0\x66\x89\x04" nothing_386 in
   check_taken "o32 lock mov [si],eax" got (Some (6, 0))
 
+(* 67h: 32-bit offsets inside the 386's real-mode segments (SingleStepTests
+   80386, the 67 files). Words at DS:0100h-01FEh hold their own offset; SS
+   (1000h) and ES (2000h) hold the offset xor a tag, so a wrong segment or a
+   wrong offset reads a different word. *)
+let test_386_address32 () =
+  let m386 = Cpu86.I80386 in
+  let r32 t n = Cpu86.reg32 t n in
+  let ss_tag = 0x5000 and es_tag = 0x6000 and es_seg = 0x2000 in
+  let poke mem a v = Bytes.set mem a (Char.chr (v land 0xff)) in
+  let poke16 mem a v = poke mem a v; poke mem (a + 1) (v lsr 8) in
+  let byte mem a = Char.code (Bytes.get mem a) in
+  let word mem a = byte mem a lor (byte mem (a + 1) lsl 8) in
+  let fill mem =
+    for k = 0 to 0x7f do
+      let off = 0x100 + (2 * k) in
+      poke16 mem off off;
+      poke16 mem (0x10000 + off) (off lxor ss_tag);
+      poke16 mem ((es_seg lsl 4) + off) (off lxor es_tag)
+    done
+  in
+  let regs rs t = List.iter (fun (n, v) -> Cpu86.set_reg32 t n v) rs in
+  let ax_after name code setup want =
+    let t, mem = cpu_mem m386 code in
+    fill mem;
+    Cpu86.set_seg t 0 es_seg;
+    setup t;
+    run t 1;
+    check ("a32 " ^ name) (ax t) want
+  in
+  ax_after "mov ax,[eax+ebx]" "\x67\x8b\x04\x18" (regs [ (0, 0x100); (3, 0x20) ]) 0x120;
+  ax_after "mov ax,[eax+ebx*2]" "\x67\x8b\x04\x58" (regs [ (0, 0x100); (3, 0x10) ]) 0x120;
+  ax_after "SIB without index scales the base" "\x67\x8b\x04\xe0" (regs [ (0, 0x24) ]) 0x120;
+  ax_after "SIB disp32 only is not scaled" "\x67\x8b\x04\xe5\x20\x01\x00\x00" nothing_386 0x120;
+  ax_after "mov ax,[120h]" "\x67\x8b\x05\x20\x01\x00\x00" nothing_386 0x120;
+  ax_after "SIB [ebx+disp32]" "\x67\x8b\x04\x1d\x00\x01\x00\x00" (regs [ (3, 0x20) ]) 0x120;
+  ax_after "disp8 sign-extends" "\x67\x8b\x40\xf0" (regs [ (0, 0x130) ]) 0x120;
+  ax_after "offset wraps at 2^32" "\x67\x8b\x80\x20\x01\xff\xff" (regs [ (0, 0x10000) ]) 0x120;
+  ax_after "[ebp+20h] is SS" "\x67\x8b\x45\x20" (regs [ (5, 0x100) ]) (0x120 lxor ss_tag);
+  ax_after "[esp] is SS" "\x67\x8b\x04\x24" nothing_386 (0x100 lxor ss_tag);
+  ax_after "[esp+ebx] is SS" "\x67\x8b\x04\x1c" (regs [ (3, 0x20) ]) (0x120 lxor ss_tag);
+  ax_after "SIB [ebp+20h] is SS" "\x67\x8b\x44\x25\x20" (regs [ (5, 0x100) ]) (0x120 lxor ss_tag);
+  ax_after "[ebp+ebx+20h] is SS" "\x67\x8b\x44\x1d\x20" (regs [ (5, 0xf0); (3, 0x10) ]) (0x120 lxor ss_tag);
+  ax_after "index EBP stays DS" "\x67\x8b\x04\x2b" (regs [ (3, 0x100); (5, 0x20) ]) 0x120;
+  ax_after "es: before 67h" "\x26\x67\x8b\x00" (regs [ (0, 0x120) ]) (0x120 lxor es_tag);
+  ax_after "es: after 67h" "\x67\x26\x8b\x00" (regs [ (0, 0x120) ]) (0x120 lxor es_tag);
+  ax_after "lea ax keeps the low word" "\x67\x8d\x04\x58" (regs [ (0, 0x12345); (3, 0x10) ]) 0x2365;
+  let t, _ = cpu_mem m386 "\x66\x67\x8d\x04\x58" in
+  regs [ (0, 0x12345); (3, 0x10) ] t;
+  run t 1;
+  check "a32 lea eax" (r32 t 0) 0x12365;
+  let t, mem = cpu_mem m386 "\x66\x67\x8b\x04\x18" in
+  fill mem;
+  regs [ (0, 0x100); (3, 0x20) ] t;
+  run t 1;
+  check "a32 mov eax,[eax+ebx]" (r32 t 0) 0x01220120;
+  (* mov ax,[120h] by moffs32, then inc ax: the 4 offset bytes are skipped *)
+  let t, mem = cpu_mem m386 "\x67\xa1\x20\x01\x00\x00\x40" in
+  fill mem;
+  run t 2;
+  check "a32 moffs32" (ax t) 0x121;
+  (* the end byte past FFFFh faults: INT 13, or INT 12 by SS *)
+  let mov_ax_eax = "\x67\x8b\x00" in
+  let _, got = fault_of m386 mov_ax_eax (regs [ (0, 0x10120) ]) in
+  check_taken "a32 [eax] past FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 mov_ax_eax (regs [ (0, 0xffff) ]) in
+  check_taken "a32 word at FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\x8a\x00" (regs [ (0, 0xffff) ]) in
+  check_taken "a32 byte at FFFFh" got None;
+  let _, got = fault_of m386 "\x66\x67\x8b\x00" (regs [ (0, 0x10000) ]) in
+  check_taken "a32 dword at 10000h" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\xac" (regs [ (6, 0x10000) ]) in
+  check_taken "a32 lodsb at ESI 10000h" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\x8b\x45\x00" (regs [ (5, 0x10000) ]) in
+  check_taken "a32 [ebp] past FFFFh" got (Some (12, 0));
+  (* a far pointer or BOUND pair must fit whole: the second half does not wrap to 0 *)
+  let _, got = fault_of m386 "\x67\xc4\x00" (regs [ (0, 0xfffe) ]) in
+  check_taken "a32 les across FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\x62\x00" (regs [ (0, 0xfffe) ]) in
+  check_taken "a32 bound across FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\xff\x18" (regs [ (0, 0xfffe) ]) in
+  check_taken "a32 call far m16:16 across FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x67\xff\x28" (regs [ (0, 0xfffe) ]) in
+  check_taken "a32 jmp far m16:16 across FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x66\x67\xff\x18" (regs [ (0, 0xfffc) ]) in
+  check_taken "a32 call far m16:32 across FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x66\x67\x62\x00" (regs [ (0, 0xfffc) ]) in
+  check_taken "a32 bound32 across FFFFh" got (Some (13, 0));
+  (* movsw: the read moves ESI past FFFFh, the write faults, ESI comes back whole *)
+  let t, got = fault_of m386 "\x67\xa5" (regs [ (6, 0xfffe); (7, 0xffff) ]) in
+  check_taken "a32 movsw write past FFFFh" got (Some (13, 0));
+  check "a32 movsw restarts ESI" (r32 t 6) 0xfffe;
+  (* strings walk ESI/EDI and count ECX without a 16-bit wrap *)
+  let t = cpu m386 "\x67\xac" in
+  regs [ (6, 0xffff) ] t;
+  run t 1;
+  check "a32 lodsb ESI" (r32 t 6) 0x10000;
+  let t = cpu m386 "\x67\xf3\xaa" in
+  Cpu86.set_seg t 0 0x3000;
+  regs [ (1, 0x10000); (7, 0) ] t;
+  run t 1;
+  check "a32 rep stosb ECX" (r32 t 1) 0;
+  check "a32 rep stosb EDI" (r32 t 7) 0x10000;
+  let t = cpu m386 "\x67\xe2\xfd" in
+  regs [ (1, 0x10000) ] t;
+  run t 1;
+  check "a32 loop ECX" (r32 t 1) 0xffff;
+  check "a32 loop jumps" (Cpu86.dump_ip t) 0;
+  let t = cpu m386 "\x67\xe3\x02" in
+  regs [ (1, 0x10000) ] t;
+  run t 1;
+  check "a32 jecxz on ECX" (Cpu86.dump_ip t) 3;
+  let t = cpu m386 "\x66\x67\xe2\xfc" in
+  regs [ (1, 0x10000) ] t;
+  run t 1;
+  check "a32 loopd ECX" (r32 t 1) 0xffff;
+  let t = cpu m386 "\x66\x67\xe3\x02" in
+  regs [ (1, 0x10000) ] t;
+  run t 1;
+  check "a32 jecxz with 66h" (Cpu86.dump_ip t) 4;
+  let t, mem = cpu_mem m386 "\x26\x67\xac" in
+  fill mem;
+  Cpu86.set_seg t 0 es_seg;
+  regs [ (6, 0x121) ] t;
+  run t 1;
+  check "a32 es: lodsb" (ax t land 0xff) ((0x120 lxor es_tag) lsr 8);
+  let t, mem = cpu_mem m386 "\x67\xd7" in
+  fill mem;
+  regs [ (3, 0x100); (0, 0x20) ] t;
+  run t 1;
+  check "a32 xlat [ebx+al]" (ax t land 0xff) 0x20;
+  let _, got = fault_of m386 "\x67\xd7" (regs [ (3, 0x10000) ]) in
+  check_taken "a32 xlat EBX past FFFFh" got (Some (13, 0));
+  (* pop [esp+2] counts from SP after the pop *)
+  let t, mem = cpu_mem m386 "\x67\x8f\x44\x24\x02" in
+  poke16 mem 0x10100 0xbeef;
+  run t 1;
+  check "a32 pop [esp+2] SP" (Cpu86.reg16 t 4) 0x102;
+  check "a32 pop [esp+2] target" (word mem 0x10104) 0xbeef;
+  let t, mem = cpu_mem m386 "\x66\x67\x8f\x44\x24\x02" in
+  poke16 mem 0x10100 0xbeef;
+  poke16 mem 0x10102 0xdead;
+  run t 1;
+  check "a32 pop dword [esp+2] target" (word mem 0x10106 lor (word mem 0x10108 lsl 16)) 0xdeadbeef;
+  let t, got = fault_of m386 "\x67\x8f\x00" (regs [ (0, 0x10000) ]) in
+  check_taken "a32 pop [eax] past FFFFh" got (Some (13, 0));
+  check "a32 pop fault keeps SP" (Cpu86.reg16 t 4) 0x100;
+  check "286: 67h is no prefix"
+    (Bool.to_int (match Cpu86.step (cpu Cpu86.I80286 "\x67\x8b\x00") with
+                  | _ -> false | exception Cpu86.Unsupported _ -> true)) 1
+
 (* repz stops on a difference, repnz on a match: cmpsb over zeros *)
 let test_rep_kind () =
   List.iter
@@ -566,6 +716,7 @@ let test_rep_kind () =
 let () =
   test_rep_kind ();
   test_386_operand32 ();
+  test_386_address32 ();
   test_386 ();
   test_faults ();
   test_bcd ();
