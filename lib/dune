@@ -2,7 +2,8 @@
  (name cpu86core)
  (public_name ocaml-dos.cpu86core)
  (wrapped false)
- (modules cpu86))
+ (modules cpu86 cpu86_state cpu86_fault cpu86_decode cpu86_alu cpu86_bcd cpu86_string cpu86_exec)
+ (private_modules cpu86_state cpu86_fault cpu86_decode cpu86_alu cpu86_bcd cpu86_string cpu86_exec))
 
 (library
  (name dosmachine)
