@@ -58,10 +58,10 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_sst286.exe
 `I80386` 은 Intel 386EX 에서 뽑은
 [SingleStepTests/80386](https://github.com/SingleStepTests/80386) 실모드로
 잰다. 아직 16 비트 명령만 있어 66h·67h·0Fh 로 시작하지 않는 325 파일,
-58만 300 케이스만 돌린다. fail 은 1 이고 사유는
-`test/sst80386-baseline.txt` 에 있다: 386EX 칩 안 주변장치 레지스터(포트
-22h)를 읽는 `in ax,21h` 하나다. 데이터셋 옆 `revocation_list.txt` 가 적은
-테스트는 건너뛴다.
+58만 300 케이스만 돌린다. fail 은 0 이다. 포트 22h·23h 는 CPU 가 아니라
+386EX 칩 안 주변장치 레지스터(REMAPCFG)라, 러너가 시험 기계에서 읽힌 값
+7Fh·42h 를 돌려준다. 다른 포트는 FFh 다. 데이터셋 옆 `revocation_list.txt`
+가 적은 테스트는 건너뛴다.
 
 ```sh
 # 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)

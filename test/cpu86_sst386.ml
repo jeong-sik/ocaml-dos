@@ -134,9 +134,25 @@ let install_int_hook t =
       Cpu86.set_ip t new_ip;
       Cpu86.set_seg t 1 new_cs)
 
+(* A file is named by its instruction's bytes, as 66D3.0 or 6766F7.4. A 66h
+   (operand size) or 67h (address size) prefix changes the width, not which
+   flags are undefined, so the table below is keyed without them. *)
+let operand_size_byte = "66"
+let address_size_byte = "67"
+let byte_chars = 2
+
+let rec without_size_prefixes name =
+  let rest () = String.sub name byte_chars (String.length name - byte_chars) in
+  if String.length name > byte_chars then
+    match String.sub name 0 byte_chars with
+    | b when b = operand_size_byte || b = address_size_byte -> without_size_prefixes (rest ())
+    | _ -> name
+  else name
+
 (* The flags Intel's manuals call undefined after each instruction, as in
    cpu86_sst286: a difference there is counted apart from a failure. *)
-let undefined_flags name =
+let undefined_flags file =
+  let name = without_size_prefixes file in
   let cf = Cpu86.f_carry and pf = Cpu86.f_parity and af = Cpu86.f_aux in
   let zf = Cpu86.f_zero and sf = Cpu86.f_sign and ov = Cpu86.f_overflow in
   match name with
@@ -154,13 +170,28 @@ let undefined_flags name =
 (* A REP string instruction runs at most 127 times here, a step each. *)
 let step_limit = 1_000
 
+(* Ports 22h-23h of the 386EX are REMAPCFG (Intel386 EX User's Manual,
+   D.51), a register of the chip's own peripherals, not of the CPU. The test
+   machine reads 7Fh at 22h (E5 in ax,21h; 66 E5 in eax,1Fh, four tests) and
+   42h at 23h (66 E5 in eax,21h, one test). Every other port reads FFh. *)
+let remapcfg_low = 0x22
+let remapcfg_high = 0x23
+let remapcfg_low_value = 0x7f
+let remapcfg_high_value = 0x42
+let open_bus = 0xff
+
+let port_in p =
+  if p = remapcfg_low then remapcfg_low_value
+  else if p = remapcfg_high then remapcfg_high_value
+  else open_bus
+
 type verdict = Pass | Undefined_only | Fail of string list
 
 let run_test ~file_masks ~undefined (test : Moo.test) =
   List.iter (fun (a, v) -> write_mem a v) test.initial.ram;
   let t =
     Cpu86.create ~model:Cpu86.I80386 ~read:read_mem ~write:write_mem
-      ~port_in:(fun _ -> 0xff) ~port_out:(fun _ _ -> ()) ()
+      ~port_in ~port_out:(fun _ _ -> ()) ()
   in
   install_int_hook t;
   List.iter (fun (r, v) -> set t r v) test.initial.regs32;
