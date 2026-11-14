@@ -1,0 +1,7 @@
+# SingleStepTests/80386 real mode: allowed failures per file, with why.
+# A line is "<file> <count>"; lines starting with # are comments.
+#
+# E5 in ax,21h reads port 22h for AH. On the 386EX that is REMAPCFG, a
+# register of the chip's own peripherals (Intel386 EX User's Manual, D.51),
+# not of the CPU; the runner's ports read FFh.
+E5 1

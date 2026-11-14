@@ -46,13 +46,27 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
 [SingleStepTests/80286](https://github.com/SingleStepTests/80286) 실모드
 327 파일, 147만 8천 케이스로 잰다. 형식은 JSON 이 아니라
 [MOO](https://github.com/dbalsom/moo) 라 `test/moo.ml` 이 읽는다. fail 은
-6 이고 사유는 `test/sst80286-baseline.txt` 에 있다: IVT 바이트가 빠진
-테스트 하나, SP=BP=FFFF 인 ENTER 하나, IDIV 바이트 몫 넘침 넷이다.
+2 이고 사유는 `test/sst80286-baseline.txt` 에 있다: IVT 바이트가 빠진
+테스트 하나, SP=BP=FFFF 인 ENTER 하나다.
 
 ```sh
 # 데이터셋을 /tmp/sst80286/v1_real_mode 에 받아 두고(약 310MB)
 ALL=$(ls /tmp/sst80286/v1_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.MOO\.gz$//' | paste -sd, -)
 SST_FILES="$ALL" dune exec --root . test/cpu86_sst286.exe
+```
+
+`I80386` 은 Intel 386EX 에서 뽑은
+[SingleStepTests/80386](https://github.com/SingleStepTests/80386) 실모드로
+잰다. 아직 16 비트 명령만 있어 66h·67h·0Fh 로 시작하지 않는 325 파일,
+58만 300 케이스만 돌린다. fail 은 1 이고 사유는
+`test/sst80386-baseline.txt` 에 있다: 386EX 칩 안 주변장치 레지스터(포트
+22h)를 읽는 `in ax,21h` 하나다. 데이터셋 옆 `revocation_list.txt` 가 적은
+테스트는 건너뛴다.
+
+```sh
+# 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)
+ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67|0F)' | sed 's/\.MOO\.gz$//' | paste -sd, -)
+SST_FILES="$ALL" dune exec --root . test/cpu86_sst386.exe
 ```
 
 ### 어느 칩을 흉내내는가
@@ -92,6 +106,30 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 레지스터는 그대로 둔다. POP r/m 은 쓰기에서 넘쳐도 SP 를 올린 채고, 문자열
 명령은 넘친 접근의 포인터를 이미 옮겼다. REP 의 CX 도 그 반복에서 읽기면
 1, 쓰기면 2 줄어 있다.
+
+`I80386` 은 286 의 실모드 위에 이것이 다르다.
+
+| | I80286 | I80386 |
+|---|---|---|
+| 범용 레지스터 | 16 비트 | 32 비트(`reg32`), 16·8 비트 쓰기는 위 절반을 둔다 |
+| FS·GS | 없다(64h·65h 는 Unsupported) | 접두 64h·65h, MOV sreg 4·5 |
+| FLAGS bit12-14 | 0 | POPF·IRET 로 쓴 값이 남는다(bit15 는 0) |
+| LOCK | 버스 신호로만 쓴다 | 받지 않는 명령이나 레지스터 피연산자면 INT 6 |
+| SS 로 오프셋 FFFF 의 워드 | INT 13 | INT 12 |
+| FFFF 의 마지막 바이트 뒤 | IP 가 0 으로 감는다 | EIP 10000h, 다음 페치가 INT 13 |
+| 결함 난 문자열 명령 | 포인터·CX 를 옮겨 둔다 | 그 반복 앞 값으로 둔다 |
+| 결함 난 POP r/m·POPA | SP 를 올린 채 / 모두 되돌린다 | SP 만 되돌린다(POPA 가 꺼낸 값은 남는다) |
+| BOUND 하한 밖 | 상한을 읽지 않는다 | 상한도 읽는다(FFFF 면 INT 13) |
+| 바이트 SHL·SHR 를 16·24 번 | CF=0 | 8 번일 때의 CF |
+| 명령 길이 | 10 바이트 | 15 바이트 |
+
+기계는 아직 `I80286` 으로 돈다. 32 비트 피연산자·주소와 0Fh 확장(RFC
+0001 2·3 단계)이 있어야 386 을 요구하는 게임이 돈다.
+
+바이트 IDIV 는 286·386 모두 몫이 음수이고 |피젯수| >> 7 이 |젯수| + 80h
+이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도 INT 0 이 아니다.
+AL=80h 이고 AH 는 그 7 비트에 피젯수 부호를 붙인 값이다. 두 스위트의 이
+조건 10 건이 모두 그렇다.
 
 나눗셈 오류(DIV·IDIV·AAM 0)도 286 에서 결함이라 INT 0 이 그 나눗셈
 자신으로 돌아간다. 그래서 INT 0 은 DOS 가 받는다. MS-DOS 2.0 의 DIVOV
