@@ -701,6 +701,56 @@ let test_386_address32 () =
     (Bool.to_int (match Cpu86.step (cpu Cpu86.I80286 "\x67\x8b\x00") with
                   | _ -> false | exception Cpu86.Unsupported _ -> true)) 1
 
+(* The 386's two-byte forms with 16-bit operands (SingleStepTests/80386 0F80-0F9F,
+   0FA0/A1/A8/A9, 0FB6/B7/BE/BF and their 67h forms). *)
+let test_386_0f () =
+  let m386 = Cpu86.I80386 in
+  let zf = Cpu86.f_zero in
+  let ip_after code setup =
+    let t = cpu m386 code in
+    setup t;
+    run t 1;
+    Cpu86.dump_ip t
+  in
+  let with_zf t = Cpu86.set_flags t (Cpu86.flags t lor zf) in
+  check "0f jz rel16 taken" (ip_after "\x0f\x84\x00\x10" with_zf) 0x1004;
+  check "0f jz rel16 not taken" (ip_after "\x0f\x84\x00\x10" nothing_386) 4;
+  check "0f jz rel16 wraps at 16 bits" (ip_after "\x0f\x84\xfd\xff" with_zf) 1;
+  let t, mem = cpu_mem m386 "\x0f\x94\x06\x00\x01\x0f\x95\xc3" in
+  Bytes.set mem 0x100 '\x55';
+  with_zf t;
+  Cpu86.set_reg16 t 3 0xffff;
+  run t 2;
+  check "0f setz [100h]" (Char.code (Bytes.get mem 0x100)) 1;
+  check "0f setnz bl, upper byte stays" (bx t) 0xff00;
+  let t, mem = cpu_mem m386 "\x0f\xb6\x06\x00\x01\x0f\xbe\x1e\x00\x01\x0f\xb7\xc9\x0f\xbf\xd1" in
+  Bytes.set mem 0x100 '\x80';
+  Cpu86.set_reg32 t 0 0x12345678;
+  Cpu86.set_reg32 t 1 0xabcd1234;
+  run t 4;
+  check "0f movzx ax keeps EAX's upper half" (Cpu86.reg32 t 0) 0x12340080;
+  check "0f movsx bx" (bx t) 0xff80;
+  check "0f movzx cx,cx" (cx t) 0x1234;
+  check "0f movsx dx,cx" (Cpu86.reg16 t 2) 0x1234;
+  let t, mem = cpu_mem m386 "\x0f\xa0\x0f\xa9" in
+  Cpu86.set_seg t 4 0x1234;
+  Cpu86.set_seg t 5 0;
+  run t 2;
+  check "0f push fs writes FS" (Char.code (Bytes.get mem 0x100fe) lor (Char.code (Bytes.get mem 0x100ff) lsl 8)) 0x1234;
+  check "0f pop gs" (Cpu86.seg t 5) 0x1234;
+  check "0f push/pop SP" (Cpu86.reg16 t 4) 0x100;
+  let _, got = fault_of m386 "\xf0\x0f\x84\x00\x00" nothing_386 in
+  check_taken "0f lock jz is INT 6" got (Some (6, 0));
+  let raised code =
+    match Cpu86.step (cpu m386 code) with
+    | _ -> false
+    | exception Cpu86.Unsupported _ -> true
+  in
+  check "0f with 66h is not there yet" (Bool.to_int (raised "\x66\x0f\xb6\xc0")) 1;
+  check "lock 0f bts is not there yet" (Bool.to_int (raised "\xf0\x0f\xab\x07")) 1;
+  check "286: 0f 84 is not there" (Bool.to_int (match Cpu86.step (cpu Cpu86.I80286 "\x0f\x84\x00\x00") with
+                                                | _ -> false | exception Cpu86.Unsupported _ -> true)) 1
+
 (* repz stops on a difference, repnz on a match: cmpsb over zeros *)
 let test_rep_kind () =
   List.iter
@@ -717,6 +767,7 @@ let () =
   test_rep_kind ();
   test_386_operand32 ();
   test_386_address32 ();
+  test_386_0f ();
   test_386 ();
   test_faults ();
   test_bcd ();
