@@ -742,14 +742,12 @@ let test_386_0f () =
   check "0f push/pop SP" (Cpu86.reg16 t 4) 0x100;
   let _, got = fault_of m386 "\xf0\x0f\x84\x00\x00" nothing_386 in
   check_taken "0f lock jz is INT 6" got (Some (6, 0));
-  let raised code =
-    match Cpu86.step (cpu m386 code) with
+  let raised_on_286 code =
+    match Cpu86.step (cpu Cpu86.I80286 code) with
     | _ -> false
     | exception Cpu86.Unsupported _ -> true
   in
-  check "0f with 66h is not there yet" (Bool.to_int (raised "\x66\x0f\xb6\xc0")) 1;
-  check "286: 0f 84 is not there" (Bool.to_int (match Cpu86.step (cpu Cpu86.I80286 "\x0f\x84\x00\x00") with
-                                                | _ -> false | exception Cpu86.Unsupported _ -> true)) 1
+  check "286: 0f 84 is not there" (Bool.to_int (raised_on_286 "\x0f\x84\x00\x00")) 1
 
 (* The rest of the 386's 0Fh map with 16-bit operands: BT family, SHLD/SHRD,
    IMUL r16,r/m16, BSF/BSR, LSS/LFS/LGS and CLTS (SingleStepTests/80386 0FA3-0FBD,
@@ -868,6 +866,88 @@ let test_386_0f_bits () =
   let t, _ = run_with "\x0f\x06" nothing_386 in
   check "clts is two bytes" (Cpu86.dump_ip t) 2
 
+(* The 0Fh map with 66h: the same instructions at 32 bits (SingleStepTests/80386
+   660F80-660FBF and their 67h forms). The dword at DS:0100h is 80000001h. *)
+let test_386_0f_32 () =
+  let m386 = Cpu86.I80386 in
+  let cf = Cpu86.f_carry and zf = Cpu86.f_zero in
+  let r32 t n = Cpu86.reg32 t n in
+  let word mem a = Char.code (Bytes.get mem a) lor (Char.code (Bytes.get mem (a + 1)) lsl 8) in
+  let run_with code setup =
+    let t, mem = cpu_mem m386 code in
+    Bytes.blit_string "\x01\x00\x00\x80" 0 mem 0x100 4;
+    setup t;
+    run t 1;
+    (t, mem)
+  in
+  let regs rs t = List.iter (fun (n, v) -> Cpu86.set_reg32 t n v) rs in
+  let carry t = Bool.to_int (Cpu86.flags t land cf <> 0) in
+  let t, _ = run_with "\x66\x0f\x85\x10\x00\x00\x00" nothing_386 in
+  check "jnz rel32" (Cpu86.dump_ip t) 0x17;
+  let _, got = fault_of m386 "\x66\x0f\x85\xf0\xff\xff\xff" nothing_386 in
+  check_taken "jnz rel32 below 0 leaves the CS limit" got (Some (13, 0));
+  let t, _ = run_with "\x66\x0f\x84\x10\x00\x00\x00" nothing_386 in
+  check "jz rel32 not taken" (Cpu86.dump_ip t) 7;
+  let t, mem = run_with "\x66\x0f\xa0" (fun t -> Cpu86.set_seg t 4 0x1234) in
+  check "push fs (66h) moves SP by 4" (Cpu86.reg16 t 4) 0xfc;
+  check "push fs (66h) writes the selector" (word mem 0x100fc) 0x1234;
+  let t, _ = run_with "\x66\x0f\xa1" nothing_386 in
+  check "pop fs (66h) moves SP by 4" (Cpu86.reg16 t 4) 0x104;
+  let t, _ = run_with "\x66\x0f\xa3\xc8" (regs [ (0, 0x10000); (1, 48) ]) in
+  check "bt eax,ecx takes the number mod 32" (carry t) 1;
+  let _, mem = run_with "\x66\x0f\xab\x06\x00\x01" (regs [ (0, 0x8000) ]) in
+  check "bts [100h],eax: 8000h is positive at 32 bits" (word mem 0x1100) 1;
+  let t, _ = run_with "\x67\x66\x0f\xa3\x03" (regs [ (3, 0x104); (0, 0xffffffe0) ]) in
+  check "a32 bt [ebx],eax with -32 reads the dword below" (carry t) 1;
+  let t, _ = run_with "\x66\x0f\xba\xe0\x3f" (regs [ (0, 0x80000000) ]) in
+  check "bt eax,3Fh takes the immediate mod 32" (carry t) 1;
+  let _, mem = run_with "\x66\x0f\xba\x36\x00\x01\x1f" nothing_386 in
+  check "btr dword [100h],31" (word mem 0x102) 0;
+  let t, _ = run_with "\x66\x0f\xa4\xd8\x04" (regs [ (0, 0x12345678); (3, 0x9abcdef0) ]) in
+  check "shld eax,ebx,4" (r32 t 0) 0x23456789;
+  check "shld eax,ebx,4 CF" (carry t) 1;
+  let t, _ = run_with "\x66\x0f\xa4\xd8\x1f" (regs [ (0, 1); (3, 0x80000000) ]) in
+  check "shld eax,ebx,31" (r32 t 0) 0xc0000000;
+  let t, _ = run_with "\x66\x0f\xac\xd8\x04" (regs [ (0, 0x12345678); (3, 0x9abcdef1) ]) in
+  check "shrd eax,ebx,4" (r32 t 0) 0x11234567;
+  check "shrd eax,ebx,4 CF" (carry t) 1;
+  let t, _ = run_with "\x66\x0f\xaf\xca" (regs [ (1, 0x10000); (2, 0x10000) ]) in
+  check "imul ecx,edx low dword" (r32 t 1) 0;
+  check "imul ecx,edx overflow" (carry t) 1;
+  let t, _ = run_with "\x66\x0f\xaf\xca" (regs [ (1, 0xffffffff); (2, 2) ]) in
+  check "imul -1 by 2 (32)" (r32 t 1) 0xfffffffe;
+  check "imul -1 by 2 fits (32)" (carry t) 0;
+  let t, _ = run_with "\x66\x0f\xbc\xc3" (regs [ (3, 0x80000000) ]) in
+  check "bsf eax,ebx" (r32 t 0) 31;
+  let t, _ = run_with "\x66\x0f\xbd\xc3" (regs [ (3, 0x10001) ]) in
+  check "bsr eax,ebx" (r32 t 0) 16;
+  let t, _ = run_with "\x66\x0f\xbc\xc3" (regs [ (0, 0x12345678); (3, 0) ]) in
+  check "bsf of 0 (32) sets ZF" (Bool.to_int (Cpu86.flags t land zf <> 0)) 1;
+  check "bsf of 0 (32) keeps EAX" (r32 t 0) 0x12345678;
+  let t, _ = run_with "\x66\x0f\xb4\x06\x00\x01" (fun t -> Cpu86.set_seg t 4 0x1234) in
+  check "lfs eax,[100h] EAX" (r32 t 0) 0x80000001;
+  check "lfs eax,[100h] FS from 104h" (Cpu86.seg t 4) 0;
+  let _, got = fault_of m386 "\x67\x66\x0f\xb4\x03" (regs [ (3, 0xfffc) ]) in
+  check_taken "a32 lfs eax across FFFFh" got (Some (13, 0));
+  let _, got = fault_of m386 "\x66\x0f\xb2\xc3" nothing_386 in
+  check_taken "lss eax,ebx is INT 6" got (Some (6, 0));
+  let t, _ = run_with "\x66\x0f\xb6\xc0" (regs [ (0, 0xffffff80) ]) in
+  check "movzx eax,al" (r32 t 0) 0x80;
+  let t, _ = run_with "\x66\x0f\xbe\xc0" (regs [ (0, 0x80) ]) in
+  check "movsx eax,al" (r32 t 0) 0xffffff80;
+  let t, _ = run_with "\x66\x0f\xb7\xc3" (regs [ (0, 0xffffffff); (3, 0x8000) ]) in
+  check "movzx eax,bx" (r32 t 0) 0x8000;
+  let t, _ = run_with "\x66\x0f\xbf\xc3" (regs [ (3, 0x8000) ]) in
+  check "movsx eax,bx" (r32 t 0) 0xffff8000;
+  let t, _ =
+    run_with "\x66\x0f\x94\xc0" (fun t ->
+        regs [ (0, 0xff00) ] t;
+        Cpu86.set_flags t (Cpu86.flags t lor zf))
+  in
+  check "sete al ignores 66h" (r32 t 0) 0xff01;
+  let _, got = fault_of m386 "\xf0\x66\x0f\xab\x06\x00\x01" nothing_386 in
+  check_taken "lock bts dword [mem] runs" got None
+
 (* repz stops on a difference, repnz on a match: cmpsb over zeros *)
 let test_rep_kind () =
   List.iter
@@ -886,6 +966,7 @@ let () =
   test_386_address32 ();
   test_386_0f ();
   test_386_0f_bits ();
+  test_386_0f_32 ();
   test_386 ();
   test_faults ();
   test_bcd ();
