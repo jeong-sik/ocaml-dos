@@ -1,0 +1,2 @@
+# SingleStepTests/80386 real mode: allowed failures per file, with why.
+# A line is "<file> <count>"; lines starting with # are comments.
