@@ -265,7 +265,7 @@ let segment_for addr ~default =
   | A16 | A32 -> default
 
 (* 명령 하나의 문맥. 접두를 다 읽고 나면 바뀌지 않는다. [base_ip] 는 첫
-   접두 바이트의 IP 다 — 결함과 Unsupported 가 그 자리로 되돌린다. [ovr] 는
+   접두 바이트의 IP 다 — 결함과 Unsupported 가 그 자리로 되돌린다. [addr] 는
    메모리 피연산자의 규칙([addressing]), [rep] 은 Some true(rep/repz)·Some
    false(repnz). LOCK 은 접두를 읽는 동안 [Cpu86_decode.check_lock] 이 따지고
    끝난다. [opcode] 는 opcode 바이트이고, 386 에서 66h 가 붙어 폭이 32 비트가
