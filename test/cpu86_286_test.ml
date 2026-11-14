@@ -221,10 +221,11 @@ let test_386 () =
   let t = cpu m386 "\x54\x58" in
   run t 2;
   check "386 push sp pushes the SP before the push" (ax t) 0x0100;
-  let raised code =
-    match Cpu86.step (cpu m386 code) with _ -> false | exception Cpu86.Unsupported _ -> true
-  in
-  check "386: 0x0F is not POP CS" (Bool.to_int (raised "\x0f\x06")) 1;
+  (* 0F 06 is CLTS on the 386: POP CS would move SP up by two *)
+  let t = cpu m386 "\x0f\x06" in
+  let sp_before = Cpu86.reg16 t 4 in
+  run t 1;
+  check "386: 0x0F is not POP CS" (Cpu86.reg16 t 4) sp_before;
   (* mov fs,ax; mov bx,fs; then fs: mov al,[0010h] with DS on zeros *)
   let t = cpu m386 ("\x8e\xe0\x8c\xe3\x64\xa0\x10\x00" ^ String.make 8 '\x00' ^ "\x5a") in
   Cpu86.set_reg16 t 0 0;
@@ -747,9 +748,109 @@ let test_386_0f () =
     | exception Cpu86.Unsupported _ -> true
   in
   check "0f with 66h is not there yet" (Bool.to_int (raised "\x66\x0f\xb6\xc0")) 1;
-  check "lock 0f bts is not there yet" (Bool.to_int (raised "\xf0\x0f\xab\x07")) 1;
   check "286: 0f 84 is not there" (Bool.to_int (match Cpu86.step (cpu Cpu86.I80286 "\x0f\x84\x00\x00") with
                                                 | _ -> false | exception Cpu86.Unsupported _ -> true)) 1
+
+(* The rest of the 386's 0Fh map with 16-bit operands: BT family, SHLD/SHRD,
+   IMUL r16,r/m16, BSF/BSR, LSS/LFS/LGS and CLTS (SingleStepTests/80386 0FA3-0FBD,
+   0F06 and their 67h forms). Words at DS:0100h. *)
+let test_386_0f_bits () =
+  let m386 = Cpu86.I80386 in
+  let cf = Cpu86.f_carry and zf = Cpu86.f_zero in
+  let word mem a = Char.code (Bytes.get mem a) lor (Char.code (Bytes.get mem (a + 1)) lsl 8) in
+  let poke16 mem a v =
+    Bytes.set mem a (Char.chr (v land 0xff));
+    Bytes.set mem (a + 1) (Char.chr (v lsr 8))
+  in
+  let run_with code setup =
+    let t, mem = cpu_mem m386 code in
+    poke16 mem 0x100 0x0001;
+    poke16 mem 0x102 0x8000;
+    setup t;
+    run t 1;
+    (t, mem)
+  in
+  let regs rs t = List.iter (fun (n, v) -> Cpu86.set_reg16 t n v) rs in
+  let carry t = Bool.to_int (Cpu86.flags t land cf <> 0) in
+  let t, _ = run_with "\x0f\xa3\xc8" (regs [ (0, 0x0002); (1, 17) ]) in
+  check "bt ax,cx takes the number mod 16" (carry t) 1;
+  let t, _ = run_with "\x0f\xa3\x06\x00\x01" (regs [ (0, 31) ]) in
+  check "bt [100h],ax moves a word up" (carry t) 1;
+  let t, _ = run_with "\x0f\xa3\x06\x02\x01" (regs [ (0, 0xffff) ]) in
+  check "bt [102h],ax with -1 reads bit 15 of [100h]" (carry t) 0;
+  let _, mem = run_with "\x0f\xab\x06\x00\x01" (regs [ (0, 4) ]) in
+  check "bts [100h],ax" (word mem 0x100) 0x0011;
+  let _, mem = run_with "\x0f\xb3\x06\x00\x01" (regs [ (0, 0) ]) in
+  check "btr [100h],ax" (word mem 0x100) 0;
+  let _, mem = run_with "\x0f\xbb\x06\x00\x01" (regs [ (0, 16 + 15) ]) in
+  check "btc [100h],ax lands in [102h]" (word mem 0x102) 0;
+  let t, _ = run_with "\x0f\xba\x26\x02\x01\x1f" nothing_386 in
+  check "bt [102h],1Fh takes the immediate mod 16" (carry t) 1;
+  let _, got = fault_of m386 "\x0f\xba\x06\x00\x01\x00" nothing_386 in
+  check_taken "0f ba /0 is INT 6" got (Some (6, 0));
+  let lock_fault code = snd (fault_of m386 code nothing_386) in
+  check_taken "lock bts [mem] runs" (lock_fault "\xf0\x0f\xab\x06\x00\x01") None;
+  check_taken "lock btr [mem] runs" (lock_fault "\xf0\x0f\xb3\x06\x00\x01") None;
+  check_taken "lock bts [mem],imm runs" (lock_fault "\xf0\x0f\xba\x2e\x00\x01\x01") None;
+  check_taken "lock bt [mem] is INT 6" (lock_fault "\xf0\x0f\xa3\x06\x00\x01") (Some (6, 0));
+  check_taken "lock bt [mem],imm is INT 6" (lock_fault "\xf0\x0f\xba\x26\x00\x01\x01") (Some (6, 0));
+  check_taken "lock bts reg is INT 6" (lock_fault "\xf0\x0f\xab\xc8") (Some (6, 0));
+  let t, _ = run_with "\x0f\xa4\xd8\x04" (regs [ (0, 0x1234); (3, 0xabcd) ]) in
+  check "shld ax,bx,4" (ax t) 0x234a;
+  check "shld ax,bx,4 CF" (carry t) 1;
+  let t, _ = run_with "\x0f\xa5\xd8" (regs [ (0, 0x1234); (3, 0xabcd); (1, 0x24) ]) in
+  check "shld ax,bx,cl takes CL mod 32" (ax t) 0x234a;
+  let t, _ = run_with "\x0f\xa4\xd8\x12" (regs [ (0, 0); (3, 0x4088) ]) in
+  check "shld ax,bx,18 rotates BX by 2" (ax t) 0x0221;
+  check "shld ax,bx,18 CF" (carry t) 1;
+  let t, _ = run_with "\x0f\xac\xd8\x04" (regs [ (0, 0x1234); (3, 0xabcd) ]) in
+  check "shrd ax,bx,4" (ax t) 0xd123;
+  check "shrd ax,bx,4 CF" (carry t) 0;
+  let t, _ = run_with "\x0f\xac\xd8\x12" (regs [ (0, 0xffff); (3, 0x4089) ]) in
+  check "shrd ax,bx,18 rotates BX by 2" (ax t) 0x5022;
+  check "shrd ax,bx,18 CF" (carry t) 0;
+  let t, _ = run_with "\x0f\xa4\xd8\x00" (regs [ (0, 0x1234); (3, 0xabcd) ]) in
+  check "shld by 0 keeps AX" (ax t) 0x1234;
+  let t, _ =
+    run_with "\x0f\xa4\xd8\x00" (fun t ->
+        regs [ (0, 0x1234); (3, 0xabcd) ] t;
+        Cpu86.set_flags t (Cpu86.flags t lor cf lor zf))
+  in
+  check "shld by 0 keeps CF and ZF" (Cpu86.flags t land (cf lor zf)) (cf lor zf);
+  let _, got = fault_of m386 "\x0f\xa4\x3d\x00" (regs [ (7, 0xffff) ]) in
+  check_taken "shld [di],di,0 still reads the word at FFFFh" got (Some (13, 0));
+  let t, _ = run_with "\x0f\xaf\xca" (regs [ (1, 0x100); (2, 0x100) ]) in
+  check "imul cx,dx low word" (cx t) 0;
+  check "imul cx,dx overflow" (carry t) 1;
+  let t, _ = run_with "\x0f\xaf\xca" (regs [ (1, 0xffff); (2, 2) ]) in
+  check "imul -1 by 2" (cx t) 0xfffe;
+  check "imul -1 by 2 fits" (carry t) 0;
+  let t, _ = run_with "\x0f\xaf\xca" (regs [ (1, 0x8000); (2, 1) ]) in
+  check "imul -8000h by 1 fits" (carry t) 0;
+  let t, _ = run_with "\x0f\xbc\xc3" (regs [ (3, 0x0050) ]) in
+  check "bsf ax,bx" (ax t) 4;
+  let t, _ = run_with "\x0f\xbd\xc3" (regs [ (3, 0x0050) ]) in
+  check "bsr ax,bx" (ax t) 6;
+  let t, _ = run_with "\x0f\xbc\xc3" (regs [ (0, 0x1234); (3, 0) ]) in
+  check "bsf of 0 sets ZF" (Bool.to_int (Cpu86.flags t land zf <> 0)) 1;
+  check "bsf of 0 keeps AX" (ax t) 0x1234;
+  let t, _ = run_with "\x0f\xb4\x06\x00\x01" nothing_386 in
+  check "lfs ax,[100h] AX" (ax t) 1;
+  check "lfs ax,[100h] FS" (Cpu86.seg t 4) 0x8000;
+  let t, _ = run_with "\x0f\xb5\x06\x00\x01" nothing_386 in
+  check "lgs GS" (Cpu86.seg t 5) 0x8000;
+  let t, _ = run_with "\x0f\xb2\x06\x00\x01" nothing_386 in
+  check "lss SS" (Cpu86.seg t 2) 0x8000;
+  let _, got = fault_of m386 "\x0f\xb2\xc3" nothing_386 in
+  check_taken "lss ax,bx is INT 6" got (Some (6, 0));
+  (* 16-bit addresses wrap the second word to offset 0 (0FB4, C4, C5: the one
+     test each at EA FFFEh runs); a word at FFFFh is INT 13 *)
+  let t, _ = run_with "\x0f\xb4\x07" (regs [ (3, 0xfffe) ]) in
+  check "lfs ax,[bx] at FFFEh takes FS from offset 0" (Cpu86.seg t 4) 0xb40f;
+  let _, got = fault_of m386 "\x0f\xb4\x07" (regs [ (3, 0xfffd) ]) in
+  check_taken "lfs ax,[bx] at FFFDh reads a word at FFFFh" got (Some (13, 0));
+  let t, _ = run_with "\x0f\x06" nothing_386 in
+  check "clts is two bytes" (Cpu86.dump_ip t) 2
 
 (* repz stops on a difference, repnz on a match: cmpsb over zeros *)
 let test_rep_kind () =
@@ -768,6 +869,7 @@ let () =
   test_386_operand32 ();
   test_386_address32 ();
   test_386_0f ();
+  test_386_0f_bits ();
   test_386 ();
   test_faults ();
   test_bcd ();

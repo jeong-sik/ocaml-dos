@@ -198,6 +198,9 @@ let segment_limit = 0xffff
 let within t sreg off size =
   if off + size - 1 > segment_limit then fault (overrun_vector t sreg)
 
+(* 16 비트 far 포인터 m16:16 이 차지하는 바이트(LES·LDS·LSS·LFS·LGS, FF /3·/5). *)
+let far_pointer16_bytes = 4
+
 (* 한 피연산자를 여러 번 나눠 읽는 명령(far 포인터, BOUND, ESC)이 먼저 부른다:
    [Mem32] 면 [size] 바이트 전체가 한계 안인지 따진다. [Mem] 은 지금처럼 접근
    하나하나가 따진다. *)
@@ -326,23 +329,33 @@ let lock_regs = function
 (* 두 바이트 명령의 머리. *)
 let two_byte_escape = 0x0f
 
+(* 0F 가운데 LOCK 을 받는 형태: 메모리 피연산자의 BTS·BTR·BTC r/m16,r16(0F AB·
+   B3·BB)과 BTS·BTR·BTC r/m16,imm8(0F BA /5-7)이다. 80386.csv 의 lck 열은 0F B3
+   을 0 으로 적었지만 칩은 받는다(0FB3·670FB3 의 LOCK BTR 99 건이 결함 없이 돈다). *)
+let lockable_0f op2 modrm =
+  modrm lsr 6 <> 3
+  && (match op2 with
+      | 0xab | 0xb3 | 0xbb -> true
+      | 0xba -> (modrm lsr 3) land 7 >= 5
+      | _ -> false)
+
 (* 386 은 LOCK 을 받지 않는 명령에 붙은 LOCK 을 INT 6 결함으로 거절한다.
    받는 명령도 고칠 피연산자가 레지스터면(modrm mod=3) INT 6 이다
    (SingleStepTests/80386 00 의 lock add dh,bh 같은 테스트). 0F 는 둘째
-   바이트가 정한다. 지금 있는 0F 명령은 LOCK 을 받지 않아 INT 6 이고, 받는
-   BTS·BTR·BTC(0F AB·B3·BB·BA)는 아직 없어 Unsupported 다. 8086·186·286 은 LOCK 을
+   바이트와 modrm 이 정한다([lockable_0f]). 8086·186·286 은 LOCK 을
    버스 신호로만 쓰고 명령은 그대로 돈다. modrm 은 들여다보기만 하고 IP 를
    되돌린다. LOCK 접두가 붙은 명령에서만 부른다. *)
 let check_lock t ctx =
   match t.model with
   | I8086 | I80186 | I80286 -> ()
   | I80386 ->
-    if ctx.opcode = two_byte_escape then
-      (match fetch8 t with
-       | (0xab | 0xb3 | 0xbb | 0xba) as op2 ->
-         unsupported t ctx (Printf.sprintf "lock 0f %02x (386)" op2)
-       | _ -> fault vector_invalid_opcode)
-    else
+    if ctx.opcode = two_byte_escape then begin
+      let after_opcode = t.ip in
+      let op2 = fetch8 t in
+      let modrm = fetch8 t in
+      t.ip <- after_opcode;
+      if not (lockable_0f op2 modrm) then fault vector_invalid_opcode
+    end else
       match lock_regs ctx.opcode with
       | None -> fault vector_invalid_opcode
       | Some regs ->
