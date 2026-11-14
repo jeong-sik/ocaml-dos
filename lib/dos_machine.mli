@@ -15,7 +15,9 @@
 
 type t = Dos_state.t
 
-val create : unit -> t
+val create : ?model:Cpu86.model -> unit -> t
+(** [model] 은 기본이 [I80286] 이다. [I80386] 이면 게스트가 32 비트 레지스터,
+    FS·GS, 0Fh 명령을 쓰고, CPU 판별이 386 을 본다. *)
 
 (** {1 적재} *)
 

@@ -294,6 +294,12 @@ let unsupported t ctx what =
 
 (* ---------- saved state ---------- *)
 
+type saved_386 = {
+  saved_regs_hi : int array;
+  saved_fs : int;
+  saved_gs : int;
+}
+
 type saved = {
   saved_regs : int array;
   saved_segs : int array;
@@ -301,19 +307,21 @@ type saved = {
   saved_flags : int;
   saved_halted : bool;
   saved_cycles : int;
+  saved_386 : saved_386 option;
 }
+
+let model t = t.model
+
+(* ES CS SS DS: the segments every model has. *)
+let classic_segments = segment_count I8086
 
 (* The full pattern is the point: a field added to [t] fails the build here
    until a snapshot either carries it or says why it does not. *)
 let save_state t =
-  (match t.model with
-   | I80386 ->
-     invalid_arg "Cpu86.save_state: the 80386 state has no snapshot form yet (RFC 0001 stage 4)"
-   | I8086 | I80186 | I80286 -> ());
-  let { model = _ (* fixed by whoever creates the CPU *);
+  let { model (* fixed by whoever creates the CPU; picks what [saved_386] holds *);
         addr_mask = _ (* derived from the model *);
-        regs; segs; ip;
-        regs_hi = _; iopl_nt = _ (* 80386 only, refused above *);
+        regs; segs; ip; regs_hi;
+        iopl_nt = _ (* in the flags word, [flags t] *);
         cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
         of_ = _ (* the nine flags travel as one word, [flags t] *);
         halted; cycles;
@@ -324,12 +332,37 @@ let save_state t =
         int_hook = _; read = _; write = _; port_in = _; port_out = _
         (* closures: the machine that owns this CPU wires them *) } = t
   in
-  { saved_regs = Array.copy regs; saved_segs = Array.copy segs; saved_ip = ip;
-    saved_flags = flags t; saved_halted = halted; saved_cycles = cycles }
+  let saved_386 =
+    match model with
+    | I80386 ->
+      Some { saved_regs_hi = Array.copy regs_hi; saved_fs = segs.(sreg_fs);
+             saved_gs = segs.(sreg_gs) }
+    | I8086 | I80186 | I80286 -> None
+  in
+  { saved_regs = Array.copy regs; saved_segs = Array.sub segs 0 classic_segments;
+    saved_ip = ip; saved_flags = flags t; saved_halted = halted; saved_cycles = cycles;
+    saved_386 }
 
+(* Everything is checked before anything is written: a refused state leaves
+   the CPU as it was. *)
 let load_state t s =
-  if Array.length s.saved_regs <> 8 || Array.length s.saved_segs <> 4 then
+  if Array.length s.saved_regs <> Array.length t.regs
+     || Array.length s.saved_segs <> classic_segments then
     invalid_arg "Cpu86.load_state: 8 registers and 4 segments";
+  (match t.model, s.saved_386 with
+   | I80386, Some x ->
+     if Array.length x.saved_regs_hi <> upper_halves I80386 then
+       invalid_arg "Cpu86.load_state: 8 upper halves"
+   | I80386, None -> invalid_arg "Cpu86.load_state: an 80386 needs its upper halves, FS and GS"
+   | (I8086 | I80186 | I80286), Some _ ->
+     invalid_arg "Cpu86.load_state: 80386 state for an older model"
+   | (I8086 | I80186 | I80286), None -> ());
+  (match s.saved_386 with
+   | Some x ->
+     Array.iteri (fun i v -> t.regs_hi.(i) <- v land 0xffff) x.saved_regs_hi;
+     set_seg t sreg_fs x.saved_fs;
+     set_seg t sreg_gs x.saved_gs
+   | None -> ());
   Array.iteri (fun i v -> set_reg16 t i v) s.saved_regs;
   Array.iteri (fun i v -> set_seg t i v) s.saved_segs;
   set_ip t s.saved_ip;
