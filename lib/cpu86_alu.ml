@@ -298,6 +298,17 @@ let dword_mask = width_mask 32
 let dword_sign = width_sign 32
 let sign32 v = if v land dword_sign <> 0 then v - (dword_mask + 1) else v
 
+(* IMUL r16, r/m16(0F AF)과 r16, r/m16, imm(69·6B)이 같이 쓴다. 아래 16 비트를
+   돌려준다. CF=OF 는 곱이 16 비트 부호 값에 들지 않을 때다. SF·ZF·AF·PF 는 정의
+   안 된 플래그라 그대로 둔다. *)
+let imul16 t a b =
+  let sx v = if v >= 0x8000 then v - 0x10000 else v in
+  let p = sx a * sx b in
+  let fits = p <= 0x7fff && p >= -0x8000 in
+  t.cf <- not fits;
+  t.of_ <- not fits;
+  p land 0xffff
+
 (* 32 비트 곱의 아래·위 32 비트. 곱이 64 비트라 OCaml int(63 비트)를 넘을 수
    있어 Int64 로 한다 — 부호 없는 곱도 2^64 안이라 Int64.mul 의 잘린 값이
    그대로 맞다. *)

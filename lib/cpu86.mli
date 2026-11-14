@@ -51,10 +51,15 @@
     인덱스가 없으면 배율이 베이스에 곱해진다. POP r/m 의 [esp+...] 는 pop 한
     뒤의 ESP 로 센다.
 
-    0x0F 확장은 RFC 0001 3 단계로 하나씩 더한다. 지금은 16 비트 피연산자의
-    Jcc rel16(IP 는 16 비트에서 감는다), SETcc, MOVZX·MOVSX, FS·GS 의 PUSH·POP
-    이 있다. 이 명령에 붙은 LOCK 은 INT 6 이다. 나머지 0x0F 와 66h 가 붙은
-    0x0F 는 [Unsupported] 다.
+    0x0F 확장(RFC 0001 3 단계)은 16 비트 피연산자 형태가 다 있다: Jcc rel16
+    (IP 는 16 비트에서 감는다), SETcc, MOVZX·MOVSX, FS·GS 의 PUSH·POP,
+    BT·BTS·BTR·BTC, SHLD·SHRD, IMUL r16,r/m16, BSF·BSR, LSS·LFS·LGS, CLTS 다.
+    설명서가 정하지 않은 자리에서 실칩은 이렇게 한다. SHLD·SHRD 의 횟수가
+    17-31 이면 결과는 원본을 (횟수-16) 만큼 돌린 값이다. 횟수가 0 이어도
+    메모리 피연산자를 읽는다. BSF·BSR 의 원본이 0 이면 대상은 그대로다.
+    LOCK 은 메모리를 바꾸는 BTS·BTR·BTC 에만 붙고, 나머지는 INT 6 이다.
+    80386.csv 의 lck 열은 BTR(0F B3)을 0 으로 적었지만 실칩은 LOCK BTR 을
+    실행한다. 66h 가 붙은 0x0F 는 [Unsupported] 다.
     근거는 SingleStepTests/80386 실모드다. *)
 type model = I8086 | I80186 | I80286 | I80386
 
