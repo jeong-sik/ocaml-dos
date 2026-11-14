@@ -205,7 +205,42 @@ let test_faults () =
   let _, got = fault_of Cpu86.I80186 bound above in
   check_taken "186 bound" got (Some (5, 4))
 
+(* A word the CPU reads byte by byte goes low byte first: on the 286 an odd
+   word in memory is two bus cycles, offset o then o+1, and a word port is p
+   then p+1 (SingleStepTests/80286 cycle traces: 8B 1,910 reads, E5 2,540
+   port reads, all low first). A device whose reads have effects sees that
+   order: the VGA latches keep the last byte read. *)
+let test_bus_order () =
+  let mem = Bytes.make (1024 * 1024) '\000' in
+  Bytes.blit_string "\x8b\x06\x03\x00\xe5\x41" 0 mem 0 6;
+  let reads = ref [] and ports = ref [] in
+  let data_base = 0x1000 in
+  let read a =
+    if a >= data_base then reads := a :: !reads;
+    Char.code (Bytes.get mem (a land 0xfffff))
+  in
+  let port_in p = ports := p :: !ports; 0xff in
+  let t =
+    Cpu86.create ~model:Cpu86.I80286 ~read ~write:(fun _ _ -> ()) ~port_in
+      ~port_out:(fun _ _ -> ()) ()
+  in
+  Cpu86.set_seg t 1 0;
+  Cpu86.set_ip t 0;
+  Cpu86.set_seg t 3 (data_base lsr 4);
+  run t 2;
+  let order name got want =
+    if got <> want then begin
+      incr failed;
+      Printf.eprintf "FAIL %s: got [%s] want [%s]\n%!" name
+        (String.concat ";" (List.map (Printf.sprintf "%x") got))
+        (String.concat ";" (List.map (Printf.sprintf "%x") want))
+    end
+  in
+  order "mov ax,[3] reads 1003h then 1004h" (List.rev !reads) [ 0x1003; 0x1004 ];
+  order "in ax,41h reads port 41h then 42h" (List.rev !ports) [ 0x41; 0x42 ]
+
 let () =
+  test_bus_order ();
   test_faults ();
   test_bcd ();
   test_divide_fault ();

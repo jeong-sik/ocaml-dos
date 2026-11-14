@@ -79,9 +79,16 @@ let overruns t off =
 
 let check_word t off = if overruns t off then fault vector_segment_overrun
 
+(* 낮은 바이트부터 읽는다. OCaml 은 [lor] 의 오른쪽을 먼저 계산해서(ocamlopt
+   5.5.2 실측) 한 식으로 쓰면 o+1 을 먼저 읽는다. 286 은 홀수 워드를 o, o+1
+   순서의 두 버스 사이클로 읽고(SingleStepTests/80286 8B 사이클 기록 1,910
+   건), 읽기에 부수효과가 있는 장치는 그 순서를 본다 — VGA 래치는 마지막에
+   읽은 바이트를 들고 있다. *)
 let read16 t b o =
   check_word t o;
-  t.read (at t b o) lor (t.read (at t b (o + 1)) lsl 8)
+  let lo = t.read (at t b o) in
+  let hi = t.read (at t b (o + 1)) in
+  lo lor (hi lsl 8)
 
 let write16 t b o v =
   check_word t o;
@@ -100,9 +107,12 @@ let op_write t width opd v =
 (* 포트는 바이트 폭이다. 워드 접근은 p 와 p+1 두 번 — 한 번으로
    줄이면 상위 바이트가 늘 0 이 되고, 장치 쪽에서도 두 번째 포트의
    부수효과(DAC 데이터 레지스터 등)가 사라진다. IN/OUT 과 INSW/OUTSW 가
-   같이 쓴다. *)
+   같이 쓴다. 읽기는 [read16] 처럼 p 부터다(SingleStepTests/80286 E5 2,540
+   건). *)
 let port_in16 t p =
-  (t.port_in p land 0xff) lor ((t.port_in ((p + 1) land 0xffff) land 0xff) lsl 8)
+  let lo = t.port_in p land 0xff in
+  let hi = t.port_in ((p + 1) land 0xffff) land 0xff in
+  lo lor (hi lsl 8)
 
 let port_out16 t p v =
   t.port_out p (v land 0xff);
