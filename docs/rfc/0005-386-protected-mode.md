@@ -123,6 +123,20 @@ with an LTR instruction, not a task switch").
   기대값이다.
 - 확인: 러너가 같은 ROM 에서 늘 같은 POST 열을 낸다. 실모드 POST 에서 실패가
   나오면 그 명령을 고치는 PR 을 따로 낸다.
+- 미리 잰 값(2026-11-16, #166 머리 `8516ca3a`, test386.asm `cfd052d`):
+  - POST 열은 `00 01 02 03 04 05 06 08` 이다. 793,772 스텝 뒤 f000:2662 의
+    `66 0F 01`(32 비트 LGDT·LIDT)에서 `Unsupported` 로 멈춘다.
+  - `INT`·결함은 러너가 실칩처럼 IVT 로 보낸다. FLAGS·CS·IP 를 넣고 IF·TF 를
+    끈다.
+  - 러너가 실패를 잡는지 CPU 를 세 군데 망가뜨려 봤다. MUL r/m32 가 EDX 를 버리면
+    POST 02 에서, 문자열이 DF 를 무시하면 04 에서, LSS·LFS 가 세그먼트를 오프셋
+    자리에서 읽으면 06 에서 멈춘다. 세 경우 모두 `error` 자리(f000:fe8a)의
+    HLT 다.
+  - NASM 3.02 는 이 소스를 빌드하지 못한다. 메모리 대상에 크기를 즉시값 쪽에만
+    붙인 줄(`mov [eax*4], word error`)에서 "size wasn't specified" 로 멈춘다.
+    이런 줄이 110 개다. 사본에서 `mov word [eax*4], error` 꼴로 옮겨 빌드했다.
+    NASM 2 가 같은 줄을 읽던 뜻(피연산자 크기는 그 크기, 즉시값은 줄일 수 있음)과
+    같은 꼴이다.
 
 ### 1 단계: 디스크립터 캐시
 
@@ -201,6 +215,7 @@ with an LTR instruction, not a task switch").
 
 1. 386 실모드 PR 묶음(#154-#166)이 병합되기 전에 0 단계를 시작할지.
 2. CI 에서 test386 을 받아 NASM 으로 빌드해 돌릴지. CI 를 바꾸는 일이다.
+   NASM 3 에서는 소스 110 줄을 고쳐야 하니 NASM 2.16 을 고정할지도 같이 정한다.
 3. XMS 저장소를 CPU 메모리로 합칠지, 아니면 둘을 따로 두고 1MB 위 메모리를
    새로 둘지.
 4. 7 단계를 무엇으로 확인할지(로컬 DOS/4GW 프로그램).
@@ -209,7 +224,7 @@ with an LTR instruction, not a task switch").
 
 | 단계 | 확인 |
 |---|---|
-| 0 | test386 러너가 같은 POST 열을 낸다. 실모드 POST 0x00-0x06 |
+| 0 | test386 러너가 같은 POST 열을 낸다. 실모드 POST 0x00-0x06(미리 잰 값: 통과, 0x08 의 `66 0F 01` 에서 멈춤) |
 | 1 | 실모드 스위트·삼국지3 같음, 명령 수 ±3% |
 | 2 | XMS 시험 같음, A20 감기 |
 | 3 | test386 POST 0x08 통과 |
