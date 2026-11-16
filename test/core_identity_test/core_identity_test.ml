@@ -17,7 +17,9 @@ let check_s name got want =
     Printf.eprintf "FAIL %s:\n  got=%S\n  want=%S\n%!" name got want
   end
 
-let lib_dir = Filename.concat Filename.parent_dir_name "lib"
+(* The test runs in _build/default/test/core_identity_test. *)
+let lib_dir =
+  Filename.concat (Filename.concat Filename.parent_dir_name Filename.parent_dir_name) "lib"
 
 let lib_sources () =
   Sys.readdir lib_dir |> Array.to_list
