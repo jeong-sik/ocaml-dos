@@ -32,12 +32,25 @@ let accept_service t ~return_to = function
 
 (* [None]: IVT 가 0:0 인 벡터. 실기라면 0000:0000 으로 뛴다. *)
 let host_service t ~return_to v =
+  if v = Dos_bios.xms_control_id then begin
+    (* The XMS control function is a far-called stub, not a vector:
+       IVT[43h] stays the IRET stub. A move copies the way HIMEM's own
+       MOVSW does: through the CPU's bus, so the planar video window
+       takes it like guest stores. *)
+    Dos_xms.control t.xms t.cpu ~read:(Cpu86.bus_read t.cpu)
+      ~write:(Cpu86.bus_write t.cpu);
+    Completed
+  end
+  else
   match Dos_bios.host_vector v with
   | Some Dos_divide_overflow -> Dos_dos.divide_overflow t; Control_transferred
   | Some Dos_terminate -> Dos_dos.terminate t; Control_transferred
   | Some Dos_call -> Dos_dos.service t ~return_to
   | Some Dos_keep -> Dos_dos.int27 t; Control_transferred
   | Some Ems -> Dos_ems.service t; Completed
+  | Some Multiplex ->
+    Dos_xms.multiplex t.cpu ~entry:(Dos_bios.rom_seg, Dos_bios.xms_entry_off);
+    Completed
   | Some (Bios s) -> Dos_bios.service t s
   | None -> Completed
 
@@ -50,7 +63,7 @@ let service_status_mask t v =
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
-  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
+  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
 let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false) () =
@@ -108,6 +121,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
       ems_names = Hashtbl.create 1;
+      xms = Dos_xms.create ();
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면

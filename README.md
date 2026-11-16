@@ -195,6 +195,10 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   날짜·시각, InDOS 주소(34h), 확장 에러(59h), 국가 정보(38h, 미국 437만),
   벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
+- **XMS 3.0**: INT 2Fh AX=4300h·4310h 로 찾는 HIMEM 자리. 100000h 부터
+  15MB 를 KB 단위 first fit 으로 나눠 주고, 핸들 32개, 잠금, 크기 바꾸기,
+  이동(0Bh)을 받는다. 이동은 CPU 버스를 지나서 평면 그래픽 창도 게스트
+  쓰기처럼 받는다. HMA·A20·UMB 는 없다
 - **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), 8259 PIC(IRR·
   ISR·마스크, EOI 두 가지, OCW3 읽기 — IRQ0 이 IRQ1 보다 앞선다), 8042
   키보드 컨트롤러(0x60 데이터·0x64 상태, 바이트마다 IRQ1, 컨트롤러·키보드 명령), 8237 DMA
@@ -565,6 +569,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_bios` | ROM·IVT·BDA 와 INT 09h/10h/11h/12h/16h/1Ah/33h |
 | `Dos_mouse_space` | 마우스 가상 화면 — 비디오 모드마다 좌표 넓이와 한 칸의 크기(CuteMouse 표) |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
+| `Dos_xms` | XMS 3.0 드라이버 — 확장 메모리 블록, 잠금, 이동, INT 2Fh 답 |
 | `Dos_fcb_parse` | INT 21h AH=29h — 글자열을 FCB 의 드라이브·이름·확장자로 나눈다(MS-DOS 4.0 `MakeFcb`) |
 | `Dos_country` | 미국(국가 1) 437 의 대문자 표와 INT 21h AH=38h 가 주는 24 바이트 표 |
 | `Dos_render` | 화면을 텍스트와 RGB 로 |

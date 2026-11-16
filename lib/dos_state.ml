@@ -249,6 +249,7 @@ type t = {
         (** 핸들 → AH=53h 로 붙인 이름. 여덟 바이트이고, 첫 NUL 뒤는 모두
             NUL 이다. 이름이 없는(모두 NUL) 핸들은 없고, 같은 이름은 둘
             없다. *)
+  xms : Dos_xms.t;                            (** XMS 드라이버(INT 2Fh AH=43h) *)
   mouse : mouse;
 }
 

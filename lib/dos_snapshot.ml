@@ -61,8 +61,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    right after it with the cycle of its next output rise (IRQ0); the
    machine no longer carries the cycle of its last IRQ0.
    23: the DMA controller (per channel: base and current address and count,
-   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC. *)
-let format_version = 23
+   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC.
+   24: the XMS driver's blocks (place, size, lock count, bytes) follow the
+   clock, before EMS. *)
+let format_version = 24
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -325,7 +327,7 @@ let write_payload w t =
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
         epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved; ems_names;
-        mouse } = t
+        mouse; xms } = t
   in
   let put what r v = C.put w ~what r v in
   put "cpu model" C.byte (model_code (Cpu86.model cpu));
@@ -377,6 +379,7 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  Dos_xms.write_state w xms;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
       put "EMS handle" ems_handle_key k;
@@ -645,6 +648,7 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  Dos_xms.read_state r t.xms;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in
