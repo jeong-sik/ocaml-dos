@@ -12,7 +12,7 @@ open Dos_state
 (* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
    전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
    삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x09; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
+let host_served = [ 0x00; 0x09; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
@@ -151,6 +151,12 @@ let private_service_vector t raw =
 let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
+
+(* 포트 0x3D9 의 비트: 하위 4 비트가 바탕색, 비트 4 가 밝기, 비트 5 가
+   팔레트(Dos_render.cga4_colors). *)
+let cga_color_select_port = 0x3D9
+let cga_background_bits = 0x1F
+let cga_palette_bit = 0x20
 
 let video t =
   let cpu = t.cpu in
@@ -308,6 +314,20 @@ let video t =
     Cpu86.set_reg8 cpu 0 0x1A;
     Cpu86.set_reg8 cpu 3 0x08;
     Cpu86.set_reg8 cpu 7 0x00
+  | 0x0B ->
+    (* CGA 색 선택. BH=0 은 BL 의 하위 5 비트(바탕색 4 비트 + 밝기)를,
+       BH=1 은 BL 비트 0 으로 팔레트를 바꾼다. 나머지 비트는 그대로다.
+       SeaBIOS vgasrc/stdvga.c(28aa46349b97)의
+       stdvga_set_cga_background_color·stdvga_set_cga_palette 가 바꾸는
+       자리와 같다. 그 BIOS 는 VGA 속성 레지스터로 흉내 내고, 이 기계는
+       CGA 처럼 포트 0x3D9 로 그린다. 다른 BH 는 SeaBIOS 처럼 무시한다. *)
+    let old = Dos_video.cga_color_select t.video and bl = Cpu86.reg8 cpu 3 in
+    let set v = Dos_ports.port_out t.ports cga_color_select_port v in
+    (match Cpu86.reg8 cpu 7 with
+     | 0x00 -> set ((old land lnot cga_background_bits) lor (bl land cga_background_bits))
+     | 0x01 ->
+       set ((old land lnot cga_palette_bit) lor (if bl land 1 = 0 then 0 else cga_palette_bit))
+     | _ -> ())
   | _ -> ()
 
 (* ---------- INT 16h 키보드 ---------- *)
@@ -405,14 +425,39 @@ let clock t =
 (* 마우스는 하네스가 움직인다. 기본은 장착 — KOEI 계열 게임은 부팅에서
    AX=0 으로 드라이버를 검사하고, 없으면 키보드 모드로 강제한다.
    AX=0x0C 로 건 핸들러는 Dos_machine.set_mouse 가 이벤트와 함께 부른다. *)
+let mouse_driver_installed = 0xFFFF
+let mouse_buttons_reported = 2
+
+(* 00h 와 21h 가 함께 되돌리는 드라이버 상태. HelpPC 2.10 INT 33,0: 커서를
+   숨기고, 사용자 핸들러 마스크를 0 으로 하고, 범위를 모드 최대로 한다.
+   마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이 건 핸들러가
+   그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로 옮기지는
+   않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
+let reset_mouse_driver m =
+  m.mouse_visible <- false;
+  m.mouse_handler_mask <- 0;
+  m.mouse_range_x <- None;
+  m.mouse_range_y <- None;
+  List.iter
+    (Array.iter (fun (l : button_log) -> l.times <- 0; l.last_x <- 0; l.last_y <- 0))
+    [ m.mouse_presses; m.mouse_releases ]
+
 let mouse t =
   let cpu = t.cpu in
   let m = t.mouse in
   match Cpu86.reg16 cpu 0 with
   | 0x00 ->
-    Cpu86.set_reg16 cpu 0 (if m.mouse_present then 0xFFFF else 0x0000);
-    Cpu86.set_reg16 cpu 3 (if m.mouse_present then 2 else 0);
-    m.mouse_visible <- false
+    Cpu86.set_reg16 cpu 0 (if m.mouse_present then mouse_driver_installed else 0x0000);
+    Cpu86.set_reg16 cpu 3 (if m.mouse_present then mouse_buttons_reported else 0);
+    reset_mouse_driver m
+  | 0x21 ->
+    (* SOFTWARE RESET (RBIL INT 33/0021): 00h 와 같되 하드웨어는 건드리지
+       않는다. 드라이버가 없으면 AX 는 0021h 그대로다. *)
+    if m.mouse_present then begin
+      Cpu86.set_reg16 cpu 0 mouse_driver_installed;
+      Cpu86.set_reg16 cpu 3 mouse_buttons_reported;
+      reset_mouse_driver m
+    end
   | 0x01 -> m.mouse_visible <- true
   | 0x02 -> m.mouse_visible <- false
   | 0x03 ->
@@ -420,8 +465,37 @@ let mouse t =
     Cpu86.set_reg16 cpu 2 m.mouse_y;
     Cpu86.set_reg16 cpu 3 m.mouse_buttons
   | 0x04 ->
-    m.mouse_x <- Cpu86.reg16 cpu 1;
-    m.mouse_y <- Cpu86.reg16 cpu 2
+    m.mouse_x <- clamp_to m.mouse_range_x (Cpu86.reg16 cpu 1);
+    m.mouse_y <- clamp_to m.mouse_range_y (Cpu86.reg16 cpu 2)
+  | (0x05 | 0x06) as fn ->
+    (* 버튼 BX 의 누름(05h)·뗌(06h) 기록. AX 는 지금 버튼 상태, BX 는 지난
+       호출 뒤 횟수, CX·DX 는 마지막 자리. 횟수는 읽으면 0 이 된다
+       (Ralf Brown INT 33/0005, 0006). 없는 버튼 번호면 AX 만 쓴다. *)
+    Cpu86.set_reg16 cpu 0 m.mouse_buttons;
+    let logs = if fn = 0x05 then m.mouse_presses else m.mouse_releases in
+    let b = Cpu86.reg16 cpu 3 in
+    if b < mouse_button_count then begin
+      let l = logs.(b) in
+      Cpu86.set_reg16 cpu 3 l.times;
+      Cpu86.set_reg16 cpu 1 l.last_x;
+      Cpu86.set_reg16 cpu 2 l.last_y;
+      l.times <- 0
+    end
+  | (0x07 | 0x08) as fn ->
+    (* 가로(07h)·세로(08h) 범위 CX..DX(Ralf Brown INT 33/0007, 0008).
+       거꾸로 주면 바꿔 쓴다(HelpPC 2.10 INT 33,7). 범위는 움직임을 가두는
+       창이라 지금 자리도 그 안으로 옮긴다. 텍스트 모드에서 셀 크기 배수로
+       내리는 일(RBIL 의 메모)은 하지 않는다. *)
+    let a = Cpu86.reg16 cpu 1 and b = Cpu86.reg16 cpu 2 in
+    let range = Some (min a b, max a b) in
+    if fn = 0x07 then begin
+      m.mouse_range_x <- range;
+      m.mouse_x <- clamp_to range m.mouse_x
+    end
+    else begin
+      m.mouse_range_y <- range;
+      m.mouse_y <- clamp_to range m.mouse_y
+    end
   | 0x0B ->
     Cpu86.set_reg16 cpu 1 (m.mouse_dx land 0xffff);
     Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);
