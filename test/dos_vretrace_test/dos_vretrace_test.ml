@@ -27,7 +27,7 @@ let ports ~speed ~mode =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
   Dos_video.set_mode video mode ~clear:true;
-  Dos_ports.create ~speed ~mpu401:false ~mem ~video
+  Dos_ports.create ~speed ~mpu401:false ~mem ~video ~sound_blaster:false
     ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
 
 let status_port = 0x3DA
