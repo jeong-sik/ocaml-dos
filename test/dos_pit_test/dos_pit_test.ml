@@ -18,7 +18,7 @@ let check_b name got want =
 let make () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  Dos_ports.create ~mem ~video
+  Dos_ports.create ~mpu401:false ~mem ~video
 
 (* 기본 분주비 65536 의 IRQ0 간격에서 PIT 한 틱의 CPU 사이클을 얻는다 *)
 let cycles_per_pit_tick = Dos_ports.cycles_per_tick (make ()) / 0x10000

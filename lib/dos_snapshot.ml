@@ -34,8 +34,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    11: the ports carry PIT channel 2 (mode, access, latch, count register
    and the counting segment) right after the cycle counter.
    12: the payload opens with the CPU model, and an 80386 carries the upper
-   halves of its eight registers and FS, GS after the cycle count. *)
-let format_version = 12
+   halves of its eight registers and FS, GS after the cycle count.
+   13: whether an MPU-401 is in the machine, and its mode and waiting
+   answers, after the OPL2 timers. *)
+let format_version = 13
 
 let digest_hex_len = 32
 let checksum_len = 16

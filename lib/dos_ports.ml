@@ -71,6 +71,7 @@ type t = {
   mutable opl_t2_at : int;
   mutable opl_t1_exp : bool;
   mutable opl_t2_exp : bool;
+  mutable mpu : Dos_mpu401.t option;    (** 330h 의 MPU-401. 스냅숏이 꽂고 뺀다 *)
 }
 
 (* 기본 VGA 256색: 0-15 CGA, 16-31 회색 램프, 32-247 6x6x6 RGB 큐브,
@@ -98,7 +99,7 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
-let create ~mem ~video =
+let create ~mpu401 ~mem ~video =
   {
     mem;
     video;
@@ -130,6 +131,7 @@ let create ~mem ~video =
     opl_t2_at = 0;
     opl_t1_exp = false;
     opl_t2_exp = false;
+    mpu = (if mpu401 then Some (Dos_mpu401.create ()) else None);
   }
 
 (* 모드를 세우면 BIOS 가 DAC 을 기본값으로 다시 싣는다. 앞 프로그램이
@@ -173,8 +175,25 @@ let sync_cursor_to_bda t =
   Bytes.set t.mem 0x450 (Char.chr (linear mod cols));
   Bytes.set t.mem 0x451 (Char.chr ((linear / cols) land 0xff))
 
+let mpu_port_in t p =
+  match t.mpu with
+  | None -> None
+  | Some mpu -> Dos_mpu401.port_in mpu p
+
+(* 이 기계에는 MIDI 장치가 없다. MIDI 바이트는 여기서 버린다. 330h·331h
+   는 아래 [port_out] 의 다른 장치가 받지 않는다. *)
+let mpu_port_out t p v =
+  match t.mpu with
+  | None -> ()
+  | Some mpu ->
+    (match Dos_mpu401.port_out mpu p v with
+     | None | Some (Dos_mpu401.Taken | Dos_mpu401.Midi_out _) -> ())
+
 let port_in t p =
   match Dos_video.port_in t.video p with
+  | Some v -> v
+  | None ->
+  match mpu_port_in t (p land 0xffff) with
   | Some v -> v
   | None ->
   match p land 0xffff with
@@ -260,7 +279,8 @@ let port_in t p =
 let port_out t p v =
   let v = v land 0xff in
   if Dos_video.port_out t.video p v then ()
-  else
+  else begin
+  mpu_port_out t (p land 0xffff) v;
   match p land 0xffff with
   | 0x20 -> ()                        (* EOI — 우선순위 모델이 없다 *)
   | 0x21 -> t.pic_mask <- v
@@ -351,6 +371,7 @@ let port_out t p v =
        end
      | _ -> ())                        (* 음색 레지스터 — 소리가 없어 무시 *)
   | _ -> ()
+  end
 
 (* ---------- snapshot ---------- *)
 
@@ -370,7 +391,7 @@ let write_state w t =
         pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
-        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2 } = t
+        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
   in
   let put what r v = C.put w ~what r v in
   put "ports.now" cycle now;
@@ -405,7 +426,10 @@ let write_state w t =
   put "opl_t1_at" cycle opl_t1_at;
   put "opl_t2_at" cycle opl_t2_at;
   C.put_bool w opl_t1_exp;
-  C.put_bool w opl_t2_exp
+  C.put_bool w opl_t2_exp;
+  match mpu with
+  | None -> C.put_bool w false
+  | Some m -> C.put_bool w true; Dos_mpu401.write_state w m
 
 let read_state r t =
   let get what rng = C.get r ~what rng in
@@ -443,4 +467,11 @@ let read_state r t =
   t.opl_t1_at <- get "opl_t1_at" cycle;
   t.opl_t2_at <- get "opl_t2_at" cycle;
   t.opl_t1_exp <- C.get_bool r;
-  t.opl_t2_exp <- C.get_bool r
+  t.opl_t2_exp <- C.get_bool r;
+  t.mpu <-
+    (if C.get_bool r then begin
+       let m = Dos_mpu401.create () in
+       Dos_mpu401.read_state r m;
+       Some m
+     end
+     else None)
