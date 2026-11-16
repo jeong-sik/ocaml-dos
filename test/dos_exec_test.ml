@@ -19,8 +19,8 @@ let w16 b v =
 let make_exe ~image ~ip ~cs ~ss ~sp relocs =
   let b = Buffer.create (32 + String.length image) in
   Buffer.add_string b "MZ";
-  let total = String.length image in
-  w16 b ((total - 32) mod 512);
+  let total = 32 + String.length image in
+  w16 b (total mod 512);
   w16 b ((total + 511) / 512);
   w16 b (List.length relocs);
   w16 b 2;                                  (* header paras = 32 바이트 *)
@@ -125,6 +125,23 @@ let () =
   Dos_machine.load_com m parent;
   Dos_machine.run m ~max_steps:8000;
   check "exe child code" (Dos_machine.exit_code m) 33
+
+(* 3b) #73: 뒤에 데이터가 붙은 MZ 자식. 적재 모듈은 헤더의 페이지 수가
+   정한다(MS-DOS 4.0 EXEC.ASM exec_save_start). 남은 메모리보다 큰 뒤
+   데이터가 있어도 모듈만 싣고 돈다. 파일 길이로 메모리를 세면 오류 8
+   이 나고, 부모의 4Dh 는 33 을 못 받는다. *)
+let () =
+  let child_img = "\xb0\x21\xb4\x4c\xcd\x21\x00\x00" in
+  let exe = make_exe ~image:child_img ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [] in
+  let parent =
+    build_parent ~shrink:0x20 ~child1:"CHILD.EXE" ~child2:""
+      ~fin:"\xb4\x4d\xcd\x21\xb4\x4c\xcd\x21"
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.mount_file m "CHILD.EXE" (exe ^ String.make (640 * 1024) '\xaa');
+  Dos_machine.load_com m parent;
+  Dos_machine.run m ~max_steps:8000;
+  check "exe child with a trailer runs" (Dos_machine.exit_code m) 33
 
 (* 4) A child that exits with files open: DOS closes them for it, and each
    close writes the file's shared buffer back (#35 -- every handle on one
