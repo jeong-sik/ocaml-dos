@@ -44,6 +44,28 @@ let ega_com () =
       "\xb8\x00\x4c";      (* mov ax,4C00h *)
       "\xcd\x21" ]           (* int 21h *)
 
+(* --unserved: 이 기계가 받지 못한 INT 호출을 (갈래, 벡터, AH) 로 묶어 센다.
+   AL 은 처음 본 순서대로 남긴다. *)
+let unserved_tally () =
+  let tally = Hashtbl.create 16 in
+  let record kind ~vector ~ax =
+    let key = (kind, vector, ax lsr 8) and al = ax land 0xff in
+    let count, als = Option.value (Hashtbl.find_opt tally key) ~default:(0, []) in
+    Hashtbl.replace tally key (count + 1, if List.mem al als then als else als @ [ al ])
+  in
+  let kind_name = function
+    | Dos_state.No_function -> "no-function"
+    | Dos_state.Iret_stub -> "iret-stub"
+  in
+  let print () =
+    Hashtbl.fold (fun k v acc -> (k, v) :: acc) tally []
+    |> List.sort compare
+    |> List.iter (fun ((kind, vector, ah), (count, als)) ->
+        Printf.eprintf "UNSERVED %s INT %02xh AH=%02xh x%d AL=%s\n%!" (kind_name kind)
+          vector ah count (String.concat "," (List.map (Printf.sprintf "%02x") als)))
+  in
+  (record, print)
+
 let read_file path =
   let ic = open_in_bin path in
   let s = really_input_string ic (in_channel_length ic) in
@@ -75,22 +97,19 @@ let parse_feed spec =
             None)
     (String.split_on_char ',' spec)
 
-(* --feed-sync: 스텝을 안 적는다 — 게임이 키를 기다리는 순간에 맞춰
-   하나씩 넣는다. INT 16h 폴링의 굶주림(kbd_waiting) 상승에 다음 키를
-   주고, INT 16h 없이 BDA 링을 직접 폴링하는 게임(삼국지3 프로텍션의
-   0x25a3)을 위해 링이 비어 있으면 주기적으로도 넣는다. 스텝 하드코딩
-   --feed 는 렌더 속도·플래그 수정에 따라 전부 어긋난다(실측). *)
-let parse_feed_sync spec =
-  List.filter_map
-    (fun h ->
-      if h = "" then None
-      else
-        match int_of_string_opt ("0x" ^ h) with
-        | Some w -> Some w
-        | None ->
-          prerr_endline ("bad feed-sync " ^ h ^ " (want hex like 1c0d)");
-          None)
-    (String.split_on_char ',' spec)
+(* --press / --wait: 화면을 보고 키를 넣는 시나리오 단계. 스텝 수를
+   적지 않으니 코어 타이밍이 바뀌어도 같은 화면을 거쳐 간다
+   (Dos_scenario). 한 단계(키 하나, 기다림 하나)의 상한이다. *)
+let scenario_budget = 50_000_000
+
+let parse_region spec =
+  match List.map int_of_string_opt (String.split_on_char ',' spec) with
+  | [ Some x; Some y; Some w; Some h ] -> Some { Dos_scenario.x; y; w; h }
+  | _ -> None
+
+let usage_exit what spec want =
+  Printf.eprintf "bad %s %s (want %s)\n%!" what spec want;
+  exit 2
 
 let parse_keys spec =
   List.filter_map
@@ -127,18 +146,29 @@ let hex s =
   let s = if String.length s > 2 && String.sub s 0 2 = "0x" then s else "0x" ^ s in
   int_of_string s
 
+(* --cpu 의 값: 정확히 같은 글자만 받는다. *)
+let model_of_flag = function
+  | "286" -> Some Cpu86.I80286
+  | "386" -> Some Cpu86.I80386
+  | _ -> None
+
 let () =
+  let cpu = ref None in
   let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
+  and unserved = ref false
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
-  let feed_sync = ref "" in
+  let scenario = ref [] and digests = ref [] and args = ref "" and cpu_mhz = ref None
+  and mpu401 = ref false in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
+      ("--args", Arg.Set_string args,
+       "TEXT  명령줄 인자 — 프로그램 이름 뒤에 공백 하나와 TEXT 를 친 것처럼 넘긴다");
       ("--demo", Arg.Set_string demo,
        "NAME  내장 데모 — hello(텍스트) 또는 ega(모드 0Dh 색 띠, \
         --steps 2000000 필요)");
@@ -147,16 +177,47 @@ let () =
       ("--save", Arg.String (fun m -> saves := m :: !saves),
        "NAME=PATH  끝난 뒤 게스트가 쓴 파일을 호스트로 꺼낸다");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 machine step 수 (입력 대기·idle 포함)");
+      ("--cpu", Arg.String (fun s ->
+         match model_of_flag s with
+         | Some model -> cpu := Some model
+         | None ->
+           prerr_endline ("bad --cpu " ^ s ^ " (want 286 or 386)");
+           exit 2),
+       "286|386  CPU 모델 (기본 286). 386 이면 32 비트 레지스터·FS·GS·0Fh 명령이 돈다");
       ("--feed", Arg.Set_string feed,
        "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
-      ("--feed-sync", Arg.Set_string feed_sync,
-       "HEX,HEX,..  게스트가 키를 기다리는 순간에 하나씩 넣는다");
+      ("--press", Arg.String (fun spec ->
+         scenario := Dos_scenario.Press
+             { what = "--press " ^ spec; keys = String.split_on_char ',' spec;
+               budget = scenario_budget } :: !scenario),
+       "KEY,KEY,..  키 이름을 하나씩 넣고, 게임이 다시 키를 묻고 화면이 멈출 \
+        때까지 기다린다 (예: enter,1,0,1,8,3)");
+      ("--wait", Arg.String (fun spec ->
+         let want = "X,Y,W,H=MD5" in
+         match String.index_opt spec '=' with
+         | None -> usage_exit "--wait" spec want
+         | Some i ->
+           (match parse_region (String.sub spec 0 i) with
+            | None -> usage_exit "--wait" spec want
+            | Some region ->
+              let digest = String.sub spec (i + 1) (String.length spec - i - 1) in
+              scenario := Dos_scenario.Wait_for
+                  { what = "--wait " ^ spec; region; digest; budget = scenario_budget }
+                          :: !scenario)),
+       "X,Y,W,H=MD5  프레임의 그 영역이 그 digest 가 될 때까지 돌린다");
+      ("--digest", Arg.String (fun spec ->
+         match parse_region spec with
+         | Some r -> digests := r :: !digests
+         | None -> usage_exit "--digest" spec "X,Y,W,H"),
+       "X,Y,W,H  끝난 뒤 그 영역의 digest 를 --wait 인자 모양으로 찍는다");
       ("--keys", Arg.Set_string keys,
        "HEX[@STEP],..  키 워드 — (스캔 lsl 8) lor ASCII. @STEP 는 그 스텝 \
         전에는 넣지 않는다는 예약 (예: 4d00@5000000)");
       ("--type", Arg.Set_string typed,
        "TEXT  글자를 차례로 입력 (US 자판 스캔 코드)");
       ("--mouse", Arg.Set_string mouse, "X,Y,BUTTONS  마우스를 붙이고 위치를 준다");
+      ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
+       "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다");
       ("--clock", Arg.Set_string clock,
        "Y-M-D,H:M:S  게스트가 보는 기준시각 (기본 1990-1-1,8:0:0)");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
@@ -165,6 +226,7 @@ let () =
       ("--utf8", Arg.Set utf8, "  화면을 코드 페이지 437 그대로 출력");
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--int-trace", Arg.Set int_trace, "  INT 명령을 만날 때마다 기록");
+      ("--unserved", Arg.Set unserved, "  이 기계가 받지 못한 INT 호출을 끝에 센다(stderr)");
       ("--glyph-trace", Arg.String (fun s ->
          match String.split_on_char ',' s with
          | [ mx; rec_ ] ->
@@ -173,10 +235,26 @@ let () =
             | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)")
          | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)"),
        "  INT 21h AH=42 seek 중 폰트 글리프 요청(offset = idx*RECSIZE+base 패턴) 기록");
-      ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프") ]
+      ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프");
+      ("--mpu401", Arg.Set mpu401, "  330h 에 MPU-401(UART 전용)을 꽂는다. MIDI 바이트는 버린다") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
-  let m = Dos_machine.create () in
+  let speed =
+    match !cpu_mhz with
+    | None -> Dos_ports.pc_speed
+    | Some mhz -> (
+      match Dos_ports.speed_of_mhz mhz with
+      | Ok speed ->
+        Printf.eprintf "cpu: %.2f MHz (8086 cycles)\n"
+          (float_of_int (Dos_ports.speed_hz speed) /. 1e6);
+        speed
+      | Error e ->
+        prerr_endline ("bad --cpu-mhz: " ^ e);
+        exit 2)
+  in
+  let m = Dos_machine.create ?model:!cpu ~speed ~mpu401:!mpu401 () in
+  let record_unserved, print_unserved = unserved_tally () in
+  if !unserved then Dos_machine.on_unserved m record_unserved;
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
@@ -198,10 +276,14 @@ let () =
       | Some (name, path) -> Dos_machine.mount_file m name (read_file path)
       | None -> ())
     (List.rev !mounts);
+  (* COMMAND.COM 이 넘기는 꼬리는 이름 바로 뒤의 공백부터다 *)
+  let tail = if !args = "" then "" else " " ^ !args in
   if !demo = "hello" then Dos_machine.load_com m (hello_com ())
   else if !demo = "ega" then Dos_machine.load_com m (ega_com ())
-  else if !com <> "" then Dos_machine.load_com m (read_file !com)
-  else if !exe <> "" then Dos_machine.load_exe m (read_file !exe)
+  else if !com <> "" then
+    Dos_machine.load_com ~name:(Filename.basename !com) ~tail m (read_file !com)
+  else if !exe <> "" then
+    Dos_machine.load_exe ~name:(Filename.basename !exe) ~tail m (read_file !exe)
   else begin
     prerr_endline "need --demo hello|ega or --com PATH or --exe PATH";
     exit 2
@@ -209,32 +291,13 @@ let () =
   String.iter (fun c -> Dos_machine.push_ascii m c) !typed;
   let feeds = Queue.create () in
   List.iter (fun (w, at) -> Queue.push (w, at) feeds) (parse_feed !feed);
-  let sync_feeds = Queue.create () in
-  List.iter (fun w -> Queue.push w sync_feeds) (parse_feed_sync !feed_sync);
-  let feed_armed = ref true in
   let feed_at mm n =
     (match Queue.peek_opt feeds with
      | Some (w, at) when n >= at ->
        ignore (Queue.pop feeds);
        Dos_machine.push_key mm w;
        Printf.eprintf "FEED %04x @step %d\n%!" w n
-     | _ -> ());
-    (* 대기 동기화: 굶주림 상승에 한 개, 폴밋은 링이 빈 때만 *)
-    (match Queue.peek_opt sync_feeds with
-     | Some w when !feed_armed && Dos_machine.kbd_waiting mm ->
-       ignore (Queue.pop sync_feeds);
-       Dos_machine.push_key mm w;
-       feed_armed := false;
-       Printf.eprintf "FEED-SYNC %04x @step %d\n%!" w n
-     | _ -> ());
-    (match Queue.peek_opt sync_feeds with
-     | Some w when n > 0 && n mod 2_000_000 = 0
-                    && not (Dos_state.key_pending mm) ->
-       ignore (Queue.pop sync_feeds);
-       Dos_machine.push_key mm w;
-       Printf.eprintf "FEED-POLL %04x @step %d\n%!" w n
-     | _ -> ());
-    if not (Dos_machine.kbd_waiting mm) then feed_armed := true
+     | _ -> ())
   in
   let on_step mm n =
     feed_at mm n;
@@ -277,11 +340,32 @@ let () =
      end);
   in
   let on_key w n = Printf.eprintf "KEY %04x @step %d\n%!" w n in
-  (try
-     ignore
-       (Dos_machine.run_with_keys ~on_step ~on_key m ~max_steps:!steps
-          ~keys:(parse_keys !keys))
-   with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
+  (* 시나리오가 먼저 돌고, --steps 는 그 뒤에 --keys/--feed 와 함께 돈다.
+     시나리오만 볼 때는 --steps 0. 실패한 단계 뒤로는 더 돌리지 않는다 —
+     화면과 덤프는 멈춘 자리의 것이다. *)
+  let scenario_ok =
+    match List.rev !scenario with
+    | [] -> true
+    | steps ->
+      (try
+         match Dos_scenario.run m steps with
+         | Ok n ->
+           Printf.printf "scenario: %d steps in %d machine steps\n%!" (List.length steps) n;
+           true
+         | Error f ->
+           Printf.eprintf "SCENARIO FAIL: %s\n%!" (Dos_scenario.failure_to_string f);
+           false
+       with Cpu86.Unsupported msg ->
+         Printf.eprintf "UNSUPPORTED: %s\n%!" msg;
+         false)
+  in
+  (if scenario_ok then
+     try
+       ignore
+         (Dos_machine.run_with_keys ~on_step ~on_key m ~max_steps:!steps
+            ~keys:(parse_keys !keys))
+     with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
+  if !unserved then print_unserved ();
   let c = Dos_machine.cpu_of m in
   let fw, fh = Dos_machine.frame_dims m in
   Printf.printf "mode=%02xh frame=%dx%d\n%!" (Dos_machine.video_mode m) fw fh;
@@ -300,6 +384,11 @@ let () =
       then incr nonblack)
     rgb;
   Printf.printf "nonblack=%d\n" !nonblack;
+  List.iter
+    (fun (r : Dos_scenario.region) ->
+      Printf.printf "digest %d,%d,%d,%d=%s\n" r.x r.y r.w r.h
+        (Option.value (Dos_scenario.region_digest m r) ~default:"outside-the-frame"))
+    (List.rev !digests);
   (match String.split_on_char ',' !dump with
    | [ a; n ] when !dump <> "" ->
      let a0 = hex a and len = hex n in
@@ -329,4 +418,5 @@ let () =
   let oc = open_out_bin (!out ^ ".ppm") in
   output_string oc (Dos_machine.frame_ppm m);
   close_out oc;
-  Printf.printf "wrote %s.ppm\n" !out
+  Printf.printf "wrote %s.ppm\n" !out;
+  if not scenario_ok then exit 1
