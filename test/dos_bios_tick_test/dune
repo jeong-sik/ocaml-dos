@@ -1,0 +1,3 @@
+(test
+ (name dos_bios_tick_test)
+ (libraries dosmachine))

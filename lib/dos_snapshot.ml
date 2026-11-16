@@ -22,15 +22,56 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    input and EXEC carry their owned ROM service return frame.
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
    console bytes are carried explicitly.
-   7: the interrupt controller (mask, requests, in service, OCW3 read
+   7: the mouse carries each button's press and release log (INT 33h
+   AX=05h/06h) and the AX=07h/08h ranges.
+   8: the mouse carries its cursor flag (an int, not a visible bool) and
+   the AX=09h graphics and AX=0Ah text cursor shapes.
+   9: the mouse ranges are always set (the driver fits them to the virtual
+   screen of the video mode), so each is two words with no flag.
+   10: after its motion counters the mouse carries the AX=0Fh mickey
+   ratios, the AX=1Ah speeds, the double-speed threshold and the eighths of
+   a mickey left over from the last move.
+   11: the ports carry PIT channel 2 (mode, access, latch, count register
+   and the counting segment) right after the cycle counter.
+   12: the payload opens with the CPU model, and an 80386 carries the upper
+   halves of its eight registers and FS, GS after the cycle count.
+   13: whether an MPU-401 is in the machine, and its mode and waiting
+   answers, after the OPL2 timers.
+   14: each OPL2 timer carries its next overflow (or stopped) and a flag
+   that is clear, raised or masked, in place of a one-shot expiry stamp.
+   15: the ports carry the CPU speed (cycles per PIT tick) first, so a
+   restored machine keeps the clock it was saved with.
+   16: EMS carries the OS handle 0 among its handles, a frame page is shown
+   or empty instead of handle 0 standing for empty, and each handle's page
+   map saved by INT 67h AH=47h.
+   17: the interrupt controller (mask, requests, in service, OCW3 read
    choice) and the keyboard controller (queued bytes, port 0x60, its full
    flag, the last read) replace the PIC mask, the last scan code and the
    machine's pending-tick flag.
-   8: directories — the table of directories and the current one after the
+   18: the CRTC registers move from the ports to the video adapter, and
+   mode 13h's screen lives in the four planes instead of RAM at 0xA0000.
+   19: EMS handle names (INT 67h AH=53h).
+   20: text modes load their CRTC table and the text screen follows the
+   CRTC start address and offset. A format 19 machine in a text mode holds
+   zero CRTC registers, which would now draw every row from row 0.
+   21: the keyboard controller also carries the replies it has not sent,
+   the command byte, the output port, a command waiting for its byte,
+   scanning, the LEDs and the scan code set.
+   22: PIT channel 0 is a counter of the same kind as channel 2, written
+   right after it with the cycle of its next output rise (IRQ0); the
+   machine no longer carries the cycle of its last IRQ0.
+   23: the DMA controller (per channel: base and current address and count,
+   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC.
+   24: the XMS driver's blocks (place, size, lock count, bytes) follow the
+   clock, before EMS.
+   25: a PIT counter writes its control word bits 5-0 as written (in place
+   of mode, access and BCD), the tick its count reaches the counting
+   element, and a status byte latched by the read-back command.
+   26: directories — the table of directories and the current one after the
    host files, and each find result says whether it is a file (by path key)
    or a directory entry (by name). Host file keys are read back only in
    their canonical Dos_path form. *)
-let format_version = 8
+let format_version = 26
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -61,9 +102,13 @@ let save_error_to_string (Unsaveable message) = "machine cannot be saved: " ^ me
 
 let reg = C.word
 let handle_number = C.range 0 (max_handles - 1)
-let ems_handle_key = C.range Dos_ems.first_handle Dos_ems.max_handle
-(* [ems_mapped] uses handle 0 for "nothing mapped". *)
-let ems_mapped_handle = C.range 0 Dos_ems.max_handle
+let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
+let cursor_flag = C.range min_int 0
+(* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
+let cursor_kind = C.range 0 1
+let mouse_ratio = C.range 1 0xFFFF  (* 0Fh·13h·1Ah 는 0 을 두지 않는다 *)
+let mouse_speed = C.range lowest_speed highest_speed
+let mouse_carry = C.range 0 (pixels_per_ratio - 1)
 let file_pos = C.count
 let vector = C.byte
 
@@ -82,11 +127,17 @@ let check_consistency t =
         if acc = None && not (Array.for_all page_ok pages) then Some h else acc)
       t.ems_pages None
   in
-  let mapped_ok (h, p) =
-    (h = 0 && p = 0)
-    || (match Hashtbl.find_opt t.ems_pages h with
-        | Some pages -> p < Array.length pages
-        | None -> false)
+  let shown_ok = function
+    | None -> true
+    | Some (h, p) ->
+      (match Hashtbl.find_opt t.ems_pages h with
+       | Some pages -> p < Array.length pages
+       | None -> false)
+  in
+  let saved_ok h m =
+    Hashtbl.mem t.ems_pages h
+    && Array.length m = Dos_ems.frame_pages
+    && Array.for_all shown_ok m
   in
   let return_ok = function
     | Direct_return -> true
@@ -112,9 +163,14 @@ let check_consistency t =
   | Some h -> Error (Printf.sprintf "EMS handle %d has a page that is not 0 or %d bytes" h
                        Dos_ems.page_bytes)
   | None ->
-    if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
-    else if not (Array.for_all mapped_ok t.ems_mapped) then
+    if not (Hashtbl.mem t.ems_pages Dos_ems.os_handle) then Error "the EMS OS handle is missing"
+    else if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
+    else if not (Array.for_all shown_ok t.ems_mapped) then
       Error "an EMS frame page maps a page that does not exist"
+    else if not (Hashtbl.fold (fun h m acc -> acc && saved_ok h m) t.ems_saved true) then
+      Error "an EMS saved page map names a handle or page that does not exist"
+    else if not (Dos_ems.names_ok t) then
+      Error "an EMS handle name is not one INT 67h AH=53h could have given"
     else if not (List.for_all input_ok t.input_continuations) then
       Error "an input continuation has inconsistent state"
     else if not (List.for_all (fun frame -> return_ok frame.parent_service_return) t.exec_frames) then
@@ -135,6 +191,14 @@ let put_list w ~what put l =
 
 let put_pairs w ~what ~a ~b l =
   put_list w ~what (fun (x, y) -> C.put w ~what a x; C.put w ~what b y) l
+
+(* An EMS frame page: shown (handle, logical page) or empty. *)
+let put_shown w = function
+  | None -> C.put_bool w false
+  | Some (h, p) ->
+    C.put_bool w true;
+    C.put w ~what:"EMS mapping" ems_handle_key h;
+    C.put w ~what:"EMS mapping" C.word p
 
 let put_service_return w = function
   | Direct_return -> C.put_bool w false
@@ -242,24 +306,41 @@ let put_frame w f handles =
   put_pairs w ~what:"parent block" ~a:C.word ~b:C.word parent_blocks;
   put_pairs w ~what:"parent handle" ~a:handle_number ~b:C.count handles
 
+(* The CPU model as one byte, the first of the payload: [read_payload] builds
+   the machine from it before reading anything else. *)
+let model_code = function
+  | Cpu86.I8086 -> 0
+  | Cpu86.I80186 -> 1
+  | Cpu86.I80286 -> 2
+  | Cpu86.I80386 -> 3
+
+let model_of_code = function
+  | 0 -> Some Cpu86.I8086
+  | 1 -> Some Cpu86.I80186
+  | 2 -> Some Cpu86.I80286
+  | 3 -> Some Cpu86.I80386
+  | _ -> None
+
 (* Every [Dos_state.t] field is named: a field added to the machine fails the
    build here until the snapshot carries it or says why not. [read_payload]
    reads in exactly this order with the same ranges. *)
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files; dirs; cwd;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped;
-        mouse } = t
+        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved; ems_names;
+        mouse; xms;
+        on_unserved = _ (* a host observer, not machine state *) } = t
   in
   let put what r v = C.put w ~what r v in
+  put "cpu model" C.byte (model_code (Cpu86.model cpu));
   let { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted;
-        saved_cycles } = Cpu86.save_state cpu
+        saved_cycles; saved_386 } = Cpu86.save_state cpu
   in
   C.put_int_array w ~what:"registers" reg saved_regs;
   C.put_int_array w ~what:"segments" reg saved_segs;
@@ -267,6 +348,12 @@ let write_payload w t =
   put "flags" reg saved_flags;
   C.put_bool w saved_halted;
   put "cycles" C.count saved_cycles;
+  (match saved_386 with
+   | Some { Cpu86.saved_regs_hi; saved_fs; saved_gs } ->
+     C.put_int_array w ~what:"upper halves" reg saved_regs_hi;
+     put "fs" reg saved_fs;
+     put "gs" reg saved_gs
+   | None -> ());
   C.put_bytes w mem;
   Dos_video.write_state w video;
   Dos_ports.write_state w ports;
@@ -291,7 +378,6 @@ let write_payload w t =
   put_list w ~what:"input continuation" (put_input_continuation w) input_continuations;
   C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
-  put "last tick" C.count last_tick;
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
@@ -307,26 +393,76 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  Dos_xms.write_state w xms;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
       put "EMS handle" ems_handle_key k;
       put_list w ~what:"EMS page" (C.put_bytes w) (Array.to_list pages))
     (sorted_bindings ems_pages);
-  put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
-  let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
-        mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
-        mouse_handler_off } = mouse
+  put_list w ~what:"EMS saved map"
+    (fun (k, m) ->
+      put "EMS saved map" ems_handle_key k;
+      put_list w ~what:"EMS saved mapping" (put_shown w) (Array.to_list m))
+    (sorted_bindings ems_saved);
+  put_list w ~what:"EMS name"
+    (fun (k, name) ->
+      put "EMS name" ems_handle_key k;
+      C.put_string w name)
+    (sorted_bindings ems_names);
+  put_list w ~what:"EMS mapping" (put_shown w) (Array.to_list ems_mapped);
+  let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_cursor_flag;
+        mouse_graphics_cursor; mouse_text_cursor;
+        mouse_dx; mouse_dy; mouse_motion; mouse_carry_x; mouse_carry_y;
+        mouse_handler_mask; mouse_handler_seg;
+        mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
+        mouse_range_y } = mouse
   in
   C.put_bool w mouse_present;
   put "mouse x" C.any mouse_x;
   put "mouse y" C.any mouse_y;
   put "mouse buttons" C.any mouse_buttons;
-  C.put_bool w mouse_visible;
+  put "mouse cursor flag" cursor_flag mouse_cursor_flag;
+  (match mouse_graphics_cursor with
+   | Default_arrow -> put "graphics cursor" cursor_kind 0
+   | Custom_cursor { hot_x; hot_y; screen_mask; cursor_mask } ->
+     put "graphics cursor" cursor_kind 1;
+     put "cursor hot x" C.word hot_x;
+     put "cursor hot y" C.word hot_y;
+     C.put_int_array w ~what:"cursor screen mask" C.word screen_mask;
+     C.put_int_array w ~what:"cursor mask" C.word cursor_mask);
+  (match mouse_text_cursor with
+   | Software_text { screen_mask; cursor_mask } ->
+     put "text cursor" cursor_kind 0;
+     put "text screen mask" C.word screen_mask;
+     put "text cursor mask" C.word cursor_mask
+   | Hardware_text { first_line; last_line } ->
+     put "text cursor" cursor_kind 1;
+     put "text cursor first line" C.word first_line;
+     put "text cursor last line" C.word last_line);
   put "mouse dx" C.any mouse_dx;
   put "mouse dy" C.any mouse_dy;
+  let { mickeys_x; mickeys_y; speed_x; speed_y; double_speed } = mouse_motion in
+  put "mouse mickeys x" mouse_ratio mickeys_x;
+  put "mouse mickeys y" mouse_ratio mickeys_y;
+  put "mouse speed x" mouse_speed speed_x;
+  put "mouse speed y" mouse_speed speed_y;
+  put "mouse double speed" mouse_ratio double_speed;
+  put "mouse carry x" mouse_carry mouse_carry_x;
+  put "mouse carry y" mouse_carry mouse_carry_y;
   put "mouse handler mask" C.word mouse_handler_mask;
   put "mouse handler seg" C.word mouse_handler_seg;
-  put "mouse handler off" C.word mouse_handler_off
+  put "mouse handler off" C.word mouse_handler_off;
+  List.iter
+    (Array.iter (fun { times; last_x; last_y } ->
+         put "mouse button count" C.count times;
+         put "mouse button x" C.word last_x;
+         put "mouse button y" C.word last_y))
+    [ mouse_presses; mouse_releases ];
+  List.iter
+    (fun (lo, hi) ->
+      put "mouse range low" C.word lo;
+      put "mouse range high" C.word hi)
+    [ mouse_range_x; mouse_range_y ]
 
 let save t =
   match check_consistency t with
@@ -361,6 +497,19 @@ let get_path r =
   | None -> C.fail "a path key that is not a DOS path"
 
 let get_key r = Dos_path.key (get_path r)
+
+let get_shown r =
+  if C.get_bool r then begin
+    let h = C.get r ~what:"EMS mapping" ems_handle_key in
+    let p = C.get r ~what:"EMS mapping" C.word in
+    Some (h, p)
+  end
+  else None
+
+let get_frame r ~what =
+  let m = Array.of_list (get_list r ~what (fun () -> get_shown r)) in
+  if Array.length m <> Dos_ems.frame_pages then C.fail "EMS frame size differs";
+  m
 
 let fill_table tbl bindings =
   Hashtbl.reset tbl;
@@ -409,7 +558,12 @@ let get_input_request r =
 let read_payload r =
   (* A fresh machine brings the closures (memory, ports, the interrupt hook)
      and the containers; everything else is overwritten from the bytes. *)
-  let t = Dos_machine.create () in
+  let model =
+    match model_of_code (C.get r ~what:"cpu model" C.byte) with
+    | Some model -> model
+    | None -> C.fail "invalid cpu model"
+  in
+  let t = Dos_machine.create ~model () in
   let get what rng = C.get r ~what rng in
   let saved_regs = get_int_array r ~what:"registers" ~len:8 reg in
   let saved_segs = get_int_array r ~what:"segments" ~len:4 reg in
@@ -417,8 +571,18 @@ let read_payload r =
   let saved_flags = get "flags" reg in
   let saved_halted = C.get_bool r in
   let saved_cycles = get "cycles" C.count in
+  let saved_386 =
+    match model with
+    | Cpu86.I80386 ->
+      let saved_regs_hi = get_int_array r ~what:"upper halves" ~len:8 reg in
+      let saved_fs = get "fs" reg in
+      let saved_gs = get "gs" reg in
+      Some { Cpu86.saved_regs_hi; saved_fs; saved_gs }
+    | Cpu86.I8086 | Cpu86.I80186 | Cpu86.I80286 -> None
+  in
   Cpu86.load_state t.cpu
-    { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles };
+    { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles;
+      saved_386 };
   C.fill_bytes r t.mem;
   Dos_video.read_state r t.video;
   Dos_ports.read_state r t.ports;
@@ -464,8 +628,7 @@ let read_payload r =
   t.psp_seg <- get "psp" C.word;
   t.kbd_wait <- C.get_bool r;
   t.ext_scan_pending <- get "pending extended scan" C.byte;
-  t.input_continuations <-
-    get_list r ~what:"input continuation" (fun () ->
+  set_input_continuations t @@ get_list r ~what:"input continuation" (fun () ->
         let request = get_input_request r in
         let return_cs = get "input return boundary" C.word in
         let return_ip = get "input return boundary" C.word in
@@ -477,7 +640,6 @@ let read_payload r =
           return_control_flags; service_return });
   t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
-  t.last_tick <- get "last tick" C.count;
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
@@ -512,24 +674,74 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  Dos_xms.read_state r t.xms;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in
          (k, Array.of_list (get_list r ~what:"EMS page" (fun () -> C.get_bytes r)))));
-  let mapped = get_pairs r ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word in
-  if List.length mapped <> Array.length t.ems_mapped then C.fail "EMS frame size differs";
-  List.iteri (fun i p -> t.ems_mapped.(i) <- p) mapped;
+  fill_table t.ems_saved
+    (get_list r ~what:"EMS saved map" (fun () ->
+         let k = get "EMS saved map" ems_handle_key in
+         (k, get_frame r ~what:"EMS saved mapping")));
+  fill_table t.ems_names
+    (get_list r ~what:"EMS name" (fun () ->
+         let k = get "EMS name" ems_handle_key in
+         (k, C.get_string r)));
+  let mapped = get_frame r ~what:"EMS mapping" in
+  Array.blit mapped 0 t.ems_mapped 0 (Array.length mapped);
   let m = t.mouse in
   m.mouse_present <- C.get_bool r;
   m.mouse_x <- get "mouse x" C.any;
   m.mouse_y <- get "mouse y" C.any;
   m.mouse_buttons <- get "mouse buttons" C.any;
-  m.mouse_visible <- C.get_bool r;
+  m.mouse_cursor_flag <- get "mouse cursor flag" cursor_flag;
+  m.mouse_graphics_cursor <-
+    (match get "graphics cursor" cursor_kind with
+     | 0 -> Default_arrow
+     | _ ->
+       let hot_x = get "cursor hot x" C.word in
+       let hot_y = get "cursor hot y" C.word in
+       let mask what = get_int_array r ~what ~len:cursor_rows C.word in
+       let screen_mask = mask "cursor screen mask" in
+       let cursor_mask = mask "cursor mask" in
+       Custom_cursor { hot_x; hot_y; screen_mask; cursor_mask });
+  m.mouse_text_cursor <-
+    (match get "text cursor" cursor_kind with
+     | 0 ->
+       let screen_mask = get "text screen mask" C.word in
+       let cursor_mask = get "text cursor mask" C.word in
+       Software_text { screen_mask; cursor_mask }
+     | _ ->
+       let first_line = get "text cursor first line" C.word in
+       let last_line = get "text cursor last line" C.word in
+       Hardware_text { first_line; last_line });
   m.mouse_dx <- get "mouse dx" C.any;
   m.mouse_dy <- get "mouse dy" C.any;
+  let mickeys_x = get "mouse mickeys x" mouse_ratio in
+  let mickeys_y = get "mouse mickeys y" mouse_ratio in
+  let speed_x = get "mouse speed x" mouse_speed in
+  let speed_y = get "mouse speed y" mouse_speed in
+  let double_speed = get "mouse double speed" mouse_ratio in
+  m.mouse_motion <- { mickeys_x; mickeys_y; speed_x; speed_y; double_speed };
+  m.mouse_carry_x <- get "mouse carry x" mouse_carry;
+  m.mouse_carry_y <- get "mouse carry y" mouse_carry;
   m.mouse_handler_mask <- get "mouse handler mask" C.word;
   m.mouse_handler_seg <- get "mouse handler seg" C.word;
   m.mouse_handler_off <- get "mouse handler off" C.word;
+  List.iter
+    (Array.iter (fun (l : button_log) ->
+         l.times <- get "mouse button count" C.count;
+         l.last_x <- get "mouse button x" C.word;
+         l.last_y <- get "mouse button y" C.word))
+    [ m.mouse_presses; m.mouse_releases ];
+  let get_range () =
+    let lo = get "mouse range low" C.word in
+    let hi = get "mouse range high" C.word in
+    if lo > hi then C.fail "mouse range low above high";
+    (lo, hi)
+  in
+  m.mouse_range_x <- get_range ();
+  m.mouse_range_y <- get_range ();
   C.end_of_input r;
   (match check_consistency t with
    | Ok () -> ()
