@@ -312,6 +312,55 @@ let test_cga_mode_4 () =
     (rgb_at m ~x:9 ~y:1 = (0xFF, 0x55, 0xFF));
   check "이웃은 바탕색" (Dos_machine.pixel m ~x:8 ~y:1) 0
 
+(* INT 10h AH=0Bh: BH=0 은 바탕색과 밝기, BH=1 은 팔레트. 모드 4 의 기본값
+   30h(팔레트 1, 어두움, 검은 바탕)에서 시작한다. *)
+let test_cga_bios_palette () =
+  let palette bh bl = mov_ah 0x0B ^ mov_bx ((bh lsl 8) lor bl) ^ int_ 0x10 in
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 0 0x11 (* 파란 바탕 + 밝기 *)
+           ^ palette 1 0x00 (* 팔레트 0: 초록·빨강·갈색 *)
+           ^ palette 2 0x01 (* 다른 BH 는 아무것도 바꾸지 않는다 *)
+           ^ quit)
+         "")
+  in
+  check_true "밝은 팔레트 0 에서 색 번호 2 는 밝은 빨강"
+    (rgb_at m ~x:9 ~y:1 = (0xFF, 0x55, 0x55));
+  check_true "바탕은 BL 의 하위 니블(파랑)" (rgb_at m ~x:8 ~y:1 = (0x00, 0x00, 0xAA));
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 1 0x01 ^ palette 1 0xFE (* BL 은 비트 0 만 본다: 팔레트 0 *)
+           ^ palette 0 0xE1 (* 하위 5 비트만: 파란 바탕, 어두움, 팔레트 그대로 *)
+           ^ quit)
+         "")
+  in
+  check_true "BL 의 다른 비트는 팔레트를 바꾸지 않는다: 색 번호 2 는 빨강"
+    (rgb_at m ~x:9 ~y:1 = (0xAA, 0x00, 0x00));
+  check_true "바탕은 파랑" (rgb_at m ~x:8 ~y:1 = (0x00, 0x00, 0xAA));
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 0 0x01
+           ^ quit)
+         "")
+  in
+  check_true "BH=0 은 기본 팔레트 1 을 지킨다: 색 번호 2 는 자홍"
+    (rgb_at m ~x:9 ~y:1 = (0xAA, 0x00, 0xAA))
+
 let test_cga_mode_6 () =
   let m =
     run_com
@@ -345,7 +394,71 @@ let test_forty_column_text () =
   check_s "나머지는 다음 줄로"
     (List.nth lines 1) (String.make 5 'A' ^ String.make 35 ' ')
 
+(* 렌더러가 색 표를 미리 만들고 바이트를 여덟 점마다 한 번 읽어도, 점마다
+   평면 비트를 모아 DAC 을 읽던 원래 정의와 같은 바이트를 내야 한다.
+   원래 정의를 그대로 옮겨 두고 무작위 평면·팔레트로 견준다. 너비 20 은
+   8 의 배수가 아니라 마지막 바이트가 다음 줄에 걸치는 경우다. *)
+let reference_planar planes ~w ~h ~attr ~pal =
+  let dac8 v = (max 0 (min 63 v) * 255) / 63 in
+  let img = Bytes.make (w * h * 3) '\000' in
+  let bytes_per_row = w / 8 in
+  for y = 0 to h - 1 do
+    for x = 0 to w - 1 do
+      let off = ((y * bytes_per_row) + (x / 8)) land 0xffff in
+      let bit = 7 - (x mod 8) in
+      let idx = ref 0 in
+      Array.iteri
+        (fun p plane ->
+          if (Char.code (Bytes.get plane off) lsr bit) land 1 = 1 then
+            idx := !idx lor (1 lsl p))
+        planes;
+      let r, g, b = pal.(attr.(!idx land 0x0f) land 0xff) in
+      let i = ((y * w) + x) * 3 in
+      Bytes.set img i (Char.chr (dac8 r));
+      Bytes.set img (i + 1) (Char.chr (dac8 g));
+      Bytes.set img (i + 2) (Char.chr (dac8 b))
+    done
+  done;
+  Bytes.to_string img
+
+let test_planar_render_matches_reference () =
+  let rng = Random.State.make [| 0x3c0 |] in
+  let plane_size = 0x10000 in
+  List.iter
+    (fun (w, h) ->
+      let planes =
+        Array.init 4 (fun _ ->
+            Bytes.init plane_size (fun _ -> Char.chr (Random.State.int rng 256)))
+      in
+      let attr = Array.init 21 (fun _ -> Random.State.int rng 256) in
+      let pal =
+        Array.init 256 (fun _ ->
+            (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
+      in
+      check_true
+        (Printf.sprintf "평면 렌더가 점 단위 정의와 같다 (%dx%d)" w h)
+        (Dos_render.rgb_planar planes ~w ~h ~attr ~pal
+         = reference_planar planes ~w ~h ~attr ~pal))
+    [ (640, 480); (320, 200); (20, 3) ]
+
+let test_vga13_render_matches_reference () =
+  let rng = Random.State.make [| 0x13 |] in
+  let mem = Bytes.init (1024 * 1024) (fun _ -> Char.chr (Random.State.int rng 256)) in
+  let pal =
+    Array.init 256 (fun _ ->
+        (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
+  in
+  let dac8 v = (v * 255) / 63 in
+  let expected =
+    String.init (320 * 200 * 3) (fun i ->
+        let r, g, b = pal.(Char.code (Bytes.get mem (0xA0000 + (i / 3)))) in
+        Char.chr (dac8 (match i mod 3 with 0 -> r | 1 -> g | _ -> b)))
+  in
+  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_vga13 mem pal = expected)
+
 let () =
+  test_planar_render_matches_reference ();
+  test_vga13_render_matches_reference ();
   test_bios_pixel_mode_0d ();
   test_set_reset_bit_mask ();
   test_write_mode_1_copies_latches ();
@@ -357,6 +470,7 @@ let () =
   test_mode_set_keeps_dac_when_inhibited ();
   test_text_glyph_not_mirrored ();
   test_cga_mode_4 ();
+  test_cga_bios_palette ();
   test_cga_mode_6 ();
   test_forty_column_text ();
   test_frame_digest_sees_the_picture ();
