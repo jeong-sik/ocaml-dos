@@ -80,6 +80,7 @@ type t = {
   pit0 : Dos_pit.t;                     (** PIT 채널 0 — OUT 상승이 IRQ0 *)
   mutable irq0_at : int option;         (** 다음 OUT0 상승의 CPU 사이클 *)
   pic : Dos_pic.t;
+  dma : Dos_dma.t;                      (** 포트 00h-0Fh 와 페이지 레지스터 *)
   kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
   (* VGA DAC *)
   pal : (int * int * int) array;
@@ -163,6 +164,7 @@ let create ~speed ~mpu401 ~mem ~video =
     pit0;
     irq0_at = rise_cycle ~speed pit0 ~tick:0;
     pic = Dos_pic.create ();
+    dma = Dos_dma.create ();
     kbc = Dos_kbc.create ();
     pal = Array.init dac_entries default_vga_pal;
     dac_write_index = 0;
@@ -355,6 +357,7 @@ let opl_write t v =
 let set_now t n = t.now <- n
 let palette t = t.pal
 let pic t = t.pic
+let dma t = t.dma
 let kbc t = t.kbc
 let speaker_on t = t.port_b land 0x03 = 0x03
 
@@ -404,6 +407,9 @@ let mpu_port_out t p v =
 
 let port_in t p =
   match Dos_video.port_in t.video p with
+  | Some v -> v
+  | None ->
+  match Dos_dma.port_in t.dma p with
   | Some v -> v
   | None ->
   match mpu_port_in t (p land 0xffff) with
@@ -466,6 +472,7 @@ let port_out t p v =
     | 0x3B5 | 0x3D5 -> crtc_written t v
     | _ -> ()
   end
+  else if Dos_dma.port_out t.dma p v then ()
   else begin
   mpu_port_out t (p land 0xffff) v;
   match p land 0xffff with
@@ -547,7 +554,7 @@ let get_opl_at r =
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
-        speed; now; pit0; irq0_at; pic; kbc; pal; dac_write_index; dac_read_index;
+        speed; now; pit0; irq0_at; pic; dma; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
@@ -561,6 +568,7 @@ let write_state w t =
    | None -> C.put_bool w false
    | Some at -> C.put_bool w true; put "irq0_at" cycle at);
   Dos_pic.write_state w pic;
+  Dos_dma.write_state w dma;
   Dos_kbc.write_state w kbc;
   put "DAC size" C.count (Array.length pal);
   Array.iter
@@ -594,6 +602,7 @@ let read_state r t =
   Dos_pit.read_state r t.pit0;
   t.irq0_at <- (if C.get_bool r then Some (get "irq0_at" cycle) else None);
   Dos_pic.read_state r t.pic;
+  Dos_dma.read_state r t.dma;
   Dos_kbc.read_state r t.kbc ~hz:(cpu_hz t);
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri

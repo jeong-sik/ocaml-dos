@@ -59,8 +59,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    scanning, the LEDs and the scan code set.
    22: PIT channel 0 is a counter of the same kind as channel 2, written
    right after it with the cycle of its next output rise (IRQ0); the
-   machine no longer carries the cycle of its last IRQ0. *)
-let format_version = 22
+   machine no longer carries the cycle of its last IRQ0.
+   23: the DMA controller (per channel: base and current address and count,
+   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC. *)
+let format_version = 23
 
 let digest_hex_len = 32
 let checksum_len = 16
