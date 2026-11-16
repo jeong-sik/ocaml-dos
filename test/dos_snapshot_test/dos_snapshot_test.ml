@@ -393,11 +393,15 @@ let () =
   refused_at_save "an EMS page that is not 16KB" t;
   pages.(0) <- page;
   (* The payload ends with the frame mapping (count, then four pairs) and
-     the mouse (66 bytes, including its callback registration). Point frame
-     page 2 at handle 9, which does not
-     exist, and fix the checksum so only the consistency check can refuse. *)
+     the mouse: 66 bytes up to its callback registration, then three ints
+     for each of six button logs, then two ranges of one byte each while
+     unset. Point frame page 2 at handle 9, which does not exist, and fix
+     the checksum so only the consistency check can refuse. *)
+  check "the crafted bytes assume no mouse range"
+    (t.mouse.mouse_range_x = None && t.mouse.mouse_range_y = None);
   let header_len = magic_len + 8 + 32 + 16 in
-  let mouse_len = 1 + (3 * 8) + 1 + (5 * 8) in
+  let button_logs = 2 * Dos_state.mouse_button_count in
+  let mouse_len = 1 + (3 * 8) + 1 + (5 * 8) + (button_logs * 3 * 8) + 2 in
   let at = String.length saved - mouse_len - (4 * 16) + (2 * 16) in
   let b = Bytes.of_string saved in
   Bytes.set_int64_be b at 9L;
