@@ -1161,7 +1161,7 @@ let erase_line_character t width =
     let col, row = get_cursor t in
     let col, row = if col > 0 then col - 1, row
       else if row > 0 then cols t - 1, row - 1 else 0, 0 in
-    write_char_only t ~col ~row 0x20 ~color:dos_output_color;
+    write_char_only t ~page:(active_page t) ~col ~row 0x20 ~color:dos_output_color;
     set_cursor t col row
   done
 

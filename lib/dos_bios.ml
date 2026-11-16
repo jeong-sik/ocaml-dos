@@ -546,6 +546,7 @@ let video t =
     end;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
+    reset_pages t;
     wr8 t 0x484 (rows t - 1);
     wr16 t 0x485 (Dos_video.char_height t.video);
     set_font_vector t;
@@ -563,22 +564,23 @@ let video t =
     Dos_ports.port_out t.ports 0x3D5 (Cpu86.reg8 cpu 5);
     Dos_ports.port_out t.ports 0x3D4 0x0B;
     Dos_ports.port_out t.ports 0x3D5 (Cpu86.reg8 cpu 1)
-  | 0x02 -> set_cursor t (Cpu86.reg8 cpu 2) (Cpu86.reg8 cpu 6)
+  | 0x02 -> set_cursor_on t ~page:(Cpu86.reg8 cpu 7) (Cpu86.reg8 cpu 2) (Cpu86.reg8 cpu 6)
   | 0x03 ->
-    let col, row = get_cursor t in
+    let col, row = get_cursor_on t ~page:(Cpu86.reg8 cpu 7) in
     Cpu86.set_reg8 cpu 2 col;
     Cpu86.set_reg8 cpu 6 row;
     Cpu86.set_reg8 cpu 5 (rd8 t 0x461);
     Cpu86.set_reg8 cpu 1 (rd8 t 0x460)
-  | 0x05 -> wr8 t 0x462 al
+  | 0x05 -> select_page t al
   | 0x06 | 0x07 ->
     scroll_window t ~up:(ah = 0x06) ~lines:al
       ~top:(Cpu86.reg8 cpu 5) ~left:(Cpu86.reg8 cpu 1)
       ~bottom:(Cpu86.reg8 cpu 6) ~right:(Cpu86.reg8 cpu 2)
       ~attr:(Cpu86.reg8 cpu 7)
   | 0x08 ->
-    let col, row = get_cursor t in
-    Cpu86.set_reg16 cpu 0 (read_cell t row col)
+    let page = Cpu86.reg8 cpu 7 in
+    let col, row = get_cursor_on t ~page in
+    Cpu86.set_reg16 cpu 0 (read_cell_on t ~page row col)
   | (0x09 | 0x0A) when graphics t ->
     (* 그래픽 모드: 글꼴 표의 점을 CX 번 찍는다. AH=09h 는 BL 이 색이고
        bit7 이면 XOR 이다. AH=0Ah 는 모드의 기본색을 쓴다. 256색 모드의
@@ -595,18 +597,19 @@ let video t =
       end
     done
   | 0x09 | 0x0A ->
-    (* 커서 자리에 같은 글자를 CX 번. 커서는 움직이지 않는다.
+    (* BH 쪽의 커서 자리에 같은 글자를 CX 번. 커서는 움직이지 않는다.
        AH=09 는 BL 을 속성으로 쓰고, AH=0A 는 화면의 속성을 남긴다. *)
-    let col, row = get_cursor t in
+    let page = Cpu86.reg8 cpu 7 in
+    let col, row = get_cursor_on t ~page in
     let n = max 1 (Cpu86.reg16 cpu 1) in
     let r = ref row and c = ref col in
     for _ = 1 to n do
       if !r < rows t then begin
         let attr =
           if ah = 0x09 then Cpu86.reg8 cpu 3
-          else (read_cell t !r !c) lsr 8
+          else (read_cell_on t ~page !r !c) lsr 8
         in
-        write_cell t !r !c ((attr lsl 8) lor al);
+        write_cell_on t ~page !r !c ((attr lsl 8) lor al);
         incr c;
         if !c >= cols t then begin c := 0; incr r end
       end
@@ -616,7 +619,7 @@ let video t =
        전체다(256색 모드면 0~255). *)
     teletype t al (Cpu86.reg8 cpu 3)
   | 0x0C ->
-    (* 점 찍기: AL=색, CX=x, DX=y. BH 페이지는 한 장뿐이라 무시한다. *)
+    (* 점 찍기: AL=색, CX=x, DX=y. BH(쪽)는 무시하고 늘 0 쪽에 찍는다. *)
     Dos_video.put_pixel t.video ~x:(Cpu86.reg16 cpu 1) ~y:(Cpu86.reg16 cpu 2)
       ~color:al
   | 0x0D ->
@@ -776,14 +779,15 @@ let video t =
     let n = Cpu86.reg16 cpu 1 in
     let attr = Cpu86.reg8 cpu 3 in
     let col0 = Cpu86.reg8 cpu 2 and row0 = Cpu86.reg8 cpu 6 in
-    let saved = get_cursor t in
-    set_cursor t col0 row0;
+    let page = Cpu86.reg8 cpu 7 in
+    let saved = get_cursor_on t ~page in
+    set_cursor_on t ~page col0 row0;
     for i = 0 to n - 1 do
       if al land 0x02 <> 0 then
-        put_char t (rd8 t (src + (i * 2))) (rd8 t (src + (i * 2) + 1))
-      else put_char t (rd8 t (src + i)) attr
+        put_char_on t ~page (rd8 t (src + (i * 2))) (rd8 t (src + (i * 2) + 1))
+      else put_char_on t ~page (rd8 t (src + i)) attr
     done;
-    if al land 0x01 = 0 then set_cursor t (fst saved) (snd saved)
+    if al land 0x01 = 0 then set_cursor_on t ~page (fst saved) (snd saved)
   | 0x1A ->
     (* 디스플레이 조합 코드: BL = 지금 화면, BH = 다른 화면(00h = 없음) *)
     Cpu86.set_reg8 cpu 0 0x1A;
