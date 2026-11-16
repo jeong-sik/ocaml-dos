@@ -187,7 +187,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   색은 그대로 둔다. 마지막 줄에서 넘치면 새 줄은 커서 칸의 색으로
   채운다. AH=09h·13h 는 색을 쓴다. 부팅한 화면은 회색 공백(07h)이다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
+  seek/close/dup, 6Ch 확장 열기), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
   쓴 바이트는 닫을 때 파일이 된다, 29h 이름 나누기), findfirst/findnext,
   디렉터리(39h 만들기·3Ah 지우기·3Bh 옮기기·47h 현재 위치 — FCB 는 현재
   디렉터리의 파일을 가리킨다),
