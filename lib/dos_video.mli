@@ -13,10 +13,12 @@
     256색 모드도 같은 평면 넷에 산다. 시퀀서 메모리 모드(4번)의 chain-4
     비트가 서 있으면(13h) 주소 a 는 평면 (a & 3) 의 (a & ~3) 자리이고,
     바이트를 그대로 쓴다. chain-4 를 끄면(Mode X) 16색 모드처럼 맵 마스크·
-    래치·쓰기 모드를 지난다. 화면은 CRTC 가 정한다: 시작 주소(0Ch/0Dh),
+    래치·쓰기 모드를 지난다.
+
+    16색과 256색 그래픽 화면은 CRTC 가 정한다: 시작 주소(0Ch/0Dh),
     행 간격(13h), 주소 크기(14h bit6, 17h bit5-6), 크기(01h, 07h, 09h,
-    12h). 그래서 페이지 넘김과 320x240 이 된다. split screen 과 픽셀 패닝은
-    없다. *)
+    12h). 그래서 페이지 넘김, 하드웨어 스크롤, 320x240 이 된다. split
+    screen 과 픽셀 패닝은 없다. 텍스트와 CGA 모드는 모드표대로 그린다. *)
 
 type kind =
   | Text                (** 0,1,2,3,7 — 0xB8000 의 글자+속성 *)
@@ -32,18 +34,27 @@ val create : mem:Bytes.t -> t
 val mode : t -> int
 val kind : t -> kind
 val dims : t -> int * int
-(** 그릴 프레임의 크기. 텍스트는 글자 격자를 8x16 으로 편 크기다. 256색은
-    CRTC 레지스터에서 나온다 — 13h 는 320x200, Mode X 는 320x240. *)
+(** 그릴 프레임의 크기. 텍스트는 글자 격자를 8x16 으로 편 크기다. 16색과
+    256색은 CRTC 레지스터에서 나온다 — 모드를 세운 직후에는 모드표와 같고
+    (12h 는 640x480), Mode X 는 320x240. *)
 
 val text_cols : t -> int
 (** 이 모드의 BIOS 열 수(BDA 0x44A) — 40 또는 80. 그래픽 모드도 값을
     가진다: 모드 0Dh 는 40, 12h 는 80 이다. *)
 
+val text_rows : t -> int
+(** 이 모드의 BIOS 글자 행 수(BDA 0x484 + 1). 480줄 모드(11h, 12h)는 30,
+    나머지는 25. *)
+
+val char_height : t -> int
+(** BIOS 글자 한 칸의 픽셀 높이(BDA 0x485). 200줄 그래픽 모드는 8,
+    350줄은 14, 480줄과 텍스트는 16. *)
+
 val set_mode : t -> int -> clear:bool -> unit
 (** INT 10h AH=00h. 모드에 맞는 화면 메모리를 지우고(요청하면) 레지스터를
-    그 모드의 부팅값으로 되돌린다. 모르는 번호는 텍스트로 본다. CRTC 는
-    13h 에서만 그 모드의 표(SeaBIOS crtc_13)를 싣는다. 다른 모드는 CRTC
-    를 건드리지 않는다 — 그 모드의 화면 크기는 모드표에서 온다. *)
+    그 모드의 부팅값으로 되돌린다. 모르는 번호는 텍스트로 본다. 그래픽
+    모드(0Dh-13h)는 CRTC 에 그 모드의 표(SeaBIOS stdvgamodes.c)를 싣는다.
+    텍스트와 CGA 모드는 CRTC 를 건드리지 않는다. *)
 
 val owns_address : t -> int -> bool
 (** 이 물리 주소가 평면 메모리인가 — 그렇다면 읽기·쓰기가 그래픽
@@ -92,19 +103,34 @@ val screen_digest : t -> int
     픽셀을 다 만들어 비교하는 것보다 싸다. 충돌하면 "안 변했다" 고 잘못
     읽을 뿐이라 암호학적 강도가 필요하지 않다. *)
 
+val xor_pixel : int
+(** 색의 bit7(0x80). 256색이 아닌 모드에서 "이미 있는 점과 XOR" 이다. *)
+
 val put_pixel : t -> x:int -> y:int -> color:int -> unit
 val get_pixel : t -> x:int -> y:int -> int
 (** INT 10h AH=0Ch/0Dh. 텍스트 모드에서는 아무 일도 하지 않는다. 256색은
-    BIOS 처럼 0xA0000 + y*320 + x 를 쓰고 읽는다. 쓰기는 CPU 쓰기와 같고,
-    읽기는 래치를 바꾸지 않는다. *)
+    BIOS 처럼 0xA0000 + y*320 + x 를 쓰고 읽는다. 16색은 모드표 가로/8
+    바이트를 한 줄로 친다. 둘 다 CRTC 의 시작 주소·행 간격과 상관없다.
+    256색 쓰기는 CPU 쓰기와 같고, 읽기는 래치를 바꾸지 않는다. 256색이 아닌
+    모드에서 [color] 의 bit7 이 서 있으면 이미 있는 점과 XOR 한다. *)
 
 val screen_pixel : t -> x:int -> y:int -> int
-(** 화면의 (x, y) 에 보이는 점. 256색은 CRTC 시작 주소·행 간격을 따른다.
-    다른 모드는 {!get_pixel} 과 같다. *)
+(** 화면의 (x, y) 에 보이는 점. 16색과 256색은 CRTC 시작 주소·행 간격을
+    따른다. 16색은 속성 팔레트를 거치기 전의 색 번호(0-15)다. 다른 모드는
+    {!get_pixel} 과 같다. *)
 
 val screen256 : t -> Bytes.t
 (** 256색 모드에서 화면에 보이는 점의 색 번호, 위에서 아래로 한 바이트씩.
     길이는 {!dims} 의 가로 × 세로다. *)
+
+val screen16 : t -> Bytes.t
+(** 16색 모드에서 화면에 보이는 점의 DAC 자리 — 색 번호를 속성 팔레트로
+    옮긴 값이다. 위에서 아래로 한 바이트씩, 길이는 {!dims} 의 가로 × 세로. *)
+
+val screen_blanked : t -> bool
+val set_screen_blanked : t -> bool -> unit
+(** 시퀀서 1 번 bit 5(화면 끄기). 포트 3C4h/3C5h 로 써도 같은 비트다. 켜져
+    있으면 그림은 DAC 0 번 색 한 가지다. *)
 
 val cga_color_select : t -> int
 val set_cga_color_select : t -> int -> unit
