@@ -78,11 +78,23 @@ let blit img ~width ~x ~y (r, g, b) =
   Bytes.set img (i + 1) (Char.chr g);
   Bytes.set img (i + 2) (Char.chr b)
 
+(* 시퀀서가 화면을 끄면 그림 전체가 DAC 0 번 색이다. *)
+let rgb_solid ~width ~height pal =
+  let r, g, b = rgb_of_dac pal 0 in
+  String.init (width * height * 3) (fun i ->
+      Char.chr (match i mod 3 with 0 -> r | 1 -> g | _ -> b))
+
+(* 텍스트 속성 바이트: 아래 니블이 글자색, 위 니블이 바탕색이다. 깜박임이
+   켜져 있으면 위 니블의 맨 위 비트는 색이 아니라 깜박임이다. *)
+let attr_nibble = 0x0f
+let attr_bg_without_blink = 0x07
+
 (* 텍스트: 셀마다 8x8 글리프를 세로로 두 줄씩 찍는다. 한 번만 그리면
    위쪽 절반만 차고 아래가 검게 남는다. 폰트는 1비트/행 — 최상위 비트가
-   왼쪽이다. 바탕색은 상위 니블의 아래 세 비트만 쓴다. 네 번째 비트는
-   깜빡임 속성이지 색이 아니다. *)
-let rgb_text mem ~cols =
+   왼쪽이다. 색 번호는 그래픽 모드처럼 속성 팔레트를 지나 DAC 에서 색을
+   얻는다. 깜박이는 글자는 늘 켜진 쪽으로 그린다 — 그림 한 장에는 시각이
+   없다. *)
+let rgb_text mem ~cols ~attr ~pal ~blink =
   let width = cols * 8 in
   let height = rows * glyph_h * glyph_scale in
   let img = Bytes.make (width * height * 3) '\000' in
@@ -90,9 +102,10 @@ let rgb_text mem ~cols =
     for c = 0 to cols - 1 do
       let cell = vram_base + (((r * cols) + c) * 2) in
       let ch = Char.code (Bytes.get mem cell) in
-      let attr = Char.code (Bytes.get mem (cell + 1)) in
-      let fg = cga_palette.(attr land 0x0f) in
-      let bg = cga_palette.((attr lsr 4) land 0x07) in
+      let a = Char.code (Bytes.get mem (cell + 1)) in
+      let bg_mask = if blink then attr_bg_without_blink else attr_nibble in
+      let fg = rgb_of_dac pal attr.(a land attr_nibble) in
+      let bg = rgb_of_dac pal attr.((a lsr 4) land bg_mask) in
       let glyph = Font8x8.glyph ch in
       for gy = 0 to glyph_h - 1 do
         let bits = glyph.(gy) in
@@ -151,31 +164,15 @@ let rgb_cga2 mem =
   done;
   Bytes.to_string img
 
-(* EGA/VGA 16색: 평면 넷의 같은 비트를 모아 색 번호를 만들고, 속성
-   팔레트가 그것을 DAC 자리로 옮긴다. *)
-let rgb_planar planes ~w ~h ~attr ~pal =
-  let img = Bytes.make (w * h * 3) '\000' in
-  let bytes_per_row = w / 8 in
-  for y = 0 to h - 1 do
-    for x = 0 to w - 1 do
-      let off = ((y * bytes_per_row) + (x / 8)) land 0xffff in
-      let bit = 7 - (x mod 8) in
-      let idx = ref 0 in
-      for p = 0 to Array.length planes - 1 do
-        if (Char.code (Bytes.get planes.(p) off) lsr bit) land 1 = 1 then
-          idx := !idx lor (1 lsl p)
-      done;
-      blit img ~width:w ~x ~y (rgb_of_dac pal attr.(!idx land 0x0f))
-    done
-  done;
-  Bytes.to_string img
+(* 그래픽: 화면 순서로 늘어선 DAC 자리, DAC 은 채널당 6비트. *)
+let vga_colors = 256
 
-(* VGA 13h: 0xA0000 선형 320x200, DAC 은 채널당 6비트. *)
-let rgb_vga13 mem pal =
-  let width = 320 and height = 200 in
-  let img = Bytes.make (width * height * 3) '\000' in
-  for i = 0 to (width * height) - 1 do
-    let r, g, b = rgb_of_dac pal (Char.code (Bytes.get mem (0xA0000 + i))) in
+let rgb_indexed indices pal =
+  let n = Bytes.length indices in
+  let img = Bytes.make (n * 3) '\000' in
+  let colors = Array.init vga_colors (fun i -> rgb_of_dac pal i) in
+  for i = 0 to n - 1 do
+    let r, g, b = colors.(Char.code (Bytes.get indices i)) in
     Bytes.set img (i * 3) (Char.chr r);
     Bytes.set img ((i * 3) + 1) (Char.chr g);
     Bytes.set img ((i * 3) + 2) (Char.chr b)
