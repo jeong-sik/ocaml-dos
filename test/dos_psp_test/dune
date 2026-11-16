@@ -1,0 +1,3 @@
+(test
+ (name dos_psp_test)
+ (libraries dosmachine))
