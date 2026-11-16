@@ -17,6 +17,8 @@ let show = function
   | Cells { cols; rows } -> Printf.sprintf "Cells %dx%d" cols rows
   | Graphics { id; reply = Loaded } -> Printf.sprintf "Graphics %d OK" id
   | Device_attributes -> "Device_attributes"
+  | Save_state -> "Save_state"
+  | Load_state -> "Load_state"
   | Graphics { id; reply = Failed e } -> Printf.sprintf "Graphics %d %S" id e
   | Quit -> "Quit"
 
@@ -83,7 +85,9 @@ let test_function_keys () =
   events "shift+F1" "\027[1;2P" [ Key 0x5400 ];
   events "ctrl+F10" "\027[21;5~" [ Key 0x6700 ];
   events "alt+F5" "\027[15;3~" [ Key 0x6C00 ];
-  events "F11" "\027[23~" [ Unmapped "CSI 23 ~" ];
+  events "F11 saves" "\027[23~" [ Save_state ];
+  events "shift+F11 loads" "\027[23;2~" [ Load_state ];
+  events "ctrl+F11" "\027[23;5~" [ Unmapped "F11+mods" ];
   events "F12 quits" "\027[24~" [ Quit ];
   events "SS3 F1" "\027OP" [ Key 0x3B00 ];
   events "SS3 down" "\027OB" [ Key 0x5000 ]

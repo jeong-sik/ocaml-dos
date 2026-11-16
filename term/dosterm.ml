@@ -10,6 +10,8 @@ type event =
   | Cells of { cols : int; rows : int }
   | Graphics of { id : int; reply : graphics_reply }
   | Device_attributes
+  | Save_state
+  | Load_state
   | Quit
 
 (* ---------- 키 ---------- *)
@@ -130,6 +132,7 @@ let kitty_key code mods =
       else [ Unmapped (Printf.sprintf "kitty %d" code) ]
 
 let quit_tilde = 24
+let state_tilde = 23
 
 (* [CSI n;mods ~] *)
 let tilde_key n mods =
@@ -143,6 +146,11 @@ let tilde_key n mods =
   | 11 | 12 | 13 | 14 | 15 -> f_key (n - 10) mods
   | 17 | 18 | 19 | 20 | 21 -> f_key (n - 11) mods
   | n when n = quit_tilde -> Quit
+  | n when n = state_tilde -> (
+    match mods with
+    | Plain -> Save_state
+    | Shift -> Load_state
+    | Alt | Ctrl | Other -> Unmapped "F11+mods")
   | n -> Unmapped (Printf.sprintf "CSI %d ~" n)
 
 (* [CSI 1;mods X] 와 SS3 X 의 끝 글자 *)
