@@ -71,7 +71,8 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
-  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
+  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기),
+  날짜·시각, 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
 - **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), PIC 마스크,
   VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
