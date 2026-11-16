@@ -51,10 +51,13 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    18: the CRTC registers move from the ports to the video adapter, and
    mode 13h's screen lives in the four planes instead of RAM at 0xA0000.
    19: EMS handle names (INT 67h AH=53h).
-   20: the keyboard controller also carries the replies it has not sent,
+   20: text modes load their CRTC table and the text screen follows the
+   CRTC start address and offset. A format 19 machine in a text mode holds
+   zero CRTC registers, which would now draw every row from row 0.
+   21: the keyboard controller also carries the replies it has not sent,
    the command byte, the output port, a command waiting for its byte,
    scanning, the LEDs and the scan code set. *)
-let format_version = 20
+let format_version = 21
 
 let digest_hex_len = 32
 let checksum_len = 16
