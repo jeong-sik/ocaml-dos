@@ -7,8 +7,7 @@ open Cpu86_alu
 open Cpu86_bcd
 open Cpu86_string
 
-(* 16 비트 far 포인터 m16:16 과 BOUND 의 두 경계가 차지하는 바이트. *)
-let far_pointer16_bytes = 4
+(* BOUND 의 16 비트 두 경계가 차지하는 바이트. *)
 let bounds16_bytes = 4
 
 let idle t =
@@ -190,11 +189,7 @@ let step t =
             if d >= 0x80 then d lor 0xff00 else d
           end
         in
-        let sx v = if v >= 0x8000 then v - 0x10000 else v in
-        let p = sx a * sx imm in
-        set_reg16 t regf (p land 0xffff);
-        t.cf <- p > 0x7fff || p < -0x8000;
-        t.of_ <- p > 0x7fff || p < -0x8000;
+        set_reg16 t regf (imul16 t a imm);
         21
       | 0xc0 | 0xc1 (* shift rm, imm8 (186) *) ->
         let width = if opcode = 0xc0 then 8 else 16 in

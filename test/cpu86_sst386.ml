@@ -156,7 +156,12 @@ let undefined_flags file =
   let cf = Cpu86.f_carry and pf = Cpu86.f_parity and af = Cpu86.f_aux in
   let zf = Cpu86.f_zero and sf = Cpu86.f_sign and ov = Cpu86.f_overflow in
   match name with
-  | "F6.4" | "F6.5" | "F7.4" | "F7.5" | "69" | "6B" -> sf lor zf lor af lor pf
+  | "F6.4" | "F6.5" | "F7.4" | "F7.5" | "69" | "6B" | "0FAF" -> sf lor zf lor af lor pf
+  (* 0F 의 넷은 80386.csv 의 f_umask 그대로다. *)
+  | "0FA3" | "0FAB" | "0FB3" | "0FBB" | "0FBA.4" | "0FBA.5" | "0FBA.6" | "0FBA.7" ->
+    ov lor sf lor zf lor af lor pf
+  | "0FA4" | "0FA5" | "0FAC" | "0FAD" -> af lor ov
+  | "0FBC" | "0FBD" -> cf lor ov lor sf lor af lor pf
   | "F6.6" | "F6.7" | "F7.6" | "F7.7" -> cf lor ov lor sf lor zf lor af lor pf
   | "27" | "2F" -> ov
   | "37" | "3F" -> ov lor sf lor zf lor pf
