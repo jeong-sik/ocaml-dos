@@ -1,0 +1,3 @@
+(test
+ (name dos_country_test)
+ (libraries dosmachine))
