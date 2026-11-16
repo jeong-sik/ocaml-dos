@@ -65,7 +65,7 @@ let service_status_mask t v =
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
-  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
+  | Some (Bios (Keyboard_irq | Rtc_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
 let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false)
@@ -281,6 +281,7 @@ let step_result t =
            && Cpu86.seg t.cpu 2 = wait.return_ss && Cpu86.reg16 t.cpu 4 = wait.return_sp ->
       let result = match wait.request with
         | Bios_key -> Dos_bios.read_key t
+        | Bios_wait -> Dos_bios.resume_wait t
         | Dos_input request -> Dos_dos.resume_input t request
       in
       (match result with
