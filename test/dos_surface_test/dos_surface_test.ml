@@ -652,19 +652,23 @@ let test_psp_both_ways () =
   check "AH=51 BX=PSP 세그먼트" (peek16 m scratch) 0x1000;
   check "AH=62 BX=PSP 세그먼트" (peek16 m (scratch + 2)) 0x1000
 
-(* 어떤 DOS 판에도 없는 AH=80h. 기계는 그 INT 에서 멈추고, 다시 돌려도
-   같은 자리에서 멈춘다. *)
+(* MS-DOS 4.0 표 안(6Ch 이하)이지만 이 DOS 가 아직 만들지 않은 기능:
+   5Fh(네트워크 리디렉터). 6Ch 위 번호는 실기처럼 AL=0 으로 돌아가므로
+   멈춤 시험에 쓰지 않는다. *)
+let unmodeled_function = 0x5F
+
+(* 기계는 그 INT 에서 멈추고, 다시 돌려도 같은 자리에서 멈춘다. *)
 let test_unknown_function_stops () =
   let m = Dos_machine.create () in
-  Dos_machine.load_com m (mov_ah 0x80 ^ int_ 0x21 ^ quit);
+  Dos_machine.load_com m (mov_ah unmodeled_function ^ int_ 0x21 ^ quit);
   let stop () =
     match Dos_machine.run m ~max_steps:1000 with
     | () -> None
     | exception Cpu86.Unsupported msg -> Some msg
   in
   let first = stop () in
-  check_s "AH=80 은 Unsupported 로 멈춘다"
-    (Option.value first ~default:"(멈추지 않음)") "INT 21h AH=80h AL=00h @1000:0102";
+  check_s "AH=5F 는 Unsupported 로 멈춘다"
+    (Option.value first ~default:"(멈추지 않음)") "INT 21h AH=5Fh AL=00h @1000:0102";
   check "IP 는 INT 21h 에 있다" (Cpu86.dump_ip m.Dos_state.cpu) 0x0102;
   check_true "다시 돌려도 같은 자리에서 멈춘다" (stop () = first);
   check_true "프로그램은 끝나지 않았다" (not (Dos_machine.exited m))
@@ -678,7 +682,7 @@ let test_unknown_function_stops_behind_a_hook () =
          let hook = off and old = off + 5 in
          mov_ax 0x3521 ^ int_ 0x21 ^ store_bx old ^ "\x8c\x06" ^ w (old + 2)
          ^ mov_dx hook ^ mov_ax 0x2521 ^ int_ 0x21
-         ^ mov_ah 0x80 ^ int_ 0x21 ^ quit)
+         ^ mov_ah unmodeled_function ^ int_ 0x21 ^ quit)
       ((* hook: jmp far [cs:old] *) "\x2e\xff\x2e" ^ w 0 ^ (* old *) "\x00\x00\x00\x00")
   in
   (* [assemble] 은 데이터 오프셋을 넘기므로 hook 의 피연산자를 고친다. *)
@@ -696,10 +700,10 @@ let test_unknown_function_stops_behind_a_hook () =
   let first = stop () in
   let cpu = m.Dos_state.cpu in
   let at = (Cpu86.seg cpu 1 * 16) + Cpu86.dump_ip cpu in
-  check_s "훅 뒤의 AH=80 도 멈춘다"
+  check_s "훅 뒤의 AH=5F 도 멈춘다"
     (Option.value first ~default:"(멈추지 않음)")
     (* AL 은 앞의 mov ax,2521h 가 남긴 21h 다. *)
-    (Printf.sprintf "INT 21h AH=80h AL=21h @f000:%04x" (Cpu86.dump_ip cpu));
+    (Printf.sprintf "INT 21h AH=5Fh AL=21h @f000:%04x" (Cpu86.dump_ip cpu));
   check "ROM 스텁에서 멈춘다" (Cpu86.seg cpu 1) 0xF000;
   check "그 자리는 INT 명령이다" (Dos_machine.mem_read m at) 0xCD;
   check_true "다시 돌려도 같은 자리에서 멈춘다" (stop () = first);
