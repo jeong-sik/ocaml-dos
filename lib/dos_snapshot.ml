@@ -36,8 +36,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    12: the payload opens with the CPU model, and an 80386 carries the upper
    halves of its eight registers and FS, GS after the cycle count.
    13: whether an MPU-401 is in the machine, and its mode and waiting
-   answers, after the OPL2 timers. *)
-let format_version = 13
+   answers, after the OPL2 timers.
+   14: each OPL2 timer carries its next overflow (or stopped) and a flag
+   that is clear, raised or masked, in place of a one-shot expiry stamp. *)
+let format_version = 14
 
 let digest_hex_len = 32
 let checksum_len = 16
