@@ -142,6 +142,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
         (* 범위와 자리는 [Dos_bios.install] 이 BDA 를 채운 뒤 부팅 모드의
            가상 화면에 맞춰 다시 쓴다 *)
         mouse_range_x = (0, 0); mouse_range_y = (0, 0);
+        mouse_drawn = Dos_state.Not_drawn;
       };
       on_unserved = (fun _ ~vector:_ ~ax:_ -> ());
     }

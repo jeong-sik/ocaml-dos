@@ -59,8 +59,8 @@ let cursor_rows = 16
 
 type graphics_cursor =
   | Default_arrow
-      (** 리셋 뒤 드라이버에 든 화살표다. 이 기계는 그 비트맵을 지어내지
-          않는다. 무엇을 그릴지는 커서를 그리는 쪽이 정한다(이슈 #77). *)
+      (** 리셋 뒤 드라이버에 든 화살표다. 비트맵은 Dos_mouse_cursor 의
+          default_screen_mask·default_cursor_mask(DOSBox-X mouse.cpp)다. *)
   | Custom_cursor of {
       hot_x : int;  (** BX 그대로 *)
       hot_y : int;  (** CX 그대로 *)
@@ -82,6 +82,15 @@ type text_cursor =
 (* 리셋 뒤 텍스트 커서는 속성 바이트만 뒤집는 소프트웨어 커서다(DOSBox-X
    mouse.cpp defaultTextAndMask 77FFh·defaultTextXorMask 7700h). *)
 let default_text_cursor = Software_text { screen_mask = 0x77FF; cursor_mask = 0x7700 }
+
+(* 드라이버가 화면에 그려 둔 커서와 그 밑에 있던 것. 숨기거나 옮기기 전에
+   되돌린다(DOSBox-X mouse.cpp backData·backposx·backposy). *)
+type drawn_cursor =
+  | Not_drawn
+  | Drawn_text of { page : int; col : int; row : int; under : int }
+      (** 칸 하나, [under] 는 그 칸의 글자·속성 워드 *)
+  | Drawn_graphics of { left : int; top : int; width : int; height : int; under : int array }
+      (** 화면 안으로 자른 사각형. [under] 는 위 줄부터 줄마다 [width] 점 *)
 
 (* 움직임 설정 — AX=0Fh 미키/화소 비율, 1Ah 감도, 13h·1Ah 두 배 속도 문턱
    (RBIL INT 33/000F, 001A, 0013). *)
@@ -139,6 +148,7 @@ type mouse = {
   mouse_releases : button_log array;
   mutable mouse_range_x : int * int;
   mutable mouse_range_y : int * int;
+  mutable mouse_drawn : drawn_cursor;  (** {!Dos_mouse_cursor} 가 쓴다 *)
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
