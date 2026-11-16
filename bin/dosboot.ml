@@ -124,7 +124,14 @@ let hex s =
   let s = if String.length s > 2 && String.sub s 0 2 = "0x" then s else "0x" ^ s in
   int_of_string s
 
+(* --cpu 의 값: 정확히 같은 글자만 받는다. *)
+let model_of_flag = function
+  | "286" -> Some Cpu86.I80286
+  | "386" -> Some Cpu86.I80386
+  | _ -> None
+
 let () =
+  let cpu = ref None in
   let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
@@ -132,10 +139,13 @@ let () =
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
-  let scenario = ref [] and digests = ref [] in
+  let scenario = ref [] and digests = ref [] and args = ref "" and cpu_mhz = ref None
+  and mpu401 = ref false in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
+      ("--args", Arg.Set_string args,
+       "TEXT  명령줄 인자 — 프로그램 이름 뒤에 공백 하나와 TEXT 를 친 것처럼 넘긴다");
       ("--demo", Arg.Set_string demo,
        "NAME  내장 데모 — hello(텍스트) 또는 ega(모드 0Dh 색 띠, \
         --steps 2000000 필요)");
@@ -144,6 +154,13 @@ let () =
       ("--save", Arg.String (fun m -> saves := m :: !saves),
        "NAME=PATH  끝난 뒤 게스트가 쓴 파일을 호스트로 꺼낸다");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 machine step 수 (입력 대기·idle 포함)");
+      ("--cpu", Arg.String (fun s ->
+         match model_of_flag s with
+         | Some model -> cpu := Some model
+         | None ->
+           prerr_endline ("bad --cpu " ^ s ^ " (want 286 or 386)");
+           exit 2),
+       "286|386  CPU 모델 (기본 286). 386 이면 32 비트 레지스터·FS·GS·0Fh 명령이 돈다");
       ("--feed", Arg.Set_string feed,
        "HEX@STEP,..  그 스텝에 무조건 키를 넣는다 — 굶주림 대기 없이");
       ("--press", Arg.String (fun spec ->
@@ -176,6 +193,8 @@ let () =
       ("--type", Arg.Set_string typed,
        "TEXT  글자를 차례로 입력 (US 자판 스캔 코드)");
       ("--mouse", Arg.Set_string mouse, "X,Y,BUTTONS  마우스를 붙이고 위치를 준다");
+      ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
+       "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다");
       ("--clock", Arg.Set_string clock,
        "Y-M-D,H:M:S  게스트가 보는 기준시각 (기본 1990-1-1,8:0:0)");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
@@ -192,10 +211,24 @@ let () =
             | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)")
          | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)"),
        "  INT 21h AH=42 seek 중 폰트 글리프 요청(offset = idx*RECSIZE+base 패턴) 기록");
-      ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프") ]
+      ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프");
+      ("--mpu401", Arg.Set mpu401, "  330h 에 MPU-401(UART 전용)을 꽂는다. MIDI 바이트는 버린다") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
-  let m = Dos_machine.create () in
+  let speed =
+    match !cpu_mhz with
+    | None -> Dos_ports.pc_speed
+    | Some mhz -> (
+      match Dos_ports.speed_of_mhz mhz with
+      | Ok speed ->
+        Printf.eprintf "cpu: %.2f MHz (8086 cycles)\n"
+          (float_of_int (Dos_ports.speed_hz speed) /. 1e6);
+        speed
+      | Error e ->
+        prerr_endline ("bad --cpu-mhz: " ^ e);
+        exit 2)
+  in
+  let m = Dos_machine.create ?model:!cpu ~speed ~mpu401:!mpu401 () in
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
@@ -217,10 +250,14 @@ let () =
       | Some (name, path) -> Dos_machine.mount_file m name (read_file path)
       | None -> ())
     (List.rev !mounts);
+  (* COMMAND.COM 이 넘기는 꼬리는 이름 바로 뒤의 공백부터다 *)
+  let tail = if !args = "" then "" else " " ^ !args in
   if !demo = "hello" then Dos_machine.load_com m (hello_com ())
   else if !demo = "ega" then Dos_machine.load_com m (ega_com ())
-  else if !com <> "" then Dos_machine.load_com m (read_file !com)
-  else if !exe <> "" then Dos_machine.load_exe m (read_file !exe)
+  else if !com <> "" then
+    Dos_machine.load_com ~name:(Filename.basename !com) ~tail m (read_file !com)
+  else if !exe <> "" then
+    Dos_machine.load_exe ~name:(Filename.basename !exe) ~tail m (read_file !exe)
   else begin
     prerr_endline "need --demo hello|ega or --com PATH or --exe PATH";
     exit 2

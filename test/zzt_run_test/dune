@@ -1,0 +1,3 @@
+(test
+ (name zzt_run_test)
+ (libraries dosmachine))
