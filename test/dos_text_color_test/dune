@@ -1,0 +1,3 @@
+(test
+ (name dos_text_color_test)
+ (libraries dosmachine))

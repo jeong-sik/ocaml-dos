@@ -1,0 +1,3 @@
+(test
+ (name dos_int21_dispatch_test)
+ (libraries dosmachine))

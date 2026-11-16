@@ -1,5 +1,5 @@
-(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC 마스크, VGA DAC,
-    CRTC, PC 스피커, CGA 상태 레지스터, CMOS 시계([Dos_cmos]).
+(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), DMA({!Dos_dma}), 키보드
+    컨트롤러({!Dos_kbc}), VGA DAC, CRTC, PC 스피커, CGA 상태 레지스터, CMOS 시계({!Dos_cmos}).
 
     이 포트들이 무엇을 돌려주는지가 게임의 진행 조건이 된다. 고정값을
     돌려주면 상태 변화를 기다리는 루프가 영원히 안 풀린다 — CGA 재주사
@@ -20,6 +20,9 @@ type t
 
 type speed
 
+val pit_hz : int
+(** PIT 입력 클록(1.193182MHz). 한 펄스가 PIT 한 틱이다. *)
+
 val pc_speed : speed
 (** IBM PC 의 4.77MHz(PIT 한 틱에 4 사이클). *)
 
@@ -34,11 +37,23 @@ val speed_hz : speed -> int
 val cga_palette : (int * int * int) array
 (** CGA 16색 — 속성 바이트의 하위 니블이 글자색, 상위 니블이 바탕색. *)
 
-val create : speed:speed -> mem:Bytes.t -> video:Dos_video.t -> cmos:Dos_cmos.t -> t
-(** [speed] 는 CPU 속도다. 포트 70h·71h 는 [cmos] 로 넘긴다. [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
+val create : speed:speed -> mpu401:bool -> mem:Bytes.t -> video:Dos_video.t -> cmos:Dos_cmos.t -> t
+(** [speed] 는 CPU 속도다. [mpu401] 이면 330h·331h 를 MPU-401 에 넘긴다(MIDI
+    바이트는 버린다). 포트 70h·71h 는 [cmos] 로 넘긴다. [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
     와 같은 값으로 유지하는 데 쓴다. 커서의 진실 원천은 하나여야 한다.
-    비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성)는 [video] 로
-    넘긴다. *)
+    비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성·CRTC)는 [video] 로
+    넘긴다. CRTC 커서 레지스터(0x0A/0x0B/0x0E/0x0F)를 쓰면 어댑터가 받은
+    뒤 BDA 를 맞춘다. *)
+
+val bda_page_size : int
+val bda_page_start : int
+val bda_cursor_pos : int
+val bda_active_page : int
+val page_count : int
+(** BIOS 데이터 영역에서 쪽 크기(0x44C), 보이는 쪽의 시작 오프셋(0x44E),
+    쪽 여덟 장의 커서(0x450 + 2 × 쪽: 열, 행), 보이는 쪽 번호(0x462).
+    게스트가 CRTC 커서 레지스터를 쓰면 이 모듈이 보이는 쪽의 커서 칸을
+    맞춘다. BIOS 도 같은 자리를 쓴다. *)
 
 val set_now : t -> int -> unit
 (** 현재 CPU 누적 사이클. 기계가 매 스텝 알려준다. *)
@@ -49,12 +64,24 @@ val cpu_hz : t -> int
 val port_in : t -> int -> int
 val port_out : t -> int -> int -> unit
 
-val cycles_per_tick : t -> int
-(** PIT 채널 0 의 분주비가 정하는 IRQ0 간격(CPU 사이클). 기본 분주비
-    65536 = 18.2Hz. 게임이 음악·부드러운 이동을 위해 이 값을 바꾼다. *)
+val irq0_due : t -> bool
+(** 지난 물음 뒤로 PIT 채널 0 의 OUT 이 낮음에서 높음으로 바뀌었다 — IRQ0
+    요청이다. 참이면 [set_now] 의 시각 뒤로 다음 상승을 잡는다. 그 사이 여러
+    번 올랐어도 한 번이다(8259 IRR 은 한 비트다). 기계가 매 스텝 [set_now]
+    뒤에 부른다.
 
-val irq0_masked : t -> bool
-(** PIC IMR(포트 0x21) 의 bit0. 마스크된 IRQ 는 전달하지 않는다. *)
+    채널 0 은 BIOS POST 뒤의 상태(모드 3, 카운트 65536 = 18.2Hz)로 켜진다.
+    게임이 음악·부드러운 이동을 위해 모드와 카운트를 바꾼다. 상승 간격과
+    시점은 {!Dos_pit} 가 그 카운트를 실은 때부터 센다. *)
+
+val pic : t -> Dos_pic.t
+(** 포트 0x20·0x21 의 인터럽트 컨트롤러. 기계가 IRQ 를 올리고 고른다. *)
+
+val dma : t -> Dos_dma.t
+(** 포트 00h-0Fh 와 81h·82h·83h·87h 의 DMA 컨트롤러. 장치가 바이트를 당겨 간다. *)
+
+val kbc : t -> Dos_kbc.t
+(** 포트 0x60·0x64 의 키보드 컨트롤러. *)
 
 val palette : t -> (int * int * int) array
 (** 256색 DAC — 채널당 6비트. 포트 0x3C8/0x3C9 와 INT 10h AH=10h 이
@@ -64,9 +91,6 @@ val reset_dac : t -> unit
 (** DAC 256 자리를 기본값으로, 쓰기·읽기 순번과 PEL 마스크(0x3C6)를
     처음 상태로. INT 10h AH=00h 가 모드를 세울 때 부른다 — 실기 BIOS 가
     그 순간 팔레트를 다시 싣는다. *)
-
-val set_scancode : t -> int -> unit
-(** 포트 0x60 이 돌려줄 마지막 스캔 코드. *)
 
 val speaker_on : t -> bool
 (** 포트 0x61 의 bit0·bit1 이 둘 다 켜졌다 — 게이트와 데이터가 열렸다.

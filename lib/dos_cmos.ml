@@ -49,7 +49,9 @@ let uip_after_us = 1984
 let us_per_second = 1_000_000
 
 let base_memory_kb = 640
-let extended_memory_kb = 0
+(* 1MB 위 확장 메모리. POST 가 센 크기를 17h·18h(사본 30h·31h)에 둔다. XMS
+   드라이버가 나눠 주는 15MB(Dos_xms)와 같은 메모리다. *)
+let extended_memory_kb = Dos_xms.capacity_kb
 
 let reg_seconds = 0x00
 let reg_minutes = 0x02
@@ -91,8 +93,8 @@ let hour c h =
 let low v = v land 0xFF
 let high v = (v lsr 8) land 0xFF
 
-(* RAM 표. 크기는 낮은 바이트가 앞이다. 10h~2Dh 에서 0 이 아닌 칸은 기본
-   메모리뿐이다. *)
+(* RAM 표. 크기는 낮은 바이트가 앞이다. 10h~2Dh 에서 0 이 아닌 칸은 기본·
+   확장 메모리뿐이다. *)
 let table reg =
   if reg = reg_base_memory then low base_memory_kb
   else if reg = reg_base_memory + 1 then high base_memory_kb
