@@ -6,6 +6,11 @@
    자리)에 남긴다. 부모는 EXEC 결과 AX 와 AH=48h 로 잰 가장 큰 빈 블록을
    그 옆에 남긴다. 테스트는 기계가 멈춘 뒤 이 값과 환경 바이트를 읽는다. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let check name got want =
   if got <> want then begin
@@ -98,7 +103,7 @@ let bytes_at m a n = String.init n (fun i -> Char.chr (Dos_machine.mem_read m (a
 
 let run ?name ?(files = [ ("CHILD.COM", child) ]) ?(setup = fun _ -> ()) image =
   let m = Dos_machine.create () in
-  List.iter (fun (n, d) -> Dos_machine.mount_file m n d) files;
+  List.iter (fun (n, d) -> mount m n d) files;
   Dos_machine.load_com ?name m image;
   setup m;
   Dos_machine.run m ~max_steps:400_000;

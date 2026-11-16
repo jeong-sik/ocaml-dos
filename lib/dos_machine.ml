@@ -72,7 +72,13 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
     ?(sound_blaster = false) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video ~sound_blaster in
+  (* CMOS 시계는 기계의 시각을 읽는다. 기계는 포트 뒤에 만들어지므로
+     시계는 아래에서 잇는다. *)
+  let wall_clock =
+    ref (fun () -> invalid_arg "Dos_machine: CMOS clock read before the machine exists")
+  in
+  let cmos = Dos_cmos.create ~clock:(fun () -> !wall_clock ()) in
+  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
@@ -108,7 +114,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
     {
       mem; cpu; ports;
       exited = false; exit_code = 0; video;
-      host_files = Hashtbl.create 8;
+      host_files = Hashtbl.create 8; dirs = Hashtbl.create 8; cwd = Dos_path.root;
       handles = Hashtbl.create 4;
       open_files = Hashtbl.create 4;
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
@@ -149,6 +155,11 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   in
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
+  wall_clock :=
+    (fun () ->
+      let year, month, day, hour, minute, second = Dos_state.now_fields t in
+      { Dos_cmos.year; month; day; weekday = Dos_state.day_of_week (year, month, day);
+        hour; minute; second });
   Dos_bios.install t;
   init_dos_data t;
   Cpu86.set_int_hook cpu (fun vec ->
@@ -187,13 +198,37 @@ let load_exe ?name ?tail t image =
 
 (* ---------- 파일 마운트 ---------- *)
 
+let path_error = function
+  | Dos_path.Bad_drive -> "only drive C: exists"
+  | Dos_path.Bad_name -> "not a DOS name"
+  | Dos_path.Above_root -> ".. goes above the root"
+
+(* Every directory above a mounted file exists, as it would on the disk the
+   file was copied from. *)
+let rec add_parents t p =
+  match Dos_path.parent p with
+  | None -> ()
+  | Some dir ->
+    if dir <> Dos_path.root then begin
+      Hashtbl.replace t.dirs (Dos_path.key dir) ();
+      add_parents t dir
+    end
+
 let mount_file t name data =
-  Hashtbl.replace t.host_files (String.uppercase_ascii name)
-    (Bytes.of_string data)
+  match Dos_path.parse ~cwd:Dos_path.root name with
+  | Error e -> Error (Printf.sprintf "%S: %s" name (path_error e))
+  | Ok p when p = Dos_path.root -> Error (Printf.sprintf "%S: the root is not a file" name)
+  | Ok p when Hashtbl.mem t.dirs (Dos_path.key p) ->
+    Error (Printf.sprintf "%S: a directory has that name" name)
+  | Ok p ->
+    add_parents t p;
+    Hashtbl.replace t.host_files (Dos_path.key p) (Bytes.of_string data);
+    Ok ()
 
 let read_mounted t name =
-  Option.map Bytes.to_string
-    (Hashtbl.find_opt t.host_files (String.uppercase_ascii name))
+  match Dos_path.parse ~cwd:Dos_path.root name with
+  | Error _ -> None
+  | Ok p -> Option.map Bytes.to_string (Hashtbl.find_opt t.host_files (Dos_path.key p))
 
 let mounted_names t =
   List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [])

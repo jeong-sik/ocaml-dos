@@ -277,7 +277,10 @@ let () =
   List.iter
     (fun spec ->
       match parse_pair spec "mount" with
-      | Some (name, path) -> Dos_machine.mount_file m name (read_file path)
+      | Some (name, path) ->
+        (match Dos_machine.mount_file m name (read_file path) with
+         | Ok () -> ()
+         | Error e -> prerr_endline ("bad --mount " ^ e); exit 2)
       | None -> ())
     (List.rev !mounts);
   (* COMMAND.COM 이 넘기는 꼬리는 이름 바로 뒤의 공백부터다 *)

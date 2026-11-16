@@ -2,6 +2,11 @@
    FCBIO.ASM($FCB_Close), MKNODE.ASM(메타 문자가 든 이름). 쓴 바이트는
    닫을 때 FCB 의 파일 크기까지 파일이 된다. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let check name got want =
   if got <> want then begin
@@ -139,7 +144,7 @@ let program =
 
 let () =
   let m = Dos_machine.create () in
-  List.iter (fun (n, len) -> Dos_machine.mount_file m n (old len))
+  List.iter (fun (n, len) -> mount m n (old len))
     [ ("OLD.DAT", 300); ("OLD2.DAT", 100); ("OLD3.DAT", 25); ("OLD4.DAT", 9);
       ("OLD5.DAT", 20); ("OLD6.DAT", 20); ("OLD7.DAT", 12) ];
   Dos_machine.load_com m program;
