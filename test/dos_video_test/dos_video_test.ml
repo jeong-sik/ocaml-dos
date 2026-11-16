@@ -314,6 +314,19 @@ let test_cga_mode_4 () =
 
 (* INT 10h AH=0Bh: BH=0 은 바탕색과 밝기, BH=1 은 팔레트. 모드 4 의 기본값
    30h(팔레트 1, 어두움, 검은 바탕)에서 시작한다. *)
+(* 3D9h 의 값은 한 벌이다. 모드를 세우면 30h 로 돌아가고, 읽어도 그 값이
+   나온다(#64: 예전에는 포트 쪽 사본이 모드 전의 00h 를 돌려줬다). *)
+let test_cga_select_one_value () =
+  let code =
+    mov_dx 0x3D9 ^ mov_al 0x00 ^ "\xee"          (* out dx,al *)
+    ^ set_mode 0x0004
+    ^ mov_dx 0x3D9 ^ "\xec"                      (* in al,dx *)
+    ^ store_ax scratch ^ quit
+  in
+  let m = run_com code in
+  check "모드 4 뒤 3D9h 읽기" (peek m scratch) 0x30;
+  check "그리는 값" (Dos_video.cga_color_select m.Dos_state.video) 0x30
+
 let test_cga_bios_palette () =
   let palette bh bl = mov_ah 0x0B ^ mov_bx ((bh lsl 8) lor bl) ^ int_ 0x10 in
   let m =
@@ -482,6 +495,7 @@ let () =
   test_mode_set_keeps_dac_when_inhibited ();
   test_text_glyph_not_mirrored ();
   test_cga_mode_4 ();
+  test_cga_select_one_value ();
   test_cga_bios_palette ();
   test_cga_mode_6 ();
   test_forty_column_text ();
