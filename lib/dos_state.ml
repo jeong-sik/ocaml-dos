@@ -221,7 +221,6 @@ type t = {
   mutable input_continuations : input_continuation list;
   mutable console_pending : string;  (* cooked AH=3F line bytes not yet returned *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
-  mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
@@ -250,6 +249,7 @@ type t = {
         (** 핸들 → AH=53h 로 붙인 이름. 여덟 바이트이고, 첫 NUL 뒤는 모두
             NUL 이다. 이름이 없는(모두 NUL) 핸들은 없고, 같은 이름은 둘
             없다. *)
+  xms : Dos_xms.t;                            (** XMS 드라이버(INT 2Fh AH=43h) *)
   mouse : mouse;
 }
 

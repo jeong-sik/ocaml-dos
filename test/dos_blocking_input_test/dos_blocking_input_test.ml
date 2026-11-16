@@ -199,7 +199,10 @@ let test_deferred_trap () =
 
 let test_idle_clock_reaches_irq () =
   let m = machine (bios_read 0 ^ store 0x200 ^ marker ^ exit) in
-  let tick_cycles = Dos_ports.cycles_per_tick m.Dos_state.ports in
+  (* POST 뒤 채널 0 은 모드 3·65536 이고, 셈은 실은 다음 틱부터다: 첫
+     상승은 65537 틱이다. *)
+  let cycles_per_pit_tick = Dos_ports.speed_hz Dos_ports.pc_speed / Dos_ports.pit_hz in
+  let tick_cycles = (0x10000 + 1) * cycles_per_pit_tick in
   let boot_ticks = Dos_machine.tick_count m in
   (* Two-cycle idle quanta reach the PIT deadline within this machine-step
      budget, with the remaining half available for the real ROM IRQ code. *)

@@ -50,8 +50,21 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    machine's pending-tick flag.
    18: the CRTC registers move from the ports to the video adapter, and
    mode 13h's screen lives in the four planes instead of RAM at 0xA0000.
-   19: EMS handle names (INT 67h AH=53h). *)
-let format_version = 19
+   19: EMS handle names (INT 67h AH=53h).
+   20: text modes load their CRTC table and the text screen follows the
+   CRTC start address and offset. A format 19 machine in a text mode holds
+   zero CRTC registers, which would now draw every row from row 0.
+   21: the keyboard controller also carries the replies it has not sent,
+   the command byte, the output port, a command waiting for its byte,
+   scanning, the LEDs and the scan code set.
+   22: PIT channel 0 is a counter of the same kind as channel 2, written
+   right after it with the cycle of its next output rise (IRQ0); the
+   machine no longer carries the cycle of its last IRQ0.
+   23: the DMA controller (per channel: base and current address and count,
+   page, mask, TC, mode; the byte pointer flip-flop) follows the PIC.
+   24: the XMS driver's blocks (place, size, lock count, bytes) follow the
+   clock, before EMS. *)
+let format_version = 24
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -307,14 +320,14 @@ let model_of_code = function
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
         epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved; ems_names;
-        mouse } = t
+        mouse; xms } = t
   in
   let put what r v = C.put w ~what r v in
   put "cpu model" C.byte (model_code (Cpu86.model cpu));
@@ -355,7 +368,6 @@ let write_payload w t =
   put_list w ~what:"input continuation" (put_input_continuation w) input_continuations;
   C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
-  put "last tick" C.count last_tick;
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
@@ -367,6 +379,7 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  Dos_xms.write_state w xms;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
       put "EMS handle" ems_handle_key k;
@@ -603,7 +616,6 @@ let read_payload r =
           return_control_flags; service_return });
   t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
-  t.last_tick <- get "last tick" C.count;
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
@@ -636,6 +648,7 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  Dos_xms.read_state r t.xms;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in
