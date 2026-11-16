@@ -50,6 +50,9 @@ let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
+(* INT 21h AH=38h 표가 가리키는 대문자 루틴(Dos_country). 스텁 자리
+   (0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
+let case_map_off = 0x0400
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
@@ -177,6 +180,9 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
+  String.iteri
+    (fun i c -> wr8 t ((rom_seg * 16) + case_map_off + i) (Char.code c))
+    (Dos_country.case_map_code ~at:case_map_off);
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
@@ -840,3 +846,5 @@ let service t s =
   | Memory_size -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413); Completed
   | Time_of_day -> clock t; Completed
   | Mouse -> mouse t; Completed
+
+let case_map_entry = (rom_seg, case_map_off)
