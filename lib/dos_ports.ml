@@ -77,12 +77,8 @@ type t = {
   mutable speed : speed;  (** PIT 한 틱의 CPU 사이클. 스냅숏을 되살릴 때만 바뀐다 *)
   mutable now : int;                    (** CPU 누적 사이클 *)
   pit2 : Dos_pit.t;                     (** PIT 채널 2 — GATE 는 0x61 bit0 *)
-  (* PIT 채널 0 *)
-  mutable pit0_divisor : int;           (** 0 은 65536 을 뜻한다 *)
-  mutable pit0_write_hi : bool;         (** lo/hi 두 바이트 쓰기의 순번 *)
-  mutable pit0_read_hi : bool;
-  mutable pit0_latched : int option;
-  mutable pit0_access : int;            (** 1=lo 2=hi 3=lo/hi *)
+  pit0 : Dos_pit.t;                     (** PIT 채널 0 — OUT 상승이 IRQ0 *)
+  mutable irq0_at : int option;         (** 다음 OUT0 상승의 CPU 사이클 *)
   pic : Dos_pic.t;
   kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
   (* VGA DAC *)
@@ -134,18 +130,38 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
+(* 채널 0 의 GATE 는 PC 에서 늘 높다. *)
+let channel0_gate = true
+
+(* IBM 호환 BIOS 는 POST 에서 채널 0 을 제어 워드 36h(하위·상위 바이트,
+   모드 3, 바이너리)와 카운트 0(= 65536)으로 건다(skiselev/8088_bios
+   src/bios.asm "channel 0, LSB & MSB, mode 3, binary", DOSBox-X
+   src/hardware/timer.cpp 의 pit[0].mode = 3). SeaBIOS 는 모드 2 를 쓴다.
+   기계는 그 POST 가 끝난 상태로, 틱 0 에 카운트를 실은 채 켜진다. *)
+let bios_channel0_control = 0x36
+let bios_channel0_count = 0
+
+let channel0_after_bios () =
+  let pit = Dos_pit.create () in
+  Dos_pit.control pit ~tick:0 bios_channel0_control;
+  Dos_pit.write pit ~tick:0 ~gate:channel0_gate (bios_channel0_count land 0xff);
+  Dos_pit.write pit ~tick:0 ~gate:channel0_gate (bios_channel0_count lsr 8);
+  pit
+
+(* [speed] 는 PIT 한 틱의 CPU 사이클이다. *)
+let rise_cycle ~speed pit ~tick =
+  Option.map (fun r -> r * speed) (Dos_pit.next_rise pit ~tick)
+
 let create ~speed ~mpu401 ~mem ~video =
+  let pit0 = channel0_after_bios () in
   {
     mem;
     video;
     speed;
     now = 0;
     pit2 = Dos_pit.create ();
-    pit0_divisor = 0;
-    pit0_write_hi = false;
-    pit0_read_hi = false;
-    pit0_latched = None;
-    pit0_access = 3;
+    pit0;
+    irq0_at = rise_cycle ~speed pit0 ~tick:0;
     pic = Dos_pic.create ();
     kbc = Dos_kbc.create ();
     pal = Array.init dac_entries default_vga_pal;
@@ -345,15 +361,13 @@ let speaker_on t = t.port_b land 0x03 = 0x03
 let pit_tick t = t.now / t.speed
 let gate2 t = t.port_b land gate2_bit <> 0
 
-let divisor t = if t.pit0_divisor = 0 then 0x10000 else t.pit0_divisor
+(* 채널 0 에 사건(제어 워드, 카운트 쓰기)이 있으면 다음 상승을 다시 잡는다. *)
+let pit0_changed t = t.irq0_at <- rise_cycle ~speed:t.speed t.pit0 ~tick:(pit_tick t)
 
-let cycles_per_tick t = divisor t * t.speed
-
-(* 채널 0 은 되풀이 모드로 센다: 분주비에서 지난 만큼을 뺀 나머지. *)
-let pit0_count t =
-  let d = divisor t in
-  let elapsed = (t.now / t.speed) mod d in
-  (d - elapsed) land 0xffff
+let irq0_due t =
+  match t.irq0_at with
+  | Some at when t.now >= at -> pit0_changed t; true
+  | Some _ | None -> false
 
 (* CRTC 커서 레지스터(0x0E/0x0F)는 화면 시작부터의 글자 수다. BIOS 는
    같은 값을 BDA 0x450/0x451 에 행·열로 둔다 — 커서의 진실 원천이
@@ -398,20 +412,7 @@ let port_in t p =
   match p land 0xffff with
   | 0x20 -> Dos_pic.read_command t.pic
   | 0x21 -> Dos_pic.read_mask t.pic
-  | 0x40 ->
-    let v = match t.pit0_latched with Some v -> v | None -> pit0_count t in
-    (match t.pit0_access with
-     | 1 -> t.pit0_latched <- None; v land 0xff
-     | 2 -> t.pit0_latched <- None; (v lsr 8) land 0xff
-     | _ ->
-       if t.pit0_read_hi then begin
-         t.pit0_read_hi <- false;
-         t.pit0_latched <- None;
-         (v lsr 8) land 0xff
-       end else begin
-         t.pit0_read_hi <- true;
-         v land 0xff
-       end)
+  | 0x40 -> Dos_pit.read t.pit0 ~tick:(pit_tick t)
   | 0x42 -> Dos_pit.read t.pit2 ~tick:(pit_tick t)
   | 0x60 -> Dos_kbc.read_data t.kbc ~hz:(cpu_hz t) ~now:t.now
   | 0x61 ->
@@ -471,17 +472,8 @@ let port_out t p v =
   | 0x20 -> Dos_pic.write_command t.pic v
   | 0x21 -> Dos_pic.write_mask t.pic v
   | 0x40 ->
-    (match t.pit0_access with
-     | 1 -> t.pit0_divisor <- (t.pit0_divisor land 0xff00) lor v
-     | 2 -> t.pit0_divisor <- (t.pit0_divisor land 0x00ff) lor (v lsl 8)
-     | _ ->
-       if t.pit0_write_hi then begin
-         t.pit0_divisor <- (t.pit0_divisor land 0x00ff) lor (v lsl 8);
-         t.pit0_write_hi <- false
-       end else begin
-         t.pit0_divisor <- (t.pit0_divisor land 0xff00) lor v;
-         t.pit0_write_hi <- true
-       end)
+    Dos_pit.write t.pit0 ~tick:(pit_tick t) ~gate:channel0_gate v;
+    pit0_changed t
   | 0x42 -> Dos_pit.write t.pit2 ~tick:(pit_tick t) ~gate:(gate2 t) v
   | 0x43 ->
     (* 제어 워드: bit7-6 채널(3 은 읽기-되돌림 명령), bit5-4 접근
@@ -489,14 +481,8 @@ let port_out t p v =
        읽기-되돌림은 아직 없다. *)
     (match v lsr 6 with
      | 0 ->
-       let access = (v lsr 4) land 3 in
-       if access = 0 then t.pit0_latched <- Some (pit0_count t)
-       else begin
-         t.pit0_access <- access;
-         t.pit0_write_hi <- false;
-         t.pit0_read_hi <- false;
-         t.pit0_latched <- None
-       end
+       Dos_pit.control t.pit0 ~tick:(pit_tick t) v;
+       pit0_changed t
      | 2 -> Dos_pit.control t.pit2 ~tick:(pit_tick t) v
      | _ -> ())
   | 0x60 -> Dos_kbc.write_data t.kbc ~hz:(cpu_hz t) ~now:t.now v
@@ -539,7 +525,6 @@ module C = Dos_snap_codec
    value the writer accepts is one the reader accepts. *)
 let cycle = C.count
 let speed_r = C.range 1 max_speed
-let pit_access = C.range 0 3
 let dac_phase_r = C.range 0 2
 let opl_flag_r = C.range 0 2
 
@@ -562,8 +547,7 @@ let get_opl_at r =
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
-        speed; now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
-        pit0_access; pic; kbc; pal; dac_write_index; dac_read_index;
+        speed; now; pit0; irq0_at; pic; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
@@ -572,13 +556,10 @@ let write_state w t =
   put "speed" speed_r speed;
   put "ports.now" cycle now;
   Dos_pit.write_state w pit2;
-  put "pit0_divisor" C.word pit0_divisor;
-  C.put_bool w pit0_write_hi;
-  C.put_bool w pit0_read_hi;
-  (match pit0_latched with
+  Dos_pit.write_state w pit0;
+  (match irq0_at with
    | None -> C.put_bool w false
-   | Some v -> C.put_bool w true; put "pit0_latched" C.word v);
-  put "pit0_access" pit_access pit0_access;
+   | Some at -> C.put_bool w true; put "irq0_at" cycle at);
   Dos_pic.write_state w pic;
   Dos_kbc.write_state w kbc;
   put "DAC size" C.count (Array.length pal);
@@ -610,11 +591,8 @@ let read_state r t =
   t.speed <- get "speed" speed_r;
   t.now <- get "ports.now" cycle;
   Dos_pit.read_state r t.pit2;
-  t.pit0_divisor <- get "pit0_divisor" C.word;
-  t.pit0_write_hi <- C.get_bool r;
-  t.pit0_read_hi <- C.get_bool r;
-  t.pit0_latched <- (if C.get_bool r then Some (get "pit0_latched" C.word) else None);
-  t.pit0_access <- get "pit0_access" pit_access;
+  Dos_pit.read_state r t.pit0;
+  t.irq0_at <- (if C.get_bool r then Some (get "irq0_at" cycle) else None);
   Dos_pic.read_state r t.pic;
   Dos_kbc.read_state r t.kbc ~hz:(cpu_hz t);
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";

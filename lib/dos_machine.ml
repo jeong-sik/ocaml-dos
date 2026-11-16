@@ -98,7 +98,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; kbd_requests = 0; last_tick = 0;
+      kbd_wait = false; kbd_requests = 0;
       ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
@@ -189,13 +189,11 @@ let step_result t =
   if t.exited then Exited
   else begin
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
-    let interval = Dos_ports.cycles_per_tick t.ports in
     let cyc = Cpu86.cycles t.cpu in
     let pic = Dos_ports.pic t.ports in
-    if cyc - t.last_tick >= interval then begin
-      t.last_tick <- cyc;
-      Dos_pic.raise_irq pic Dos_pic.Timer
-    end;
+    (* 채널 0 의 OUT 이 오르면 IRQ0 을 요청한다. 그 사이 여러 번 올랐어도
+       IRR 은 한 비트다. *)
+    if Dos_ports.irq0_due t.ports then Dos_pic.raise_irq pic Dos_pic.Timer;
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;

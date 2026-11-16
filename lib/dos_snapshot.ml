@@ -56,8 +56,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    zero CRTC registers, which would now draw every row from row 0.
    21: the keyboard controller also carries the replies it has not sent,
    the command byte, the output port, a command waiting for its byte,
-   scanning, the LEDs and the scan code set. *)
-let format_version = 21
+   scanning, the LEDs and the scan code set.
+   22: PIT channel 0 is a counter of the same kind as channel 2, written
+   right after it with the cycle of its next output rise (IRQ0); the
+   machine no longer carries the cycle of its last IRQ0. *)
+let format_version = 22
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -313,7 +316,7 @@ let model_of_code = function
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
@@ -361,7 +364,6 @@ let write_payload w t =
   put_list w ~what:"input continuation" (put_input_continuation w) input_continuations;
   C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
-  put "last tick" C.count last_tick;
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
@@ -609,7 +611,6 @@ let read_payload r =
           return_control_flags; service_return });
   t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
-  t.last_tick <- get "last tick" C.count;
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
