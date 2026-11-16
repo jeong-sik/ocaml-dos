@@ -383,6 +383,9 @@ let ivt_is_own_stub t v =
       && rd16 t ((v * 4) + 2) = rom_seg)
     t.stubs
 
+let ivt_is_iret_stub t v =
+  rd16 t (v * 4) = iret_stub_off && rd16 t ((v * 4) + 2) = rom_seg
+
 let private_service_vector t raw =
   List.find_map
     (fun (v, off) ->
@@ -800,7 +803,7 @@ let video t =
      | 0x01 ->
        set ((old land lnot cga_palette_bit) lor (if bl land 1 = 0 then 0 else cga_palette_bit))
      | _ -> ())
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x10
 
 (* ---------- INT 16h 키보드 ---------- *)
 
@@ -839,7 +842,7 @@ let keyboard t =
     ring_push t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x16
 
 (* ---------- INT 9 키보드 IRQ ---------- *)
 
@@ -902,7 +905,7 @@ let clock t =
     Cpu86.set_reg8 cpu 6 (to_bcd m);
     Cpu86.set_reg8 cpu 2 (to_bcd d);
     set_cf t false
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x1A
 
 (* ---------- INT 33h 마우스 ---------- *)
 
@@ -1127,7 +1130,7 @@ let mouse t =
     Cpu86.set_reg16 cpu 1 old_mask;
     Cpu86.set_seg cpu 0 old_seg;
     Cpu86.set_reg16 cpu 2 old_off
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x33
 
 (* ---------- 묶음 ---------- *)
 
@@ -1146,7 +1149,11 @@ let system t =
   | 0x88 -> Cpu86.set_reg16 cpu 0 extended_memory_kb; set_cf t false
   | 0x4F -> set_cf t true (* 키보드 가로채기: 그 스캔 코드를 그대로 쓰라 *)
   | 0x90 | 0x91 -> () (* 장치 바쁨·끝남 알림: SeaBIOS 도 아무것도 안 한다 *)
-  | _ -> Cpu86.set_reg8 cpu 4 unsupported_function; set_cf t true
+  | _ ->
+    (* 집계는 AX 가 바뀌기 전에 올린다 *)
+    report_unserved t No_function ~vector:0x15;
+    Cpu86.set_reg8 cpu 4 unsupported_function;
+    set_cf t true
 
 let service t s =
   match s with

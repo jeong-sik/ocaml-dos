@@ -391,6 +391,15 @@ dune exec --root . bin/dosboot.exe -- --com KOEI.COM --mount ... --steps 0 \
 진단은 `--trace N`(N 스텝마다 CS:IP), `--int-trace`(INT 명령),
 `--dump ADDR,LEN`(메모리), `--save NAME=PATH`(게스트가 쓴 파일 꺼내기).
 
+`--unserved` 는 이 기계가 받지 못한 INT 호출을 끝에 stderr 로 센다.
+`no-function` 은 호스트 서비스(21h·10h·15h·16h·1Ah·2Fh·33h)에 그 기능이 없을 때,
+`iret-stub` 은 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔을 때다.
+새 게임이 무엇을 기대하는지 여기서 먼저 본다.
+
+```
+UNSERVED no-function INT 33h AH=00h x2 AL=07,08
+```
+
 CPU 속도는 `--cpu-mhz MHZ` 로 바꾼다. 기본은 IBM PC 의 4.77MHz 다. 값은
 PIT(1.193182MHz)의 정수배로 맞춘다. 12 를 주면 PIT 10 배인 11.93MHz 다.
 IRQ0 간격, PIT 카운터, 리프레시 비트, 재주사 비트, OPL 타이머, 시각이

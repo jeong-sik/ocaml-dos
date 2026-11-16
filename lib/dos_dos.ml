@@ -1628,7 +1628,10 @@ let service_immediate t =
     (* MS_TABLE.ASM 의 빈 칸 CPMFunc: XOR AL,AL 뒤 LEAVEDOS *)
     Cpu86.set_reg8 cpu 0 0
   | ah when ah > max_function -> Cpu86.set_reg8 cpu 0 0
-  | _ -> unsupported_function t ah
+  | _ ->
+    (* 집계에 올린 뒤 멈춘다. dosboot 는 멈춤을 찍고 집계도 찍는다. *)
+    report_unserved t No_function ~vector:0x21;
+    unsupported_function t ah
 
 let terminate t = child_exit t ~code:0 ~keep:None
 

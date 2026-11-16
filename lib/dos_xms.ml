@@ -297,13 +297,16 @@ let installed = 0x80
 let multiplex_install_check = 0x4300
 let multiplex_entry_point = 0x4310
 
+type multiplex_answer = Answered | Not_xms
+
 let multiplex cpu ~entry:(segment, offset) =
   match Cpu86.reg16 cpu r_ax with
-  | ax when ax = multiplex_install_check -> Cpu86.set_reg8 cpu r_al installed
+  | ax when ax = multiplex_install_check -> Cpu86.set_reg8 cpu r_al installed; Answered
   | ax when ax = multiplex_entry_point ->
     Cpu86.set_seg cpu s_es segment;
-    Cpu86.set_reg16 cpu r_bx offset
-  | _ -> ()
+    Cpu86.set_reg16 cpu r_bx offset;
+    Answered
+  | _ -> Not_xms
 
 (* ---------- snapshot ---------- *)
 

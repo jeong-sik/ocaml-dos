@@ -199,6 +199,12 @@ type input_continuation = {
   service_return : service_return;
 }
 
+(* 이 기계가 받지 못한 INT 호출의 갈래. 기계 동작은 바꾸지 않고 관찰자에게만
+   알린다 — 게임을 돌려 무엇이 빠졌는지 찾는 진단용이다. *)
+type unserved =
+  | No_function  (** 호스트 서비스(21h·10h·15h·16h·1Ah·2Fh·33h)에 이 기능 갈래가 없다 *)
+  | Iret_stub    (** 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔다 *)
+
 type t = {
   mem : Bytes.t;                              (** 1MB *)
   cpu : Cpu86.t;
@@ -251,7 +257,11 @@ type t = {
             없다. *)
   xms : Dos_xms.t;                            (** XMS 드라이버(INT 2Fh AH=43h) *)
   mouse : mouse;
+  mutable on_unserved : unserved -> vector:int -> ax:int -> unit;
+        (** 관찰자. 기계 상태가 아니어서 스냅숏에 싣지 않는다 *)
 }
+
+let report_unserved t kind ~vector = t.on_unserved kind ~vector ~ax:(Cpu86.reg16 t.cpu 0)
 
 (* ---------- 메모리 ---------- *)
 
