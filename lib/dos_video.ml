@@ -121,9 +121,8 @@ let crtc_mode07 =
      0x9C; 0x8E; 0x8F; 0x28; 0x0F; 0x96; 0xB9; 0xA3;
      0xFF |]
 
-(* 텍스트 화면은 25 행이다. 이 모델의 텍스트 메모리는 0xB8000 의 32KB
-   창이다 — 80x25 한 장이 4KB 라 여덟 장이 들어간다. *)
-let text_rows = 25
+(* 이 모델의 텍스트 메모리는 0xB8000 의 32KB 창이다 — 80x25 한 장이
+   4KB 라 여덟 장이 들어간다. *)
 let text_window = 0x8000
 
 (* 글자 클록 하나가 내는 점 수. 16색은 평면 넷의 같은 바이트에서 여덟
@@ -187,6 +186,39 @@ let crtc_table = function
   | 0x11 | 0x12 -> Some crtc_mode11
   | 0x13 -> Some crtc_mode13
   | _ -> None
+
+(* 속성 컨트롤러 10h(모드 제어)와 11h(테두리). 10h 의 bit 3 이 서 있으면
+   글자 속성의 bit 7 은 깜박임이고 바탕은 여덟 색이다. 꺼지면 bit 7 이
+   바탕을 밝게 해 바탕도 열여섯 색이 된다. *)
+let attr_mode_control = 0x10
+let attr_overscan = 0x11
+let mode_control_blink = 0x08
+
+(* 모드를 세울 때 10h 에 싣는 값. SeaBIOS vgasrc/stdvgamodes.c 의 actl_*
+   표다. 텍스트 0Ch(9점 선 문자 + 깜박임), 흑백 텍스트 0Eh(흑백 속성을
+   더함), 그래픽 01h, 256색 41h(화소 8비트). *)
+let mono_text_mode = 7
+let mode_control_text = 0x0C
+let mode_control_mono_text = 0x0E
+let mode_control_graphics = 0x01
+let mode_control_256 = 0x41
+
+let mode_control m =
+  match spec m with
+  | Text, _, _, _ ->
+    if m = mono_text_mode then mode_control_mono_text else mode_control_text
+  | (Cga4 | Cga2 | Planar), _, _, _ -> mode_control_graphics
+  | Linear256, _, _, _ -> mode_control_256
+
+(* 속성 팔레트 기본값은 항등 — 색 번호가 곧 DAC 자리다. BIOS 가 심는
+   EGA 호환 값(00,01,...,3F)을 쓰려면 DAC 의 그 자리에도 같은 색이 있어야
+   하는데, 우리 DAC 의 기본값은 0-15 가 CGA 색이다. 둘 중 하나를 고르는
+   문제라 항등을 골랐다 — 팔레트를 건드리지 않는 게임이 바른 색을 본다.
+   10h 만 모드의 값을 싣는다. *)
+let default_attr m =
+  Array.init attr_count (fun i ->
+      if i < 16 then i else if i = attr_mode_control then mode_control m else 0)
+
 let boot_mode = 3
 
 let load_crtc_table crtc m =
@@ -207,12 +239,7 @@ let create ~mem =
     seq = Array.make seq_count 0;
     attr_index = 0;
     attr_is_data = false;
-    (* 속성 팔레트 기본값은 항등 — 색 번호가 곧 DAC 자리다. BIOS 가
-       심는 EGA 호환 값(00,01,...,3F)을 쓰려면 DAC 의 그 자리에도 같은
-       색이 있어야 하는데, 우리 DAC 의 기본값은 0-15 가 CGA 색이다.
-       둘 중 하나를 고르는 문제라 항등을 골랐다 — 팔레트를 건드리지
-       않는 게임이 바른 색을 본다. *)
-    attr = Array.init attr_count (fun i -> if i < 16 then i else 0);
+    attr = default_attr boot_mode;
     cga_color_select = 0x30;
     crtc_index = 0;
     crtc;
@@ -247,11 +274,40 @@ let dims t =
   | Linear256, _, _, _ -> crtc_dims t ~dots:dots_256
   | (Text | Cga4 | Cga2), w, h, _ -> (w, h)
 let text_cols t = let _, _, _, c = spec t.mode in c
+
+(* BIOS 글자 행: 480줄 모드는 8x16 글자로 30행, 나머지는 25행. 글자
+   높이는 줄 수를 행 수로 나눈 것이다(200줄 8, 350줄 14, 480줄과 텍스트
+   16). *)
+let tall_lines = 480
+let tall_rows = 30
+let normal_rows = 25
+
+let text_rows t = if snd (dims t) >= tall_lines then tall_rows else normal_rows
+let char_height t = snd (dims t) / text_rows t
 let planes t = t.planes
 let attr_palette t = t.attr
 let set_attr_palette t i v = if i >= 0 && i < attr_count then t.attr.(i) <- v
+let text_blink t = t.attr.(attr_mode_control) land mode_control_blink <> 0
+let set_text_blink t on =
+  let v = t.attr.(attr_mode_control) in
+  t.attr.(attr_mode_control) <-
+    (if on then v lor mode_control_blink else v land lnot mode_control_blink)
+let overscan t = t.attr.(attr_overscan)
+let set_overscan t v = t.attr.(attr_overscan) <- v
 let cga_color_select t = t.cga_color_select
 let set_cga_color_select t v = t.cga_color_select <- v land 0xff
+
+(* 시퀀서 1 번(clocking mode)의 bit 5 가 서면 화면을 그리지 않는다. 그동안
+   화면 전체가 DAC 0 번 색이다(RBIL INT 10/AH=12h BL=36h). 모드를 세우면
+   시퀀서가 0 으로 돌아가 다시 켜진다. *)
+let seq_clocking_mode = 1
+let seq_screen_off = 0x20
+
+let screen_blanked t = t.seq.(seq_clocking_mode) land seq_screen_off <> 0
+let set_screen_blanked t off =
+  let v = t.seq.(seq_clocking_mode) in
+  t.seq.(seq_clocking_mode) <-
+    (if off then v lor seq_screen_off else v land lnot seq_screen_off)
 
 let set_mode t m ~clear =
   t.mode <- m;
@@ -268,13 +324,13 @@ let set_mode t m ~clear =
   t.gc.(gc_bit_mask) <- 0xFF;
   t.seq.(seq_memory_mode) <- memory_mode_of t.kind;
   load_crtc_table t.crtc m;
-  Array.iteri (fun i _ -> t.attr.(i) <- (if i < 16 then i else 0)) t.attr;
+  Array.blit (default_attr m) 0 t.attr 0 attr_count;
   t.cga_color_select <- 0x30;
   if clear then
     match spec m with
     | Text, _, _, cols ->
       (* 글자는 공백, 속성은 흰 글자 검은 바탕 *)
-      let cells = cols * text_rows in
+      let cells = cols * text_rows t in
       for i = 0 to cells - 1 do
         Bytes.set t.mem (cga_base + (i * 2)) ' ';
         Bytes.set t.mem (cga_base + (i * 2) + 1) '\007'
@@ -465,31 +521,40 @@ let cga_row_addr y = cga_base + (if y land 1 = 0 then 0 else 0x2000)
    부르는 프로그램에서만 둘이 다르다. *)
 let bios_line_16 t = let _, w, _, _ = spec t.mode in w / dots_16
 
+(* INT 10h AH=0Ch: 256색이 아닌 모드에서 색의 bit7 은 "이미 있는 점과
+   XOR" 이다(Ralf Brown's Interrupt List, INT 10/AH=0Ch). *)
+let xor_pixel = 0x80
+
 let put_pixel t ~x ~y ~color =
+  let xor = color land xor_pixel <> 0 in
   match kind t with
   | Text -> ()
   | Cga4 ->
     let a = cga_row_addr y + (x / 4) in
     let shift = (3 - (x mod 4)) * 2 in
     let old = Char.code (Bytes.get t.mem a) in
-    let nv = (old land lnot (3 lsl shift)) lor ((color land 3) lsl shift) in
+    let c = color land 3 in
+    let c = if xor then ((old lsr shift) land 3) lxor c else c in
+    let nv = (old land lnot (3 lsl shift)) lor (c lsl shift) in
     Bytes.set t.mem a (Char.chr nv)
   | Cga2 ->
     let a = cga_row_addr y + (x / 8) in
     let bit = 7 - (x mod 8) in
     let old = Char.code (Bytes.get t.mem a) in
-    let nv =
-      if color land 1 <> 0 then old lor (1 lsl bit)
-      else old land lnot (1 lsl bit)
-    in
+    let c = color land 1 in
+    let c = if xor then ((old lsr bit) land 1) lxor c else c in
+    let nv = if c <> 0 then old lor (1 lsl bit) else old land lnot (1 lsl bit) in
     Bytes.set t.mem a (Char.chr nv)
   | Planar ->
     let off = ((y * bios_line_16 t) + (x / 8)) land 0xffff in
     let bit = 1 lsl (7 - (x mod 8)) in
     for p = 0 to plane_count - 1 do
       let old = Char.code (Bytes.get t.planes.(p) off) in
+      let on = color land (1 lsl p) <> 0 in
       let nv =
-        if color land (1 lsl p) <> 0 then old lor bit else old land lnot bit
+        if xor then (if on then old lxor bit else old)
+        else if on then old lor bit
+        else old land lnot bit
       in
       Bytes.set t.planes.(p) off (Char.chr nv)
     done
@@ -598,7 +663,7 @@ let screen_digest t =
   (match spec t.mode with
    | Text, _, _, cols ->
      let cell = text_cell t in
-     for row = 0 to text_rows - 1 do
+     for row = 0 to text_rows t - 1 do
        for col = 0 to cols - 1 do over t.mem (cell ~row ~col) 2 done
      done
    | (Cga4 | Cga2), _, _, _ -> over t.mem cga_base 0x4000

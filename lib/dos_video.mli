@@ -45,6 +45,14 @@ val text_cols : t -> int
 (** 이 모드의 BIOS 열 수(BDA 0x44A) — 40 또는 80. 그래픽 모드도 값을
     가진다: 모드 0Dh 는 40, 12h 는 80 이다. *)
 
+val text_rows : t -> int
+(** 이 모드의 BIOS 글자 행 수(BDA 0x484 + 1). 480줄 모드(11h, 12h)는 30,
+    나머지는 25. *)
+
+val char_height : t -> int
+(** BIOS 글자 한 칸의 픽셀 높이(BDA 0x485). 200줄 그래픽 모드는 8,
+    350줄은 14, 480줄과 텍스트는 16. *)
+
 val set_mode : t -> int -> clear:bool -> unit
 (** INT 10h AH=00h. 모드에 맞는 화면 메모리를 지우고(요청하면) 레지스터를
     그 모드의 부팅값으로 되돌린다. 모르는 번호는 텍스트로 본다. 그래픽
@@ -88,17 +96,33 @@ val text_cell : t -> row:int -> col:int -> int
     안에서 돈다. 모드를 세운 직후에는 0xB8000 + (행 × 열 수 + 열) × 2 다.
     [t] 만 먼저 주면 CRTC 를 한 번 읽어 둔 함수가 된다. *)
 
+val text_blink : t -> bool
+(** 속성 컨트롤러 10h 의 bit 3. 서 있으면 텍스트 속성의 bit 7 이 깜박임이고
+    바탕은 여덟 색, 꺼져 있으면 바탕이 열여섯 색이다. 모드를 세우면 텍스트는
+    켜지고 그래픽은 꺼진다. *)
+
+val set_text_blink : t -> bool -> unit
+(** INT 10h AX=1003h. 10h 의 다른 비트는 그대로 둔다. *)
+
+val overscan : t -> int
+val set_overscan : t -> int -> unit
+(** 속성 컨트롤러 11h — 테두리 색의 DAC 자리(INT 10h AX=1001h·1008h). *)
+
 val screen_digest : t -> int
 (** 지금 모드가 그리는 메모리의 지문. 화면이 멈췄는지 보는 용도다 —
     픽셀을 다 만들어 비교하는 것보다 싸다. 충돌하면 "안 변했다" 고 잘못
     읽을 뿐이라 암호학적 강도가 필요하지 않다. *)
+
+val xor_pixel : int
+(** 색의 bit7(0x80). 256색이 아닌 모드에서 "이미 있는 점과 XOR" 이다. *)
 
 val put_pixel : t -> x:int -> y:int -> color:int -> unit
 val get_pixel : t -> x:int -> y:int -> int
 (** INT 10h AH=0Ch/0Dh. 텍스트 모드에서는 아무 일도 하지 않는다. 256색은
     BIOS 처럼 0xA0000 + y*320 + x 를 쓰고 읽는다. 16색은 모드표 가로/8
     바이트를 한 줄로 친다. 둘 다 CRTC 의 시작 주소·행 간격과 상관없다.
-    256색 쓰기는 CPU 쓰기와 같고, 읽기는 래치를 바꾸지 않는다. *)
+    256색 쓰기는 CPU 쓰기와 같고, 읽기는 래치를 바꾸지 않는다. 256색이 아닌
+    모드에서 [color] 의 bit7 이 서 있으면 이미 있는 점과 XOR 한다. *)
 
 val screen_pixel : t -> x:int -> y:int -> int
 (** 화면의 (x, y) 에 보이는 점. 16색과 256색은 CRTC 시작 주소·행 간격을
@@ -112,6 +136,11 @@ val screen256 : t -> Bytes.t
 val screen16 : t -> Bytes.t
 (** 16색 모드에서 화면에 보이는 점의 DAC 자리 — 색 번호를 속성 팔레트로
     옮긴 값이다. 위에서 아래로 한 바이트씩, 길이는 {!dims} 의 가로 × 세로. *)
+
+val screen_blanked : t -> bool
+val set_screen_blanked : t -> bool -> unit
+(** 시퀀서 1 번 bit 5(화면 끄기). 포트 3C4h/3C5h 로 써도 같은 비트다. 켜져
+    있으면 그림은 DAC 0 번 색 한 가지다. *)
 
 val cga_color_select : t -> int
 val set_cga_color_select : t -> int -> unit
