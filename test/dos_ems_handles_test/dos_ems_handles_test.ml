@@ -1,5 +1,6 @@
-(* LIM EMS 4.0 handle functions, and 57h which moves bytes in and out of
-   handles, called the way INT 67h calls them:
+(* LIM EMS 4.0 handle functions -- including attributes and names (52h-54h)
+   -- and 57h which moves bytes in and out of handles, called the way
+   INT 67h calls them:
    registers in, [Dos_ems.service], registers out. The guest path through
    the ROM stub is dos_ems_test's. Expected values are the spec's
    (LIM EMS 4.0, 1987, by Function number). *)
@@ -50,6 +51,10 @@ let longer_than_1mb = 0x96
 let exchange_overlap = 0x97
 let undefined_memory_type = 0x98
 let wraps_1mb = 0xA2
+let undefined_attribute = 0x90
+let not_supported = 0x91
+let name_not_found = 0xA0
+let name_taken_or_null = 0xA1
 let unmap = 0xFFFF
 let total = 2048
 
@@ -359,6 +364,127 @@ let () =
   check "5700h from A000:0001" (move t ~length:1 (conv, 0, 1, 0xA000) (ems, h, 1, 0)) ok;
   map t ~phys:0 ~handle:h ~log:0;
   check "plane 0's byte reached the page" (peek t (frame 0 + 1)) 0x5D
+
+(* ---------- Functions 19-21: attributes and names ---------- *)
+
+let name_at = 0x900
+let dir_at = 0xA00
+
+let set_name t h raw =
+  put t (at name_at) (List.init 8 (fun i -> if i < String.length raw then Char.code raw.[i] else 0));
+  call t 0x53 ~al:1 ~dx:h ~ds:buf ~si:name_at
+
+let find t raw =
+  put t (at name_at) (List.init 8 (fun i -> if i < String.length raw then Char.code raw.[i] else 0));
+  call t 0x54 ~al:1 ~ds:buf ~si:name_at
+
+let name_bytes_of t a = String.init 8 (fun i -> Char.chr (peek t (a + i)))
+let al t = Cpu86.reg8 t.cpu r_ax
+
+let check_s name got want =
+  if got <> want then begin
+    incr failed;
+    Printf.eprintf "FAIL %s: got %S want %S\n%!" name got want
+  end
+
+let () =
+  let t = Dos_machine.create () in
+  let h1 = allocate t 1 in
+  let h2 = allocate t 1 in
+  (* Function 19: only volatile handles *)
+  check "5200h" (call t 0x52 ~al:0 ~dx:h1) ok;
+  check "5200h volatile" (al t) 0;
+  check "5200h unknown handle" (call t 0x52 ~al:0 ~dx:0x77) invalid_handle;
+  check "5201h volatile" (call t 0x52 ~al:1 ~dx:h1 ~bx:0) ok;
+  check "5201h non-volatile" (call t 0x52 ~al:1 ~dx:h1 ~bx:1) not_supported;
+  check "5201h attribute 2" (call t 0x52 ~al:1 ~dx:h1 ~bx:2) undefined_attribute;
+  check "5201h unknown handle" (call t 0x52 ~al:1 ~dx:0x77 ~bx:0) invalid_handle;
+  check "5202h" (call t 0x52 ~al:2) ok;
+  check "5202h volatile only" (al t) 0;
+  check "5203h" (call t 0x52 ~al:3) invalid_subfunction;
+  (* Function 20 *)
+  check "5301h" (set_name t h1 "SOUND") ok;
+  check "5300h" (call t 0x53 ~al:0 ~dx:h1 ~es:buf ~di:0x980) ok;
+  check_s "5300h name" (name_bytes_of t (at 0x980)) "SOUND\000\000\000";
+  check "5301h the same eight bytes on another handle" (set_name t h2 "SOUND") name_taken_or_null;
+  check "5301h its own name again" (set_name t h1 "SOUND") ok;
+  (* every byte is part of the name, NULs too (00h-FFh) *)
+  check "5301h bytes after a NUL make another name" (set_name t h2 "SOUND\000xy") ok;
+  check "5300h the bytes after the NUL stay" (call t 0x53 ~al:0 ~dx:h2 ~es:buf ~di:0x980) ok;
+  check_s "5300h as given" (name_bytes_of t (at 0x980)) "SOUND\000xy";
+  check "5301h a leading NUL is still a name" (set_name t h2 "\000MUSIC") ok;
+  check "5401h a name with a leading NUL" (find t "\000MUSIC") ok;
+  check "5401h a name with a leading NUL: the handle" (dx t) h2;
+  check "5301h another name" (set_name t h2 "MUSIC") ok;
+  check "5301h eight bytes" (set_name t Dos_ems.os_handle "OSHANDLE") ok;
+  check "5300h unknown handle" (call t 0x53 ~al:0 ~dx:0x77 ~es:buf ~di:0x980) invalid_handle;
+  check "5301h unknown handle" (set_name t 0x77 "X") invalid_handle;
+  check "5302h" (call t 0x53 ~al:2) invalid_subfunction;
+  (* Function 21 *)
+  check "5400h" (call t 0x54 ~al:0 ~es:buf ~di:dir_at) ok;
+  check "5400h entries" (al t) 3;
+  let entry i = (peek t (at (dir_at + (10 * i))) lor (peek t (at (dir_at + (10 * i) + 1)) lsl 8),
+                 name_bytes_of t (at (dir_at + (10 * i) + 2))) in
+  check_b "5400h directory"
+    ([ entry 0; entry 1; entry 2 ]
+     = [ (0, "OSHANDLE"); (h1, "SOUND\000\000\000"); (h2, "MUSIC\000\000\000") ]);
+  check "5401h" (find t "MUSIC") ok;
+  check "5401h handle" (dx t) h2;
+  check "5401h bytes after the NUL count" (find t "MUSIC\000zz") name_not_found;
+  check "5401h not there" (find t "NOPE") name_not_found;
+  check "5401h no name" (find t "") name_taken_or_null;
+  check "5402h" (call t 0x54 ~al:2) ok;
+  check "5402h handles with the OS handle" (bx t) 255;
+  check "5403h" (call t 0x54 ~al:3) invalid_subfunction;
+  (* an all-NUL name takes the name off *)
+  check "5301h no name" (set_name t h2 "") ok;
+  check "5301h no name on a second handle" (set_name t (allocate t 1) "") ok;
+  check "5401h the taken-off name" (find t "MUSIC") name_not_found;
+  check "5301h a taken-off name can be given again" (set_name t h2 "MUSIC") ok;
+  (* a snapshot keeps the names *)
+  let t =
+    match Dos_snapshot.save t with
+    | Error e -> failwith (Dos_snapshot.save_error_to_string e)
+    | Ok s ->
+      (match Dos_snapshot.restore s with
+       | Ok t -> t
+       | Error e -> failwith (Dos_snapshot.error_to_string e))
+  in
+  check "5401h after a snapshot" (find t "SOUND") ok;
+  check "5401h after a snapshot: the handle" (dx t) h1;
+  (* releasing a handle takes its name off (Function 6); the OS handle,
+     reallocated to zero pages instead, keeps it *)
+  check "45h" (call t 0x45 ~dx:h1) ok;
+  check "5401h a released handle's name" (find t "SOUND") name_not_found;
+  check "the number comes back" (allocate t 1) h1;
+  check "5300h the new handle" (call t 0x53 ~al:0 ~dx:h1 ~es:buf ~di:0x980) ok;
+  check_s "5300h no name" (name_bytes_of t (at 0x980)) (String.make 8 '\000');
+  check "45h on the OS handle" (call t 0x45 ~dx:Dos_ems.os_handle) ok;
+  check "5401h the OS handle's name" (find t "OSHANDLE") ok;
+  (* names a snapshot refuses *)
+  let refused what =
+    match Dos_snapshot.save t with
+    | Ok _ -> check (what ^ ": save refuses it") 0 1
+    | Error _ -> ()
+  in
+  let names = Hashtbl.copy t.ems_names in
+  let restore () = Hashtbl.reset t.ems_names; Hashtbl.iter (Hashtbl.replace t.ems_names) names in
+  Hashtbl.replace t.ems_names h1 "MUSIC\000\000\000";
+  refused "two handles with one name";
+  restore ();
+  Hashtbl.replace t.ems_names h1 "NINEBYTES";
+  refused "a name longer than eight bytes";
+  restore ();
+  Hashtbl.replace t.ems_names h1 (String.make 8 '\000');
+  refused "a stored empty name";
+  restore ();
+  Hashtbl.replace t.ems_names 0x77 "GHOST\000\000\000";
+  refused "a name on a handle that is not open";
+  restore ();
+  Hashtbl.replace t.ems_names h1 "SHORT";
+  refused "a name shorter than eight bytes";
+  restore ();
+  check_b "the names as they were" (match Dos_snapshot.save t with Ok _ -> true | Error _ -> false)
 
 let () =
   if !failed > 0 then begin

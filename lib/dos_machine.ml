@@ -107,6 +107,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       ems_pages = Dos_ems.boot_handles ();
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
+      ems_names = Hashtbl.create 1;
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
@@ -130,6 +131,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
+  wr8 t (sda sda_wp_err) byte_max;              (* CONST2.ASM WPErr <-1> *)
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
       match Dos_bios.private_service_vector t raw with
