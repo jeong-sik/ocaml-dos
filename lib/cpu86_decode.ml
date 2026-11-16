@@ -31,19 +31,62 @@ type operand =
                          옆 세그먼트를 읽는다(실칩 관측). 베이스 대신
                          레지스터를 드는 것은 386 이 세그먼트 끝을 넘은
                          SS 접근과 다른 접근을 다른 결함으로 받아서다. *)
+  | Mem32 of int * int (** 67h 의 32 비트 오프셋. 16 비트에서 감기지 않고,
+                           실모드 한계 FFFFh 를 넘는 바이트가 있으면 접근이
+                           [overrun_vector] 결함이다([within]). *)
+
+let sx8 d = if d >= 0x80 then d - 0x100 else d
+
+(* 67h 의 32 비트 주소: rm=4 는 SIB(배율·인덱스·베이스), mod=0 의 rm=5 와 SIB
+   베이스 5 는 disp32 만이다. 베이스가 ESP·EBP 면 기본 세그먼트가 SS 다(Intel
+   80386 Programmer's Reference 17.2.1). 바이트 순서는 modrm, SIB, disp 다.
+   SIB 의 인덱스가 없음(4)이면 설명서는 배율을 말하지 않지만 실칩은 배율을
+   베이스에 곱한다. 데이터 README 의 Undefined Behavior 절이 같은 것을 적었고,
+   `67 00 9C E0 C5 E7 FF FF`(add [eax*8-183Bh],bl, EAX=1296h, DS=F269h)는
+   FA305h 를 읽고 쓴다. 67h 파일 첫 실행에서 틀린 5,205 건 가운데 5,166 건이
+   이 규칙으로 풀렸다. *)
+let offset32_mask = 0xffffffff
+let sib_byte = 4
+let no_base = 5
+let no_index = 4
+
+let mem32 t m rm addr =
+  let base, stack_based =
+    if rm = sib_byte then begin
+      let sib = fetch8 t in
+      let index = (sib lsr 3) land 7 and b = sib land 7 and scale = sib lsr 6 in
+      if index = no_index then begin
+        if b = no_base && m = 0 then (fetch32 t, false)
+        else (get32 t b lsl scale, b = 4 || b = 5)
+      end else begin
+        let scaled = get32 t index lsl scale in
+        if b = no_base && m = 0 then (fetch32 t + scaled, false)
+        else (get32 t b + scaled, b = 4 || b = 5)
+      end
+    end
+    else if rm = no_base && m = 0 then (fetch32 t, false)
+    else (get32 t rm, rm = 5)
+  in
+  let disp = match m with 0 -> 0 | 1 -> sx8 (fetch8 t) | _ -> fetch32 t in
+  let off = (base + disp) land offset32_mask in
+  let segsel = segment_for addr ~default:(if stack_based then sreg_ss else sreg_ds) in
+  (Mem32 (segsel, off), Some off)
 
 (* modrm 디코드. 반환: (mod, reg필드, 피연산자, 유효주소 오프셋).
    오프셋은 메모리 피연산자일 때만 Some — LEA 가 세그먼트를 더하기 전
-   오프셋을 필요로 한다. 세그먼트 override 가 있으면 [~ovr], 없으면
-   기본 규칙(BP 기반 = SS, 나머지 = DS). *)
-let decode_modrm t ~ovr =
+   오프셋을 필요로 한다. 세그먼트 접두가 있으면 [~addr] 에 실린 것, 없으면
+   기본 규칙(BP 기반 = SS, 나머지 = DS)이다. *)
+let decode_modrm t ~addr =
   let byte = fetch8 t in
   let m = byte lsr 6 in
   let regf = (byte lsr 3) land 7 in
   let rm = byte land 7 in
   let operand, ea =
     if m = 3 then (Reg rm, None)
-    else begin
+    else
+      match addr with
+      | A32 | A32_seg _ -> mem32 t m rm addr
+      | A16 | A16_seg _ ->
       let base =
         match rm with
         | 0 -> t.regs.(3) + t.regs.(6)   (* BX+SI *)
@@ -64,15 +107,30 @@ let decode_modrm t ~ovr =
         | _ -> fetch16 t
       in
       let segsel =
-        match ovr with
-        | Some s -> s
-        | None -> if rm = 2 || rm = 3 || (rm = 6 && m <> 0) then sreg_ss else sreg_ds
+        segment_for addr
+          ~default:(if rm = 2 || rm = 3 || (rm = 6 && m <> 0) then sreg_ss else sreg_ds)
       in
       let off = (base + disp) land 0xffff in
       (Mem (segsel, off), Some off)
-    end
   in
   (m, regf, operand, ea)
+
+(* POP r/m 의 실효 주소는 SP 를 올린 뒤의 ESP 로 센다 — [esp+...] 는 pop 한
+   뒤의 값이다(Intel SDM POP 설명과 같다. SingleStepTests/80386 678F·67668F 의
+   ESP 베이스 45 건, 이 규칙 없이 35 건이 틀린다). 16 비트 주소에는 SP 가
+   들어가지 않는다. 명령 바이트를 pop 읽기보다 먼저 가져오려고 SP 를 [bytes]
+   만큼 올려 주소만 세고 되돌린다. 가져오다 결함이 나면 호출자의
+   restore_sp_on_fault 가 SP 를 되돌린다. SP 가 FFFFh 를 넘어 감기는 경우는
+   데이터에 없어 16 비트로 감는다(SDM 은 프로세서마다 다르다고 적는다). *)
+let decode_pop_target t ~addr ~bytes =
+  match addr with
+  | A16 | A16_seg _ -> decode_modrm t ~addr
+  | A32 | A32_seg _ ->
+    let sp = t.regs.(4) in
+    t.regs.(4) <- (sp + bytes) land 0xffff;
+    let decoded = decode_modrm t ~addr in
+    t.regs.(4) <- sp;
+    decoded
 
 (* 세그먼트 베이스 + 오프셋 → 물리 주소. 오프셋은 16비트에서 감긴다. *)
 let at_base t base off = (base + (off land 0xffff)) land t.addr_mask
@@ -133,23 +191,53 @@ let write32 t s o v =
     t.write (at_base t base (o + i)) ((v lsr (8 * i)) land 0xff)
   done
 
+(* [Mem32] 의 [size] 바이트가 실모드 한계 FFFFh 안에 드는지. 넘으면 바이트
+   하나 오가기 전에 결함이다. 16 비트 오프셋과 달리 감기지 않는다. *)
+let segment_limit = 0xffff
+
+let within t sreg off size =
+  if off + size - 1 > segment_limit then fault (overrun_vector t sreg)
+
+(* 한 피연산자를 여러 번 나눠 읽는 명령(far 포인터, BOUND, ESC)이 먼저 부른다:
+   [Mem32] 면 [size] 바이트 전체가 한계 안인지 따진다. [Mem] 은 지금처럼 접근
+   하나하나가 따진다. *)
+let check_span t opd size =
+  match opd with
+  | Mem32 (s, o) -> within t s o size
+  | Mem _ | Reg _ -> ()
+
+(* A0-A3 의 직접 주소: 67h 면 imm32 오프셋이다. *)
+let moffs t addr =
+  let sreg = segment_for addr ~default:sreg_ds in
+  match addr with
+  | A16 | A16_seg _ -> Mem (sreg, fetch16 t)
+  | A32 | A32_seg _ -> Mem32 (sreg, fetch32 t)
+
 let op_read32 t = function
   | Reg n -> get32 t n
   | Mem (s, o) -> read32 t s o
+  | Mem32 (s, o) -> within t s o 4; read32 t s o
 
 let op_write32 t opd v =
   match opd with
   | Reg n -> put32 t n v
   | Mem (s, o) -> write32 t s o v
+  | Mem32 (s, o) -> within t s o 4; write32 t s o v
 
 let op_read t width = function
   | Reg n -> if width = 8 then reg8 t n else reg16 t n
   | Mem (b, o) -> if width = 8 then t.read (at t b o) else read16 t b o
+  | Mem32 (b, o) ->
+    within t b o (width / 8);
+    if width = 8 then t.read (at t b o) else read16 t b o
 
 let op_write t width opd v =
   match opd with
   | Reg n -> if width = 8 then set_reg8 t n v else set_reg16 t n v
   | Mem (b, o) -> if width = 8 then t.write (at t b o) v else write16 t b o v
+  | Mem32 (b, o) ->
+    within t b o (width / 8);
+    if width = 8 then t.write (at t b o) v else write16 t b o v
 
 (* 포트는 바이트 폭이다. 워드 접근은 p 와 p+1 두 번 — 한 번으로
    줄이면 상위 바이트가 늘 0 이 되고, 장치 쪽에서도 두 번째 포트의
@@ -282,33 +370,46 @@ let operand_sized =
   List.iter (fun op -> table.(op) <- true) operand_sized_opcodes;
   table
 
-(* 접두를 읽어 문맥을 만든다. [ovr]·[rep] 은 지금까지 본 접두다 — 같은
+(* 접두를 읽어 문맥을 만든다. [addr]·[rep] 은 지금까지 본 접두다 — 같은
    종류의 접두가 여럿이면 마지막 것이 남는다. LOCK 이 있을 때만
    [check_lock] 을 부른다 — 명령마다 부르면 삼국지3 3천만 스텝의 기계어
    명령이 2.2% 는다. 66h 를 보면 [prefixes_after_66] 로 넘어가, 66h 가 없는
    명령은 그 표시를 들고 다니지 않는다. *)
-let rec prefixes_after t ~base_ip ovr rep lock =
+(* 세그먼트 접두는 주소 크기를 그대로 두고, 67h 는 세그먼트를 그대로 둔다 —
+   둘은 어느 순서로 와도 된다. *)
+let with_segment addr s =
+  match addr with
+  | A16 | A16_seg _ -> A16_seg s
+  | A32 | A32_seg _ -> A32_seg s
+
+let with_address32 = function
+  | A16 | A32 -> A32
+  | A16_seg s | A32_seg s -> A32_seg s
+
+let rec prefixes_after t ~base_ip addr rep lock =
   let b = fetch8 t in
   match t.prefixes.(b) with
   | Not_prefix ->
-    let ctx = { base_ip; opcode = b; ovr; rep } in
+    let ctx = { base_ip; opcode = b; addr; rep } in
     if lock then check_lock t ctx;
     ctx
-  | Segment s -> prefixes_after t ~base_ip (Some s) rep lock
-  | Lock -> prefixes_after t ~base_ip ovr rep true
-  | Rep z -> prefixes_after t ~base_ip ovr (Some z) lock
-  | Operand_size -> prefixes_after_66 t ~base_ip ovr rep lock
+  | Segment s -> prefixes_after t ~base_ip (with_segment addr s) rep lock
+  | Lock -> prefixes_after t ~base_ip addr rep true
+  | Rep z -> prefixes_after t ~base_ip addr (Some z) lock
+  | Operand_size -> prefixes_after_66 t ~base_ip addr rep lock
+  | Address_size -> prefixes_after t ~base_ip (with_address32 addr) rep lock
 
-and prefixes_after_66 t ~base_ip ovr rep lock =
+and prefixes_after_66 t ~base_ip addr rep lock =
   let b = fetch8 t in
   match t.prefixes.(b) with
   | Not_prefix ->
-    let ctx = { base_ip; opcode = b; ovr; rep } in
+    let ctx = { base_ip; opcode = b; addr; rep } in
     if lock then check_lock t ctx;
     if operand_sized.(b) then { ctx with opcode = b lor operand32_form } else ctx
-  | Segment s -> prefixes_after_66 t ~base_ip (Some s) rep lock
-  | Lock -> prefixes_after_66 t ~base_ip ovr rep true
-  | Rep z -> prefixes_after_66 t ~base_ip ovr (Some z) lock
-  | Operand_size -> prefixes_after_66 t ~base_ip ovr rep lock
+  | Segment s -> prefixes_after_66 t ~base_ip (with_segment addr s) rep lock
+  | Lock -> prefixes_after_66 t ~base_ip addr rep true
+  | Rep z -> prefixes_after_66 t ~base_ip addr (Some z) lock
+  | Operand_size -> prefixes_after_66 t ~base_ip addr rep lock
+  | Address_size -> prefixes_after_66 t ~base_ip (with_address32 addr) rep lock
 
-let decode_prefixes t ~base_ip = prefixes_after t ~base_ip None None false
+let decode_prefixes t ~base_ip = prefixes_after t ~base_ip A16 None false

@@ -59,7 +59,7 @@ let alu_group t ctx op =
   match ctx.opcode land 7 with
   | 0 | 1 ->
     let width = if ctx.opcode land 1 = 0 then 8 else 16 in
-    let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+    let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
     let a = op_read t width rm in
     let b = if width = 8 then reg8 t regf else reg16 t regf in
     let r = alu_result t op a b width in
@@ -67,7 +67,7 @@ let alu_group t ctx op =
     3
   | 2 | 3 ->
     let width = if ctx.opcode land 1 = 0 then 8 else 16 in
-    let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+    let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
     let a = if width = 8 then reg8 t regf else reg16 t regf in
     let b = op_read t width rm in
     let r = alu_result t op a b width in
@@ -189,7 +189,7 @@ let group3 t ctx =
   let width = if ctx.opcode = 0xf6 then 8 else 16 in
   let mask = if width = 8 then 0xff else 0xffff in
   let msb = if width = 8 then 0x80 else 0x8000 in
-  let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+  let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
   (match regf with
    | 0 | 1 ->
      let imm = if width = 8 then fetch8 t else fetch16 t in
@@ -317,7 +317,7 @@ let imul32 t a b =
 (* 그룹3 의 66h 형태: test/not/neg/mul/imul/div/idiv r/m32. 곱셈·나눗셈은
    EDX:EAX 를 쓴다. *)
 let group3_32 t ctx =
-  let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+  let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
   (match regf with
    | 0 | 1 ->
      let imm = fetch32 t in

@@ -7,6 +7,10 @@ open Cpu86_alu
 open Cpu86_bcd
 open Cpu86_string
 
+(* 16 비트 far 포인터 m16:16 과 BOUND 의 두 경계가 차지하는 바이트. *)
+let far_pointer16_bytes = 4
+let bounds16_bytes = 4
+
 let idle t =
   t.cycles <- t.cycles + 2;
   2
@@ -71,13 +75,13 @@ let step t =
       (* --- mov --- *)
       | 0x88 | 0x89 ->
         let width = if opcode = 0x88 then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let v = if width = 8 then reg8 t regf else reg16 t regf in
         op_write t width rm v;
         2
       | 0x8a | 0x8b ->
         let width = if opcode = 0x8a then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let v = op_read t width rm in
         op_write t width (Reg regf) v;
         2
@@ -177,7 +181,7 @@ let step t =
          | I80386 -> restore_sp_on_fault t popa
          | I8086 | I80186 | I80286 -> atomic t popa)
       | 0x69 | 0x6b (* imul r16, rm16, imm *) ->
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let a = op_read t 16 rm in
         let imm =
           if opcode = 0x69 then fetch16 t
@@ -194,7 +198,7 @@ let step t =
         21
       | 0xc0 | 0xc1 (* shift rm, imm8 (186) *) ->
         let width = if opcode = 0xc0 then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         shift_group t regf width rm (fetch8 t);
         6
       | 0xc8 (* enter: Intel 186 계약. nesting>0 은 디스플레이(프레임
@@ -238,7 +242,7 @@ let step t =
          | I80286 ->
            let op2 = fetch8 t in
            if op2 = 0x01 then begin
-             let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+             let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
              if regf = 4 then begin op_write t 16 rm msw_real_mode_286; 3 end
              else unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
            end
@@ -250,7 +254,7 @@ let step t =
       (* --- 그룹1: ALU rm,imm (0x83 은 imm8 부호확장) --- *)
       | 0x80 | 0x81 | 0x82 | 0x83 ->
         let width = if opcode land 1 = 1 then 16 else 8 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let imm =
           if width = 8 then fetch8 t
           else if opcode = 0x83 then begin
@@ -266,7 +270,7 @@ let step t =
       (* --- test / xchg --- *)
       | 0x84 | 0x85 ->
         let width = if opcode = 0x84 then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let a = op_read t width rm in
         let b = if width = 8 then reg8 t regf else reg16 t regf in
         ignore (alu_result t 4 a b width);
@@ -281,7 +285,7 @@ let step t =
         4
       | 0x86 | 0x87 ->
         let width = if opcode = 0x86 then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let a = op_read t width rm in
         let b = if width = 8 then reg8 t regf else reg16 t regf in
         op_write t width (Reg regf) a;
@@ -298,7 +302,7 @@ let step t =
         3
       (* --- lea / mov sreg / pop rm --- *)
       | 0x8d ->
-        let _, regf, _, ea = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, _, ea = decode_modrm t ~addr:ctx.addr in
         (match ea with
          | Some off -> set_reg16 t regf off
          | None -> (undefined_on_286 t true; unsupported t ctx "lea on register"));
@@ -307,22 +311,24 @@ let step t =
          된다(실칩 관측). land 3 을 빼면 regf>=4 인 인코딩에서 세그먼트
          배열 밖을 짚어 에뮬레이터가 죽는다. *)
       | 0x8c ->
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let sreg = sreg_field t regf ~load:false in
         op_write t 16 rm (seg t sreg);
         2
       | 0x8e ->
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         (* reg 필드를 먼저 따진다 — INT 6 이 피연산자 읽기의 INT 13 보다 앞선다. *)
         let sreg = sreg_field t regf ~load:true in
         set_seg t sreg (op_read t 16 rm);
         2
       | 0x8f ->
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
-        undefined_on_286 t (regf <> 0);
         (* 286 은 SP 를 올려 둔 뒤에 쓴다 — 쓰기가 세그먼트 끝을 넘어도 SP 는
            올라간 채로 INT 13 을 받는다(SingleStepTests/80286 8F). *)
-        let pop_rm () = op_write t 16 rm (pop16 t) in
+        let pop_rm () =
+          let _, regf, rm, _ = decode_pop_target t ~addr:ctx.addr ~bytes:2 in
+          undefined_on_286 t (regf <> 0);
+          op_write t 16 rm (pop16 t)
+        in
         (match t.model with
          | I80386 -> restore_sp_on_fault t pop_rm
          | I8086 | I80186 | I80286 -> pop_rm ());
@@ -362,9 +368,10 @@ let step t =
         4
       (* --- LES/LDS r16, m32 (C4/C5) — 메모리의 far 포인터 로드. --- *)
       | 0xc4 | 0xc5 ->
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
+        check_span t rm far_pointer16_bytes;
         (match rm with
-         | Mem (b, o) ->
+         | Mem (b, o) | Mem32 (b, o) ->
            let off = read16 t b o in
            let segv = read16 t b (o + 2) in
            set_reg16 t regf off;
@@ -373,8 +380,7 @@ let step t =
         2
       (* --- accumulator 직접주소 mov (A0-A3) — TP 런타임 실측 요구. --- *)
       | 0xa0 | 0xa1 | 0xa2 | 0xa3 ->
-        let sreg = match ctx.ovr with Some g -> g | None -> sreg_ds in
-        let opd = Mem (sreg, fetch16 t) in
+        let opd = moffs t ctx.addr in
         let width = if opcode land 1 = 0 then 8 else 16 in
         if opcode < 0xa2 then op_write t width (Reg 0) (op_read t width opd)
         else op_write t width opd (op_read t width (Reg 0));
@@ -413,7 +419,7 @@ let step t =
       | 0xc3 -> t.ip <- pop16 t; 8
       | 0xc6 | 0xc7 ->
         let width = if opcode = 0xc6 then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let v = if width = 8 then fetch8 t else fetch16 t in
         (* 286 은 즉치값까지 읽어 명령 길이를 정한 뒤에 INT 6 을 낸다 — 10
            바이트를 넘으면 INT 13 이 먼저다(SingleStepTests/80286 C7). *)
@@ -436,7 +442,7 @@ let step t =
       (* --- 그룹2: shift/rotate (count 1 또는 CL) --- *)
       | 0xd0 | 0xd1 | 0xd2 | 0xd3 ->
         let width = if opcode land 1 = 0 then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         let count = if opcode < 0xd2 then 1 else reg8 t 1 (* CL *) in
         shift_group t regf width rm count;
         if opcode < 0xd2 then 4 else 8
@@ -445,28 +451,43 @@ let step t =
       (* --- xlat --- *)
       | 0xd7 (* xlat: AL <- [seg:BX+AL]. 오프셋은 세그먼트 안에서 16비트로
                  감긴다 — 마스크를 빼면 BX+AL 이 0xFFFF 를 넘을 때 옆
-                 세그먼트를 읽는다. 세그먼트 override 도 먹는다. *) ->
-        let sel = match ctx.ovr with Some s -> s | None -> 3 in
-        let off = (reg16 t 3 + reg8 t 0) land 0xffff in
-        set_reg8 t 0 (t.read (physical t ~seg:t.segs.(sel) ~off));
+                 세그먼트를 읽는다. 세그먼트 override 도 먹는다. 67h 면
+                 EBX+AL 이고 감기지 않는다. *) ->
+        let sel = segment_for ctx.addr ~default:sreg_ds in
+        let opd =
+          if address32 ctx.addr then Mem32 (sel, (get32 t 3 + reg8 t 0) land offset32_mask)
+          else Mem (sel, (reg16 t 3 + reg8 t 0) land 0xffff)
+        in
+        set_reg8 t 0 (op_read t 8 opd);
         7
       (* --- loopnz/loopz/loop/jcxz --- *)
+      (* 카운터는 주소 크기를 따른다: 67h 면 ECX(JECXZ), 아니면 CX. *)
       | 0xe0 | 0xe1 | 0xe2 ->
         let d = fetch8 t in
         let d = if d >= 0x80 then d - 0x100 else d in
-        t.regs.(1) <- (t.regs.(1) - 1) land 0xffff;
+        let left =
+          if address32 ctx.addr then begin
+            let c = (get32 t 1 - 1) land offset32_mask in
+            put32 t 1 c;
+            c
+          end else begin
+            t.regs.(1) <- (t.regs.(1) - 1) land 0xffff;
+            t.regs.(1)
+          end
+        in
         let take =
           match opcode with
-          | 0xe0 -> t.regs.(1) <> 0 && not t.zf
-          | 0xe1 -> t.regs.(1) <> 0 && t.zf
-          | _ -> t.regs.(1) <> 0
+          | 0xe0 -> left <> 0 && not t.zf
+          | 0xe1 -> left <> 0 && t.zf
+          | _ -> left <> 0
         in
         if take then t.ip <- (t.ip + d) land 0xffff;
         5
       | 0xe3 ->
         let d = fetch8 t in
         let d = if d >= 0x80 then d - 0x100 else d in
-        if t.regs.(1) = 0 then t.ip <- (t.ip + d) land 0xffff;
+        let cx = if address32 ctx.addr then get32 t 1 else t.regs.(1) in
+        if cx = 0 then t.ip <- (t.ip + d) land 0xffff;
         5
       (* --- in/out (워드는 port_in16/port_out16) --- *)
       | 0xe4 -> set_reg8 t 0 (t.port_in (fetch8 t)); 10
@@ -497,7 +518,7 @@ let step t =
       (* --- 그룹 FE/FF: inc/dec rm, call/jmp rm, push rm --- *)
       | 0xfe | 0xff ->
         let width = if opcode = 0xfe then 8 else 16 in
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
         (match regf, opcode with
          | 0, _ (* inc rm — CF 유지 *) ->
            let saved_cf = t.cf in
@@ -516,8 +537,9 @@ let step t =
            push16 t t.ip;
            set_ip t target
          | 3, 0xff ->
+           check_span t rm far_pointer16_bytes;
            (match rm with
-            | Mem (b, o) ->
+            | Mem (b, o) | Mem32 (b, o) ->
               let off = read16 t b o in
               let sg = read16 t b (o + 2) in
               ignore
@@ -530,8 +552,9 @@ let step t =
             | Reg _ -> (undefined_on_286 t true; unsupported t ctx "call far reg"))
          | 4, 0xff -> set_ip t (op_read t 16 rm)
          | 5, 0xff ->
+           check_span t rm far_pointer16_bytes;
            (match rm with
-            | Mem (b, o) ->
+            | Mem (b, o) | Mem32 (b, o) ->
               let off = read16 t b o in
               set_seg t 1 (read16 t b (o + 2));
               t.ip <- off
@@ -545,7 +568,8 @@ let step t =
               t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
               write16 t sreg_ss t.regs.(4) t.regs.(4)
             | Reg _, (I8086 | I80186 | I80286 | I80386)
-            | Mem _, (I8086 | I80186 | I80286 | I80386) -> push16 t (op_read t 16 rm))
+            | Mem _, (I8086 | I80186 | I80286 | I80386)
+            | Mem32 _, (I8086 | I80186 | I80286 | I80386) -> push16 t (op_read t 16 rm))
          | _ -> unsupported t ctx "group FE/FF");
         15
       (* --- 186 string I/O. rep 접두어가 그대로 먹는다. --- *)
@@ -556,9 +580,10 @@ let step t =
       (* --- bound (186): 배열 인덱스가 [하한,상한] 밖이면 INT 5.
              Turbo Pascal 의 {$R+} 범위 검사가 이 명령을 낸다. --- *)
       | 0x62 ->
-        let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
+        check_span t rm bounds16_bytes;
         (match rm with
-         | Mem (b, o) ->
+         | Mem (b, o) | Mem32 (b, o) ->
            let sx v = if v >= 0x8000 then v - 0x10000 else v in
            let idx = sx (reg16 t regf) in
            (* 386 은 두 경계를 다 읽고 견준다 — 상한이 세그먼트 끝을 넘으면
@@ -590,14 +615,14 @@ let step t =
              소프트웨어 부동소수 경로를 고른다. 코프로세서 없는 실기
              8086 은 피연산자만 읽고 아무 일도 하지 않는다. --- *)
       | b when b >= 0xd8 && b <= 0xdf ->
-        let _, _, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+        let _, _, rm, _ = decode_modrm t ~addr:ctx.addr in
         (* 286 은 워드로 읽는다 — 오프셋 FFFF 면 INT 13(SingleStepTests/80286
            D8). *)
         (match rm with
-         | Mem (b, o) ->
+         | Mem _ | Mem32 _ ->
            (match t.model with
-            | I80286 | I80386 -> ignore (read16 t b o)
-            | I8086 | I80186 -> ignore (t.read (at t b o)))
+            | I80286 | I80386 -> ignore (op_read t 16 rm)
+            | I8086 | I80186 -> ignore (op_read t 8 rm))
          | Reg _ -> ());
         2
       (* --- 386 의 66h 형태([operand32_form])는 0xFF 를 넘어 여기에만 닿는다.

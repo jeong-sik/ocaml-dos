@@ -58,11 +58,11 @@ let sreg_fs = 4
 let sreg_gs = 5
 
 (* 명령 앞에 붙는 바이트의 종류. [Rep true] 는 rep/repz, [Rep false] 는
-   repnz 다. 386 만 64h·65h 를 FS·GS override 로, 66h 를 피연산자 크기
-   바꾸기로 읽는다. [prefix_table] 이
+   repnz 다. 386 만 64h·65h 를 FS·GS override 로, 66h·67h 를 피연산자·주소
+   크기 바꾸기로 읽는다. [prefix_table] 이
    모델마다 256 칸으로 펼쳐 두어 바이트 하나를 한 번 찾아 가른다 — 함수로
    가르면 삼국지3 3천만 스텝의 기계어 명령이 0.75% 는다. *)
-type prefix = Not_prefix | Segment of int | Lock | Rep of bool | Operand_size
+type prefix = Not_prefix | Segment of int | Lock | Rep of bool | Operand_size | Address_size
 
 let prefix_of_byte model b =
   match b with
@@ -77,6 +77,10 @@ let prefix_of_byte model b =
   | 0x66 ->
     (match model with
      | I80386 -> Operand_size
+     | I8086 | I80186 | I80286 -> Not_prefix)
+  | 0x67 ->
+    (match model with
+     | I80386 -> Address_size
      | I8086 | I80186 | I80286 -> Not_prefix)
   | 0xf0 -> Lock
   | 0xf2 -> Rep false
@@ -243,13 +247,30 @@ let parity_even v =
   done;
   !count land 1 = 0
 
+(* 메모리 피연산자를 만드는 규칙: 주소 크기와 세그먼트 override. 67h 는 386
+   에서만 [A32] 쪽을 만든다. 둘을 한 값에 두는 것은 둘 다 메모리 피연산자를
+   만드는 곳(modrm, 문자열, XLAT, moffs)만 보기 때문이다 — 그곳이 주소 크기를
+   빼먹으면 컴파일러가 갈래가 빠졌다고 잡는다. *)
+type addressing =
+  | A16           (** 16 비트 주소, 기본 세그먼트 *)
+  | A16_seg of int (** 16 비트 주소, 이 세그먼트 레지스터 *)
+  | A32           (** 32 비트 주소(67h), 기본 세그먼트 *)
+  | A32_seg of int (** 32 비트 주소(67h), 이 세그먼트 레지스터 *)
+
+let address32 = function A32 | A32_seg _ -> true | A16 | A16_seg _ -> false
+
+let segment_for addr ~default =
+  match addr with
+  | A16_seg s | A32_seg s -> s
+  | A16 | A32 -> default
+
 (* 명령 하나의 문맥. 접두를 다 읽고 나면 바뀌지 않는다. [base_ip] 는 첫
-   접두 바이트의 IP 다 — 결함과 Unsupported 가 그 자리로 되돌린다. [ovr] 는
-   세그먼트 override, [rep] 은 Some true(rep/repz)·Some false(repnz). LOCK 은
-   접두를 읽는 동안 [Cpu86_decode.check_lock] 이 따지고 끝난다. [opcode] 는
-   opcode 바이트이고, 386 에서 66h 가 붙어 폭이 32 비트가 되는 명령이면
-   [operand32_form] 이 더해져 있다. *)
-type ctx = { base_ip : int; opcode : int; ovr : int option; rep : bool option }
+   접두 바이트의 IP 다 — 결함과 Unsupported 가 그 자리로 되돌린다. [addr] 는
+   메모리 피연산자의 규칙([addressing]), [rep] 은 Some true(rep/repz)·Some
+   false(repnz). LOCK 은 접두를 읽는 동안 [Cpu86_decode.check_lock] 이 따지고
+   끝난다. [opcode] 는 opcode 바이트이고, 386 에서 66h 가 붙어 폭이 32 비트가
+   되는 명령이면 [operand32_form] 이 더해져 있다. *)
+type ctx = { base_ip : int; opcode : int; addr : addressing; rep : bool option }
 
 (* [ctx.opcode] 의 bit 8. 필드 대신 opcode 값에 싣는 것은 16 비트 명령이 이
    표시를 따질 일이 없어서다: [step] 의 match 에서 0xFF 를 넘는 값은 마지막

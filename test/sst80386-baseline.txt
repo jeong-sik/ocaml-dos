@@ -1,2 +1,12 @@
 # SingleStepTests/80386 real mode: allowed failures per file, with why.
 # A line is "<file> <count>"; lines starting with # are comments.
+
+# 67A5 67AB 6766A5 6766AB: one test each, the same start state. REP MOVS/STOS
+# writes from ES:4F65h (ES=CS=7FFFh, ECX=2Ch) over its own code at CS:4FB0h and
+# the HLT after it. The chip fetched those 16 bytes before the first write (67A5
+# test 442, bus cycles 0-14 against 430) and halts from its queue. Without a
+# queue model the overwritten bytes run as code. Issue #159.
+67A5 1
+67AB 1
+6766A5 1
+6766AB 1
