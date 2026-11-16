@@ -21,8 +21,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    5: suspended BIOS input services carry their return boundary, and both
    input and EXEC carry their owned ROM service return frame.
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
-   console bytes are carried explicitly. *)
-let format_version = 6
+   console bytes are carried explicitly.
+   7: the mouse carries each button's press and release log (INT 33h
+   AX=05h/06h) and the AX=07h/08h ranges. *)
+let format_version = 7
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -302,7 +304,8 @@ let write_payload w t =
   put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
         mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
-        mouse_handler_off } = mouse
+        mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
+        mouse_range_y } = mouse
   in
   C.put_bool w mouse_present;
   put "mouse x" C.any mouse_x;
@@ -313,7 +316,21 @@ let write_payload w t =
   put "mouse dy" C.any mouse_dy;
   put "mouse handler mask" C.word mouse_handler_mask;
   put "mouse handler seg" C.word mouse_handler_seg;
-  put "mouse handler off" C.word mouse_handler_off
+  put "mouse handler off" C.word mouse_handler_off;
+  List.iter
+    (Array.iter (fun { times; last_x; last_y } ->
+         put "mouse button count" C.count times;
+         put "mouse button x" C.word last_x;
+         put "mouse button y" C.word last_y))
+    [ mouse_presses; mouse_releases ];
+  List.iter
+    (function
+      | None -> C.put_bool w false
+      | Some (lo, hi) ->
+        C.put_bool w true;
+        put "mouse range low" C.word lo;
+        put "mouse range high" C.word hi)
+    [ mouse_range_x; mouse_range_y ]
 
 let save t =
   match check_consistency t with
@@ -506,6 +523,23 @@ let read_payload r =
   m.mouse_handler_mask <- get "mouse handler mask" C.word;
   m.mouse_handler_seg <- get "mouse handler seg" C.word;
   m.mouse_handler_off <- get "mouse handler off" C.word;
+  List.iter
+    (Array.iter (fun (l : button_log) ->
+         l.times <- get "mouse button count" C.count;
+         l.last_x <- get "mouse button x" C.word;
+         l.last_y <- get "mouse button y" C.word))
+    [ m.mouse_presses; m.mouse_releases ];
+  let get_range () =
+    if C.get_bool r then begin
+      let lo = get "mouse range low" C.word in
+      let hi = get "mouse range high" C.word in
+      if lo > hi then C.fail "mouse range low above high";
+      Some (lo, hi)
+    end
+    else None
+  in
+  m.mouse_range_x <- get_range ();
+  m.mouse_range_y <- get_range ();
   C.end_of_input r;
   (match check_consistency t with
    | Ok () -> ()
