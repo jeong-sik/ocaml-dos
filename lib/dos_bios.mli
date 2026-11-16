@@ -3,7 +3,13 @@
     33h(마우스) 서비스. *)
 
 type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
-type host_vector = Bios of bios_service | Dos_terminate | Dos_call | Dos_keep | Ems
+type host_vector =
+  | Bios of bios_service
+  | Dos_divide_overflow
+  | Dos_terminate
+  | Dos_call
+  | Dos_keep
+  | Ems
 
 val host_vector : int -> host_vector option
 (** 호스트가 구현을 갖고 있는 벡터. [install] 이 깔 스텁과
