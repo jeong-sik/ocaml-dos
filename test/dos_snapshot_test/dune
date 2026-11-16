@@ -1,0 +1,3 @@
+(test
+ (name dos_snapshot_test)
+ (libraries dosmachine dos_core_identity unix))
