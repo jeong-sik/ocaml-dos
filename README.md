@@ -182,9 +182,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   옮긴다. AH=0Ch 도 bit7 이면 XOR 한다(256색 모드 제외). AH=08h(글자
   읽기)는 그래픽 모드에서 화면을 읽지 않는다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB 읽기(0Fh/10h/14h/21h/23h/24h, 확장 FCB, 29h 이름
-  나누기)·지우기(13h)·이름 바꾸기(17h), findfirst/findnext, 메모리
-  할당(48h/49h/4Ah),
+  seek/close/dup), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
+  쓴 바이트는 닫을 때 파일이 된다, 29h 이름 나누기), findfirst/findnext,
+  메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기.
   MZ 는 헤더의 페이지 수만큼 싣고 뒤에 붙은 데이터는 싣지 않는다. 자식은
