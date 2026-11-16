@@ -81,6 +81,7 @@ type t = {
   mutable irq0_at : int option;         (** 다음 OUT0 상승의 CPU 사이클 *)
   pic : Dos_pic.t;
   dma : Dos_dma.t;                      (** 포트 00h-0Fh 와 페이지 레지스터 *)
+  mutable sb : Dos_sb.t option;         (** 220h 의 Sound Blaster. 스냅숏이 꽂고 뺀다 *)
   kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
   (* VGA DAC *)
   pal : (int * int * int) array;
@@ -94,7 +95,7 @@ type t = {
   mutable cga_status : bool;
   mutable mode_control : int;           (** 0x3D8 *)
   mutable color_select : int;           (** 0x3D9 *)
-  mutable cmos_index : int;
+  cmos : Dos_cmos.t;  (** 포트 70h·71h *)
   (* OPL2 — 타이머 둘과 상태 포트만 있다. 소리는 없다. *)
   mutable opl_reg : int;                (** 0x388 로 고른 레지스터 *)
   mutable opl_t1_count : int;           (** 레지스터 02h *)
@@ -159,7 +160,7 @@ let channel0_after_bios () =
 let rise_cycle ~speed pit ~tick =
   Option.map (fun r -> r * speed) (Dos_pit.next_rise pit ~tick)
 
-let create ~speed ~mpu401 ~mem ~video =
+let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
   let pit0 = channel0_after_bios () in
   {
     mem;
@@ -171,6 +172,7 @@ let create ~speed ~mpu401 ~mem ~video =
     irq0_at = rise_cycle ~speed pit0 ~tick:0;
     pic = Dos_pic.create ();
     dma = Dos_dma.create ();
+    sb = (if sound_blaster then Some (Dos_sb.create ()) else None);
     kbc = Dos_kbc.create ();
     pal = Array.init dac_entries default_vga_pal;
     dac_write_index = 0;
@@ -181,7 +183,7 @@ let create ~speed ~mpu401 ~mem ~video =
     cga_status = false;
     mode_control = 0x29;
     color_select = 0;
-    cmos_index = 0;
+    cmos;
     opl_reg = 0;
     opl_t1_count = 0;
     opl_t2_count = 0;
@@ -364,6 +366,40 @@ let set_now t n = t.now <- n
 let palette t = t.pal
 let pic t = t.pic
 let dma t = t.dma
+let sound_blaster t = t.sb
+
+(* Sound Blaster 2.0 의 FM 은 카드의 228h·229h 에도 보인다 — 388h·389h 의
+   OPL2 와 같은 칩이다(DOSBox 도 base+8 에 OPL 을 단다). *)
+let sb_fm_address = 0x228
+let sb_fm_data = 0x229
+let opl_address = 0x388
+let opl_data = 0x389
+
+let fm_alias t p =
+  match t.sb with
+  | None -> p
+  | Some _ -> if p = sb_fm_address then opl_address else if p = sb_fm_data then opl_data else p
+
+(* DSP 가 IRQ 선을 내렸는데 CPU 가 아직 요청을 안 받았으면 요청을
+   거둔다(DOSBox PIC_DeActivateIRQ). 22Eh 를 읽은 뒤, 리셋·새 전송 뒤다. *)
+let follow_sb_line t sb =
+  if not (Dos_sb.irq_line sb) then Dos_pic.lower_irq t.pic Dos_pic.Sound_blaster
+
+let sb_port_in t p =
+  match t.sb with
+  | None -> None
+  | Some sb ->
+    let v = Dos_sb.port_in sb p in
+    follow_sb_line t sb;
+    v
+
+let sb_port_out t p v =
+  match t.sb with
+  | None -> false
+  | Some sb ->
+    let taken = Dos_sb.port_out sb ~hz:(cpu_hz t) ~now:t.now p v in
+    follow_sb_line t sb;
+    taken
 let kbc t = t.kbc
 let speaker_on t = t.port_b land 0x03 = 0x03
 
@@ -435,10 +471,13 @@ let port_in t p =
   match Dos_dma.port_in t.dma p with
   | Some v -> v
   | None ->
+  match sb_port_in t (p land 0xffff) with
+  | Some v -> v
+  | None ->
   match mpu_port_in t (p land 0xffff) with
   | Some v -> v
   | None ->
-  match p land 0xffff with
+  match fm_alias t (p land 0xffff) with
   | 0x20 -> Dos_pic.read_command t.pic
   | 0x21 -> Dos_pic.read_mask t.pic
   | 0x40 -> Dos_pit.read t.pit0 ~tick:(pit_tick t)
@@ -453,8 +492,8 @@ let port_in t p =
     let out2 = if Dos_pit.out t.pit2 ~tick:(pit_tick t) then out2_bit else 0 in
     (t.port_b land lnot (refresh_bit lor out2_bit)) lor refresh lor out2
   | 0x64 -> Dos_kbc.status t.kbc
-  | 0x70 -> t.cmos_index
-  | 0x71 -> 0x00
+  | 0x70 -> Dos_cmos.index t.cmos
+  | 0x71 -> Dos_cmos.read t.cmos ~now:t.now ~cpu_hz:(cpu_hz t)
   (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
      통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측).
      버튼 비트(4~7)는 0 이 눌림이라 1 로 둔다(86Box joystick_standard.c
@@ -496,9 +535,10 @@ let port_out t p v =
     | _ -> ()
   end
   else if Dos_dma.port_out t.dma p v then ()
+  else if sb_port_out t (p land 0xffff) v then ()
   else begin
   mpu_port_out t (p land 0xffff) v;
-  match p land 0xffff with
+  match fm_alias t (p land 0xffff) with
   | 0x20 -> Dos_pic.write_command t.pic v
   | 0x21 -> Dos_pic.write_mask t.pic v
   | 0x40 ->
@@ -530,7 +570,8 @@ let port_out t p v =
     let now_high = gate2 t in
     if was <> now_high then Dos_pit.gate_edge t.pit2 ~tick:(pit_tick t) ~high:now_high
   | 0x64 -> Dos_kbc.write_command t.kbc ~hz:(cpu_hz t) v
-  | 0x70 -> t.cmos_index <- v
+  | 0x70 -> Dos_cmos.select t.cmos v
+  | 0x71 -> Dos_cmos.write t.cmos v
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
   | 0x3C8 -> t.dac_write_index <- v; t.dac_phase <- 0
@@ -585,9 +626,9 @@ let get_opl_at r =
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
-        speed; now; pit0; irq0_at; pic; dma; kbc; pal; dac_write_index; dac_read_index;
+        speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
-        mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
+        mode_control; color_select; cmos; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
   in
   let put what r v = C.put w ~what r v in
@@ -600,6 +641,9 @@ let write_state w t =
    | Some at -> C.put_bool w true; put "irq0_at" cycle at);
   Dos_pic.write_state w pic;
   Dos_dma.write_state w dma;
+  (match sb with
+   | None -> C.put_bool w false
+   | Some s -> C.put_bool w true; Dos_sb.write_state w s);
   Dos_kbc.write_state w kbc;
   put "DAC size" C.count (Array.length pal);
   Array.iter
@@ -613,7 +657,7 @@ let write_state w t =
   C.put_bool w cga_status;
   put "mode_control" C.byte mode_control;
   put "color_select" C.byte color_select;
-  put "cmos_index" C.byte cmos_index;
+  Dos_cmos.write_state w cmos;
   put "opl_reg" C.byte opl_reg;
   put "opl_t1_count" C.byte opl_t1_count;
   put "opl_t2_count" C.byte opl_t2_count;
@@ -634,6 +678,13 @@ let read_state r t =
   t.irq0_at <- (if C.get_bool r then Some (get "irq0_at" cycle) else None);
   Dos_pic.read_state r t.pic;
   Dos_dma.read_state r t.dma;
+  t.sb <-
+    (if C.get_bool r then begin
+       let s = Dos_sb.create () in
+       Dos_sb.read_state r s;
+       Some s
+     end
+     else None);
   Dos_kbc.read_state r t.kbc ~hz:(cpu_hz t);
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri
@@ -651,7 +702,7 @@ let read_state r t =
   t.cga_status <- C.get_bool r;
   t.mode_control <- get "mode_control" C.byte;
   t.color_select <- get "color_select" C.byte;
-  t.cmos_index <- get "cmos_index" C.byte;
+  Dos_cmos.read_state r t.cmos;
   t.opl_reg <- get "opl_reg" C.byte;
   t.opl_t1_count <- get "opl_t1_count" C.byte;
   t.opl_t2_count <- get "opl_t2_count" C.byte;

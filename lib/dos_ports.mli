@@ -1,5 +1,5 @@
 (** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), DMA({!Dos_dma}), 키보드
-    컨트롤러({!Dos_kbc}), VGA DAC, CRTC, PC 스피커, CGA 상태 레지스터.
+    컨트롤러({!Dos_kbc}), VGA DAC, CRTC, PC 스피커, CGA 상태 레지스터, CMOS 시계({!Dos_cmos}).
 
     이 포트들이 무엇을 돌려주는지가 게임의 진행 조건이 된다. 고정값을
     돌려주면 상태 변화를 기다리는 루프가 영원히 안 풀린다 — CGA 재주사
@@ -37,13 +37,16 @@ val speed_hz : speed -> int
 val cga_palette : (int * int * int) array
 (** CGA 16색 — 속성 바이트의 하위 니블이 글자색, 상위 니블이 바탕색. *)
 
-val create : speed:speed -> mpu401:bool -> mem:Bytes.t -> video:Dos_video.t -> t
+val create :
+  speed:speed -> mpu401:bool -> mem:Bytes.t -> video:Dos_video.t -> sound_blaster:bool ->
+  cmos:Dos_cmos.t -> t
 (** [speed] 는 CPU 속도다. [mpu401] 이면 330h·331h 를 MPU-401 에 넘긴다(MIDI
-    바이트는 버린다). [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
+    바이트는 버린다). 포트 70h·71h 는 [cmos] 로 넘긴다. [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
     와 같은 값으로 유지하는 데 쓴다. 커서의 진실 원천은 하나여야 한다.
     비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성·CRTC)는 [video] 로
     넘긴다. CRTC 커서 레지스터(0x0A/0x0B/0x0E/0x0F)를 쓰면 어댑터가 받은
-    뒤 BDA 를 맞춘다. *)
+    뒤 BDA 를 맞춘다. [sound_blaster] 이면 220h 에 Sound Blaster 2.0({!Dos_sb})을
+    꽂는다 — DSP 포트를 받고, 228h·229h 를 388h·389h 의 OPL2 로 보낸다. *)
 
 val bda_page_size : int
 val bda_page_start : int
@@ -79,6 +82,11 @@ val pic : t -> Dos_pic.t
 
 val dma : t -> Dos_dma.t
 (** 포트 00h-0Fh 와 81h·82h·83h·87h 의 DMA 컨트롤러. 장치가 바이트를 당겨 간다. *)
+
+val sound_blaster : t -> Dos_sb.t option
+(** 꽂힌 Sound Blaster. 기계가 때가 되면 {!Dos_sb.advance} 를 부르고 IRQ 7 을
+    올린다. 22Eh 읽기·리셋·새 전송으로 DSP 가 선을 내리면, CPU 가 아직 안
+    받은 PIC 요청은 이 모듈이 거둔다. *)
 
 val kbc : t -> Dos_kbc.t
 (** 포트 0x60·0x64 의 키보드 컨트롤러. *)
