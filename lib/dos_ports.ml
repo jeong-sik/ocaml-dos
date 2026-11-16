@@ -95,7 +95,7 @@ type t = {
   mutable cga_status : bool;
   mutable mode_control : int;           (** 0x3D8 *)
   mutable color_select : int;           (** 0x3D9 *)
-  mutable cmos_index : int;
+  cmos : Dos_cmos.t;  (** 포트 70h·71h *)
   (* OPL2 — 타이머 둘과 상태 포트만 있다. 소리는 없다. *)
   mutable opl_reg : int;                (** 0x388 로 고른 레지스터 *)
   mutable opl_t1_count : int;           (** 레지스터 02h *)
@@ -160,7 +160,7 @@ let channel0_after_bios () =
 let rise_cycle ~speed pit ~tick =
   Option.map (fun r -> r * speed) (Dos_pit.next_rise pit ~tick)
 
-let create ~speed ~mpu401 ~mem ~video ~sound_blaster =
+let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
   let pit0 = channel0_after_bios () in
   {
     mem;
@@ -183,7 +183,7 @@ let create ~speed ~mpu401 ~mem ~video ~sound_blaster =
     cga_status = false;
     mode_control = 0x29;
     color_select = 0;
-    cmos_index = 0;
+    cmos;
     opl_reg = 0;
     opl_t1_count = 0;
     opl_t2_count = 0;
@@ -492,8 +492,8 @@ let port_in t p =
     let out2 = if Dos_pit.out t.pit2 ~tick:(pit_tick t) then out2_bit else 0 in
     (t.port_b land lnot (refresh_bit lor out2_bit)) lor refresh lor out2
   | 0x64 -> Dos_kbc.status t.kbc
-  | 0x70 -> t.cmos_index
-  | 0x71 -> 0x00
+  | 0x70 -> Dos_cmos.index t.cmos
+  | 0x71 -> Dos_cmos.read t.cmos ~now:t.now ~cpu_hz:(cpu_hz t)
   (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
      통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측).
      버튼 비트(4~7)는 0 이 눌림이라 1 로 둔다(86Box joystick_standard.c
@@ -570,7 +570,8 @@ let port_out t p v =
     let now_high = gate2 t in
     if was <> now_high then Dos_pit.gate_edge t.pit2 ~tick:(pit_tick t) ~high:now_high
   | 0x64 -> Dos_kbc.write_command t.kbc ~hz:(cpu_hz t) v
-  | 0x70 -> t.cmos_index <- v
+  | 0x70 -> Dos_cmos.select t.cmos v
+  | 0x71 -> Dos_cmos.write t.cmos v
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
   | 0x3C8 -> t.dac_write_index <- v; t.dac_phase <- 0
@@ -627,7 +628,7 @@ let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
-        mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
+        mode_control; color_select; cmos; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
   in
   let put what r v = C.put w ~what r v in
@@ -656,7 +657,7 @@ let write_state w t =
   C.put_bool w cga_status;
   put "mode_control" C.byte mode_control;
   put "color_select" C.byte color_select;
-  put "cmos_index" C.byte cmos_index;
+  Dos_cmos.write_state w cmos;
   put "opl_reg" C.byte opl_reg;
   put "opl_t1_count" C.byte opl_t1_count;
   put "opl_t2_count" C.byte opl_t2_count;
@@ -701,7 +702,7 @@ let read_state r t =
   t.cga_status <- C.get_bool r;
   t.mode_control <- get "mode_control" C.byte;
   t.color_select <- get "color_select" C.byte;
-  t.cmos_index <- get "cmos_index" C.byte;
+  Dos_cmos.read_state r t.cmos;
   t.opl_reg <- get "opl_reg" C.byte;
   t.opl_t1_count <- get "opl_t1_count" C.byte;
   t.opl_t2_count <- get "opl_t2_count" C.byte;
