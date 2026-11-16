@@ -556,7 +556,75 @@ let test_get_dta_preserves_ds () =
   check "AH=2F ES:BX=기본 DTA" flat (psp_base + 0x80);
   check "AH=2F DS 보존" (peek16 m (scratch + 4)) 0x1000
 
+let test_psp_both_ways () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+            mov_bx 0 ^ mov_ah 0x51 ^ int_ 0x21 ^ store_bx scratch
+            ^ mov_bx 0 ^ mov_ah 0x62 ^ int_ 0x21 ^ store_bx (scratch + 2) ^ quit)
+         "")
+  in
+  check "AH=51 BX=PSP 세그먼트" (peek16 m scratch) 0x1000;
+  check "AH=62 BX=PSP 세그먼트" (peek16 m (scratch + 2)) 0x1000
+
+(* 어떤 DOS 판에도 없는 AH=80h. 기계는 그 INT 에서 멈추고, 다시 돌려도
+   같은 자리에서 멈춘다. *)
+let test_unknown_function_stops () =
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m (mov_ah 0x80 ^ int_ 0x21 ^ quit);
+  let stop () =
+    match Dos_machine.run m ~max_steps:1000 with
+    | () -> None
+    | exception Cpu86.Unsupported msg -> Some msg
+  in
+  let first = stop () in
+  check_s "AH=80 은 Unsupported 로 멈춘다"
+    (Option.value first ~default:"(멈추지 않음)") "INT 21h AH=80h AL=00h @1000:0102";
+  check "IP 는 INT 21h 에 있다" (Cpu86.dump_ip m.Dos_state.cpu) 0x0102;
+  check_true "다시 돌려도 같은 자리에서 멈춘다" (stop () = first);
+  check_true "프로그램은 끝나지 않았다" (not (Dos_machine.exited m))
+
+(* INT 21h 를 가로채 옛 벡터로 넘기는 프로그램: 멈추는 자리는 옛 벡터가
+   가리키는 ROM 스텁의 INT 다. 다시 돌려도 거기서 멈춘다. *)
+let test_unknown_function_stops_behind_a_hook () =
+  let code =
+    assemble
+      (fun off ->
+         let hook = off and old = off + 5 in
+         mov_ax 0x3521 ^ int_ 0x21 ^ store_bx old ^ "\x8c\x06" ^ w (old + 2)
+         ^ mov_dx hook ^ mov_ax 0x2521 ^ int_ 0x21
+         ^ mov_ah 0x80 ^ int_ 0x21 ^ quit)
+      ((* hook: jmp far [cs:old] *) "\x2e\xff\x2e" ^ w 0 ^ (* old *) "\x00\x00\x00\x00")
+  in
+  (* [assemble] 은 데이터 오프셋을 넘기므로 hook 의 피연산자를 고친다. *)
+  let hook_at = String.length code - 9 in
+  let code =
+    String.sub code 0 (hook_at + 3) ^ w (0x100 + hook_at + 5) ^ String.sub code (hook_at + 5) 4
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m code;
+  let stop () =
+    match Dos_machine.run m ~max_steps:1000 with
+    | () -> None
+    | exception Cpu86.Unsupported msg -> Some msg
+  in
+  let first = stop () in
+  let cpu = m.Dos_state.cpu in
+  let at = (Cpu86.seg cpu 1 * 16) + Cpu86.dump_ip cpu in
+  check_s "훅 뒤의 AH=80 도 멈춘다"
+    (Option.value first ~default:"(멈추지 않음)")
+    (* AL 은 앞의 mov ax,2521h 가 남긴 21h 다. *)
+    (Printf.sprintf "INT 21h AH=80h AL=21h @f000:%04x" (Cpu86.dump_ip cpu));
+  check "ROM 스텁에서 멈춘다" (Cpu86.seg cpu 1) 0xF000;
+  check "그 자리는 INT 명령이다" (Dos_machine.mem_read m at) 0xCD;
+  check_true "다시 돌려도 같은 자리에서 멈춘다" (stop () = first);
+  check_true "프로그램은 끝나지 않았다" (not (Dos_machine.exited m))
+
 let () =
+  test_psp_both_ways ();
+  test_unknown_function_stops ();
+  test_unknown_function_stops_behind_a_hook ();
   test_print_string ();
   test_version ();
   test_get_vector_preserves_ds ();

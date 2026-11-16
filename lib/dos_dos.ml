@@ -692,6 +692,22 @@ let resume_input t request =
 
 (* ---------- INT 21h ---------- *)
 
+(* 이 DOS 에 없는 기능은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로
+   멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
+   (#61). INT 21h 는 어느 길로 들어와도 2 바이트 [CD xx] 를 지나 이리
+   온다(호출자의 INT, 또는 훅이 옛 벡터로 넘긴 ROM 스텁의 INT). IP 를
+   그 INT 로 되돌려, 다시 돌려도 지나가지 않고 같은 자리에서 멈춘다. *)
+let int_instruction_length = 2
+
+let unsupported_function t ah =
+  let cpu = t.cpu in
+  let at = (Cpu86.dump_ip cpu - int_instruction_length) land 0xffff in
+  Cpu86.set_ip cpu at;
+  raise
+    (Cpu86.Unsupported
+       (Printf.sprintf "INT 21h AH=%02Xh AL=%02Xh @%04x:%04x" ah (Cpu86.reg8 cpu 0)
+          (Cpu86.seg cpu 1) at))
+
 let service_immediate t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
@@ -980,10 +996,10 @@ let service_immediate t =
       ok t
     end
     else fail t 6
-  | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg
+  | 0x51 | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg  (* 51h 는 DOS 2 때의 내부 이름 *)
   | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
-  | _ -> ()
+  | _ -> unsupported_function t ah
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
