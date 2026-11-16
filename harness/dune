@@ -1,0 +1,9 @@
+; Drives a game from outside the core: waits for pictures, presses keys.
+; Not part of the core, so not in lib/ and not in the core's digest.
+
+(library
+ (name dosharness)
+ (public_name ocaml-dos.harness)
+ (wrapped false)
+ (modules dos_scenario)
+ (libraries dosmachine))
