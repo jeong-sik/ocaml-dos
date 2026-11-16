@@ -394,8 +394,9 @@ let input_requests t = t.kbd_requests
 (* ---------- 화면 ---------- *)
 
 let frame_dims t = Dos_video.dims t.video
-let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t)
-let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
+let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
+let screen_text_utf8 t =
+  Dos_render.text_utf8 t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
 
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
@@ -406,7 +407,7 @@ let frame_rgb t =
   else
   match Dos_video.kind t.video with
   | Dos_video.Text ->
-    Dos_render.rgb_text t.mem ~cols:(cols t)
+    Dos_render.rgb_text t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
       ~attr:(Dos_video.attr_palette t.video) ~pal
       ~blink:(Dos_video.text_blink t.video)
   | Dos_video.Cga4 ->
