@@ -1,0 +1,3 @@
+(test
+ (name dos_command_tail_test)
+ (libraries dosmachine))
