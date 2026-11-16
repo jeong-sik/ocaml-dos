@@ -236,7 +236,7 @@ let step t =
       | 0x07 -> set_seg t 0 (pop16 t); 8
       (* 286: 실모드 게임이 쓰는 두 바이트 명령은 CPU 판별용 SMSW 뿐이다.
          보호 모드로 가는 나머지(LMSW·LGDT·CLTS …)는 아직 없다. 386 의
-         0x0F 확장은 RFC 0001 3 단계에서 더한다 — 그때까지는 Unsupported 다. *)
+         0x0F 확장은 [Cpu86_exec0f] 가 RFC 0001 3 단계로 하나씩 더한다. *)
       | 0x0f ->
         (match t.model with
          | I80286 ->
@@ -247,7 +247,7 @@ let step t =
              else unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
            end
            else unsupported t ctx (Printf.sprintf "0f %02x" op2)
-         | I80386 -> unsupported t ctx (Printf.sprintf "0f %02x (386)" (fetch8 t))
+         | I80386 -> Cpu86_exec0f.dispatch t ctx
          | I8086 | I80186 -> set_seg t 1 (pop16 t); 8)
       | 0x17 -> set_seg t 2 (pop16 t); 8
       | 0x1f -> set_seg t 3 (pop16 t); 8

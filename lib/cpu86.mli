@@ -49,7 +49,12 @@
     세그먼트 한계는 FFFFh 그대로라, 접근의 끝 바이트가 그 위면 SS 는 INT 12,
     나머지는 INT 13 이다. 설명서가 말하지 않는 규칙이 하나 있다: SIB 에
     인덱스가 없으면 배율이 베이스에 곱해진다. POP r/m 의 [esp+...] 는 pop 한
-    뒤의 ESP 로 센다. 0x0F 확장은 아직 없어 [Unsupported] 다(RFC 0001 3 단계).
+    뒤의 ESP 로 센다.
+
+    0x0F 확장은 RFC 0001 3 단계로 하나씩 더한다. 지금은 16 비트 피연산자의
+    Jcc rel16(IP 는 16 비트에서 감는다), SETcc, MOVZX·MOVSX, FS·GS 의 PUSH·POP
+    이 있다. 이 명령에 붙은 LOCK 은 INT 6 이다. 나머지 0x0F 와 66h 가 붙은
+    0x0F 는 [Unsupported] 다.
     근거는 SingleStepTests/80386 실모드다. *)
 type model = I8086 | I80186 | I80286 | I80386
 

@@ -323,26 +323,35 @@ let lock_regs = function
   | 0xfe | 0xff -> Some lock_regs_inc_dec
   | _ -> None
 
+(* 두 바이트 명령의 머리. *)
+let two_byte_escape = 0x0f
+
 (* 386 은 LOCK 을 받지 않는 명령에 붙은 LOCK 을 INT 6 결함으로 거절한다.
    받는 명령도 고칠 피연산자가 레지스터면(modrm mod=3) INT 6 이다
    (SingleStepTests/80386 00 의 lock add dh,bh 같은 테스트). 0F 는 둘째
-   바이트가 정하는데 386 의 0F 가 아직 없다. 8086·186·286 은 LOCK 을
+   바이트가 정한다. 지금 있는 0F 명령은 LOCK 을 받지 않아 INT 6 이고, 받는
+   BTS·BTR·BTC(0F AB·B3·BB·BA)는 아직 없어 Unsupported 다. 8086·186·286 은 LOCK 을
    버스 신호로만 쓰고 명령은 그대로 돈다. modrm 은 들여다보기만 하고 IP 를
    되돌린다. LOCK 접두가 붙은 명령에서만 부른다. *)
 let check_lock t ctx =
   match t.model with
   | I8086 | I80186 | I80286 -> ()
   | I80386 ->
-    if ctx.opcode = 0x0f then unsupported t ctx "lock 0f (386)";
-    (match lock_regs ctx.opcode with
-     | None -> fault vector_invalid_opcode
-     | Some regs ->
-       let after_opcode = t.ip in
-       let modrm = fetch8 t in
-       t.ip <- after_opcode;
-       let register_operand = modrm lsr 6 = 3 in
-       if register_operand || regs land (1 lsl ((modrm lsr 3) land 7)) = 0 then
-         fault vector_invalid_opcode)
+    if ctx.opcode = two_byte_escape then
+      (match fetch8 t with
+       | (0xab | 0xb3 | 0xbb | 0xba) as op2 ->
+         unsupported t ctx (Printf.sprintf "lock 0f %02x (386)" op2)
+       | _ -> fault vector_invalid_opcode)
+    else
+      match lock_regs ctx.opcode with
+      | None -> fault vector_invalid_opcode
+      | Some regs ->
+        let after_opcode = t.ip in
+        let modrm = fetch8 t in
+        t.ip <- after_opcode;
+        let register_operand = modrm lsr 6 = 3 in
+        if register_operand || regs land (1 lsl ((modrm lsr 3) land 7)) = 0 then
+          fault vector_invalid_opcode
 
 (* SingleStepTests/80386 80386.csv 의 66 열이 1 인 한 바이트 opcode 155 개: 66h 가
    폭을 32 비트로 바꾸는 명령이다. 표 밖의 opcode(바이트 명령, 0Fh 등)는 66h 가
@@ -365,9 +374,11 @@ let operand_sized_opcodes =
     0xd1; 0xd3; 0xe0; 0xe1; 0xe2; 0xe3; 0xe5; 0xe7; 0xe8; 0xe9; 0xea; 0xeb;
     0xed; 0xef; 0xf7; 0xff ]
 
+(* 0Fh 는 두 바이트 명령의 머리라 66h 가 폭을 바꾸는지는 둘째 바이트가 정한다.
+   66h 를 본 표시를 실어 [Cpu86_exec32] 로 보낸다. *)
 let operand_sized =
   let table = Array.make byte_values false in
-  List.iter (fun op -> table.(op) <- true) operand_sized_opcodes;
+  List.iter (fun op -> table.(op) <- true) (two_byte_escape :: operand_sized_opcodes);
   table
 
 (* 접두를 읽어 문맥을 만든다. [addr]·[rep] 은 지금까지 본 접두다 — 같은
