@@ -1405,6 +1405,10 @@ let service_immediate t =
       ok t
     end
     else fail t 6
+  | 0x34 ->
+    (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
+    Cpu86.set_seg cpu 0 sda_seg;
+    Cpu86.set_reg16 cpu 3 sda_in_dos
   | 0x51 | 0x62 ->
     (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
        51h 는 DOS 2 때의 내부 이름 *)
