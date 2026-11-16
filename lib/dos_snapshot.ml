@@ -27,8 +27,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    8: the mouse carries its cursor flag (an int, not a visible bool) and
    the AX=09h graphics and AX=0Ah text cursor shapes.
    9: the mouse ranges are always set (the driver fits them to the virtual
-   screen of the video mode), so each is two words with no flag. *)
-let format_version = 9
+   screen of the video mode), so each is two words with no flag.
+   10: after its motion counters the mouse carries the AX=0Fh mickey
+   ratios, the AX=1Ah speeds, the double-speed threshold and the eighths of
+   a mickey left over from the last move. *)
+let format_version = 10
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -65,6 +68,9 @@ let ems_mapped_handle = C.range 0 Dos_ems.max_handle
 let cursor_flag = C.range min_int 0
 (* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
 let cursor_kind = C.range 0 1
+let mouse_ratio = C.range 1 0xFFFF  (* 0Fh·13h·1Ah 는 0 을 두지 않는다 *)
+let mouse_speed = C.range lowest_speed highest_speed
+let mouse_carry = C.range 0 (pixels_per_ratio - 1)
 let file_pos = C.count
 let vector = C.byte
 
@@ -311,7 +317,8 @@ let write_payload w t =
   put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_cursor_flag;
         mouse_graphics_cursor; mouse_text_cursor;
-        mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
+        mouse_dx; mouse_dy; mouse_motion; mouse_carry_x; mouse_carry_y;
+        mouse_handler_mask; mouse_handler_seg;
         mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
         mouse_range_y } = mouse
   in
@@ -339,6 +346,14 @@ let write_payload w t =
      put "text cursor last line" C.word last_line);
   put "mouse dx" C.any mouse_dx;
   put "mouse dy" C.any mouse_dy;
+  let { mickeys_x; mickeys_y; speed_x; speed_y; double_speed } = mouse_motion in
+  put "mouse mickeys x" mouse_ratio mickeys_x;
+  put "mouse mickeys y" mouse_ratio mickeys_y;
+  put "mouse speed x" mouse_speed speed_x;
+  put "mouse speed y" mouse_speed speed_y;
+  put "mouse double speed" mouse_ratio double_speed;
+  put "mouse carry x" mouse_carry mouse_carry_x;
+  put "mouse carry y" mouse_carry mouse_carry_y;
   put "mouse handler mask" C.word mouse_handler_mask;
   put "mouse handler seg" C.word mouse_handler_seg;
   put "mouse handler off" C.word mouse_handler_off;
@@ -562,6 +577,14 @@ let read_payload r =
        Hardware_text { first_line; last_line });
   m.mouse_dx <- get "mouse dx" C.any;
   m.mouse_dy <- get "mouse dy" C.any;
+  let mickeys_x = get "mouse mickeys x" mouse_ratio in
+  let mickeys_y = get "mouse mickeys y" mouse_ratio in
+  let speed_x = get "mouse speed x" mouse_speed in
+  let speed_y = get "mouse speed y" mouse_speed in
+  let double_speed = get "mouse double speed" mouse_ratio in
+  m.mouse_motion <- { mickeys_x; mickeys_y; speed_x; speed_y; double_speed };
+  m.mouse_carry_x <- get "mouse carry x" mouse_carry;
+  m.mouse_carry_y <- get "mouse carry y" mouse_carry;
   m.mouse_handler_mask <- get "mouse handler mask" C.word;
   m.mouse_handler_seg <- get "mouse handler seg" C.word;
   m.mouse_handler_off <- get "mouse handler off" C.word;

@@ -87,6 +87,42 @@ type text_cursor =
    mouse.cpp defaultTextAndMask 77FFh·defaultTextXorMask 7700h). *)
 let default_text_cursor = Software_text { screen_mask = 0x77FF; cursor_mask = 0x7700 }
 
+(* 움직임 설정 — AX=0Fh 미키/화소 비율, 1Ah 감도, 13h·1Ah 두 배 속도 문턱
+   (RBIL INT 33/000F, 001A, 0013). *)
+type mouse_motion = {
+  mickeys_x : int;  (** 가로 8 화소당 미키 *)
+  mickeys_y : int;  (** 세로 8 화소당 미키 *)
+  speed_x : int;  (** 1Ah 가로 감도, 1..100 *)
+  speed_y : int;
+  double_speed : int;  (** 미키/초 *)
+}
+
+(* 리셋 값. 비율은 RBIL INT 33/000F("default 8", "default 16")와 HelpPC
+   INT 33,0, 문턱 64 는 RBIL INT 33/0013, 감도 50 은 CuteMouse ctmouse.asm
+   기본값(sensval 49, 1Bh 가 1 을 더해 낸다)이다. *)
+let default_motion =
+  { mickeys_x = 8; mickeys_y = 16; speed_x = 50; speed_y = 50; double_speed = 64 }
+
+let lowest_speed = 1
+let highest_speed = 100
+
+(* 0Fh 비율은 8 화소당 미키다 *)
+let pixels_per_ratio = 8
+
+(* 커서가 [pixels] 움직인 만큼의 미키. 드라이버는 미키를 세고 커서를
+   미키 × 8 / 비율만큼 옮긴다(CuteMouse updateposition, DOSBox-X
+   Mouse_CursorMoved). 이 기계는 하네스가 커서 자리를 주니 거꾸로 화소 × 비율
+   / 8 이다. 감도는 미키를 세기 전에 들어가므로 여기에 끼지 않는다. 8 로
+   나눈 나머지(0..7)는 [carry] 로 다음 움직임에 넘겨 느린 움직임이 사라지지
+   않게 한다. *)
+let mickeys_of_pixels ~per_8 ~carry pixels =
+  let v = (pixels * per_8) + carry in
+  let m =
+    if v >= 0 then v / pixels_per_ratio
+    else -(((-v) + pixels_per_ratio - 1) / pixels_per_ratio)
+  in
+  (m, v - (m * pixels_per_ratio))
+
 type mouse = {
   mutable mouse_present : bool;
   mutable mouse_x : int;
@@ -95,8 +131,11 @@ type mouse = {
   mutable mouse_cursor_flag : int;  (** 0 이하. 0 이면 보인다 *)
   mutable mouse_graphics_cursor : graphics_cursor;
   mutable mouse_text_cursor : text_cursor;
-  mutable mouse_dx : int;
+  mutable mouse_dx : int;  (** 미키 *)
   mutable mouse_dy : int;
+  mutable mouse_motion : mouse_motion;
+  mutable mouse_carry_x : int;  (** [mickeys_of_pixels] 의 나머지 *)
+  mutable mouse_carry_y : int;
   mutable mouse_handler_mask : int;
   mutable mouse_handler_seg : int;
   mutable mouse_handler_off : int;

@@ -417,7 +417,8 @@ let () =
   pages.(0) <- page;
   (* The payload ends with the frame mapping (count, then four pairs) and
      the mouse: 105 bytes up to its callback registration (the default
-     cursors take a flag, two kinds and two text masks), then three ints
+     cursors take a flag, two kinds and two text masks; the motion counters
+     are followed by five motion settings and two carries), then three ints
      for each of six button logs, then two ranges of two ints each. Point
      frame page 2 at handle 9, which does not exist, and fix the checksum
      so only the consistency check can refuse. *)
@@ -427,7 +428,10 @@ let () =
   let header_len = magic_len + 8 + 32 + 16 in
   let button_logs = 2 * Dos_state.mouse_button_count in
   let cursors_len = 8 + 8 + 8 + (2 * 8) in
-  let mouse_len = 1 + (3 * 8) + cursors_len + (5 * 8) + (button_logs * 3 * 8) + (2 * 2 * 8) in
+  let motion_len = 7 * 8 in
+  let mouse_len =
+    1 + (3 * 8) + cursors_len + (5 * 8) + motion_len + (button_logs * 3 * 8) + (2 * 2 * 8)
+  in
   let at = String.length saved - mouse_len - (4 * 16) + (2 * 16) in
   let b = Bytes.of_string saved in
   Bytes.set_int64_be b at 9L;
