@@ -1,0 +1,3 @@
+(test
+ (name dos_text_scan_test)
+ (libraries dosmachine))

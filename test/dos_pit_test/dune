@@ -1,0 +1,3 @@
+(test
+ (name dos_pit_test)
+ (libraries dosmachine))
