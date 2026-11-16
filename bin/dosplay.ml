@@ -8,9 +8,9 @@
    프레임을 건너뛸 뿐 게스트 시간은 밀리지 않는다. 호스트가 에뮬레이션
    자체를 못 따라가면 느려질 뿐 빨라지지는 않는다. 바뀐 프레임만 보낸다. *)
 
-(* PIT 입력 클록(Hz). CPU 클록은 그 [Dos_ports.cpu_cycles_per_pit_tick] 배다. *)
-let pit_hz = 1_193_182
-let cpu_hz = pit_hz * Dos_ports.cpu_cycles_per_pit_tick
+(* 이 프로그램은 기본 속도(IBM PC 4.77MHz)로 기계를 만든다
+   ([Dos_machine.create ()]). 사이클을 초로 바꿀 때 그 클록을 쓴다. *)
+let cpu_hz = Dos_ports.speed_hz Dos_ports.pc_speed
 
 let default_fps = 30
 
