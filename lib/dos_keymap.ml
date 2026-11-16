@@ -1,0 +1,128 @@
+(* The BIOS keystroke words, by key. See dos_keymap.mli. *)
+
+type modifier = Shift | Ctrl | Alt
+type edge = Down | Up
+type key = { scan : int; held : modifier option }
+
+let break_bit = 0x80
+
+let make_code = function Shift -> 0x2A | Ctrl -> 0x1D | Alt -> 0x38
+
+(* For each scan code from 00h, the word the BIOS gives for the key alone,
+   with shift, with ctrl and with alt; 0 where there is none. The table is
+   SeaBIOS src/kbd.c scan_to_keycode (commit 28aa46349b97), the IBM AT
+   BIOS layout with the enhanced keyboard's extra words. *)
+let words = [|
+    (0, 0, 0, 0);  (* 00h *)
+    (0x011B, 0x011B, 0x011B, 0x01F0);  (* 01h escape *)
+    (0x0231, 0x0221, 0, 0x7800);  (* 02h 1! *)
+    (0x0332, 0x0340, 0x0300, 0x7900);  (* 03h 2@ *)
+    (0x0433, 0x0423, 0, 0x7A00);  (* 04h 3# *)
+    (0x0534, 0x0524, 0, 0x7B00);  (* 05h 4$ *)
+    (0x0635, 0x0625, 0, 0x7C00);  (* 06h 5% *)
+    (0x0736, 0x075E, 0x071E, 0x7D00);  (* 07h 6^ *)
+    (0x0837, 0x0826, 0, 0x7E00);  (* 08h 7& *)
+    (0x0938, 0x092A, 0, 0x7F00);  (* 09h 8* *)
+    (0x0A39, 0x0A28, 0, 0x8000);  (* 0Ah 9( *)
+    (0x0B30, 0x0B29, 0, 0x8100);  (* 0Bh 0) *)
+    (0x0C2D, 0x0C5F, 0x0C1F, 0x8200);  (* 0Ch -_ *)
+    (0x0D3D, 0x0D2B, 0, 0x8300);  (* 0Dh =+ *)
+    (0x0E08, 0x0E08, 0x0E7F, 0x0EF0);  (* 0Eh backspace *)
+    (0x0F09, 0x0F00, 0x9400, 0xA5F0);  (* 0Fh tab *)
+    (0x1071, 0x1051, 0x1011, 0x1000);  (* 10h Q *)
+    (0x1177, 0x1157, 0x1117, 0x1100);  (* 11h W *)
+    (0x1265, 0x1245, 0x1205, 0x1200);  (* 12h E *)
+    (0x1372, 0x1352, 0x1312, 0x1300);  (* 13h R *)
+    (0x1474, 0x1454, 0x1414, 0x1400);  (* 14h T *)
+    (0x1579, 0x1559, 0x1519, 0x1500);  (* 15h Y *)
+    (0x1675, 0x1655, 0x1615, 0x1600);  (* 16h U *)
+    (0x1769, 0x1749, 0x1709, 0x1700);  (* 17h I *)
+    (0x186F, 0x184F, 0x180F, 0x1800);  (* 18h O *)
+    (0x1970, 0x1950, 0x1910, 0x1900);  (* 19h P *)
+    (0x1A5B, 0x1A7B, 0x1A1B, 0x1AF0);  (* 1Ah [{ *)
+    (0x1B5D, 0x1B7D, 0x1B1D, 0x1BF0);  (* 1Bh ]} *)
+    (0x1C0D, 0x1C0D, 0x1C0A, 0x1CF0);  (* 1Ch Enter *)
+    (0, 0, 0, 0);  (* 1Dh L Ctrl *)
+    (0x1E61, 0x1E41, 0x1E01, 0x1E00);  (* 1Eh A *)
+    (0x1F73, 0x1F53, 0x1F13, 0x1F00);  (* 1Fh S *)
+    (0x2064, 0x2044, 0x2004, 0x2000);  (* 20h D *)
+    (0x2166, 0x2146, 0x2106, 0x2100);  (* 21h F *)
+    (0x2267, 0x2247, 0x2207, 0x2200);  (* 22h G *)
+    (0x2368, 0x2348, 0x2308, 0x2300);  (* 23h H *)
+    (0x246A, 0x244A, 0x240A, 0x2400);  (* 24h J *)
+    (0x256B, 0x254B, 0x250B, 0x2500);  (* 25h K *)
+    (0x266C, 0x264C, 0x260C, 0x2600);  (* 26h L *)
+    (0x273B, 0x273A, 0, 0x27F0);  (* 27h ;: *)
+    (0x2827, 0x2822, 0, 0x28F0);  (* 28h quotedquote *)
+    (0x2960, 0x297E, 0, 0x29F0);  (* 29h `~ *)
+    (0, 0, 0, 0);  (* 2Ah L shift *)
+    (0x2B5C, 0x2B7C, 0x2B1C, 0x2BF0);  (* 2Bh |\ *)
+    (0x2C7A, 0x2C5A, 0x2C1A, 0x2C00);  (* 2Ch Z *)
+    (0x2D78, 0x2D58, 0x2D18, 0x2D00);  (* 2Dh X *)
+    (0x2E63, 0x2E43, 0x2E03, 0x2E00);  (* 2Eh C *)
+    (0x2F76, 0x2F56, 0x2F16, 0x2F00);  (* 2Fh V *)
+    (0x3062, 0x3042, 0x3002, 0x3000);  (* 30h B *)
+    (0x316E, 0x314E, 0x310E, 0x3100);  (* 31h N *)
+    (0x326D, 0x324D, 0x320D, 0x3200);  (* 32h M *)
+    (0x332C, 0x333C, 0, 0x33F0);  (* 33h ,< *)
+    (0x342E, 0x343E, 0, 0x34F0);  (* 34h .> *)
+    (0x352F, 0x353F, 0, 0x35F0);  (* 35h /? *)
+    (0, 0, 0, 0);  (* 36h R Shift *)
+    (0x372A, 0x372A, 0x9600, 0x37F0);  (* 37h * *)
+    (0, 0, 0, 0);  (* 38h L Alt *)
+    (0x3920, 0x3920, 0x3920, 0x3920);  (* 39h space *)
+    (0, 0, 0, 0);  (* 3Ah caps lock *)
+    (0x3B00, 0x5400, 0x5E00, 0x6800);  (* 3Bh F1 *)
+    (0x3C00, 0x5500, 0x5F00, 0x6900);  (* 3Ch F2 *)
+    (0x3D00, 0x5600, 0x6000, 0x6A00);  (* 3Dh F3 *)
+    (0x3E00, 0x5700, 0x6100, 0x6B00);  (* 3Eh F4 *)
+    (0x3F00, 0x5800, 0x6200, 0x6C00);  (* 3Fh F5 *)
+    (0x4000, 0x5900, 0x6300, 0x6D00);  (* 40h F6 *)
+    (0x4100, 0x5A00, 0x6400, 0x6E00);  (* 41h F7 *)
+    (0x4200, 0x5B00, 0x6500, 0x6F00);  (* 42h F8 *)
+    (0x4300, 0x5C00, 0x6600, 0x7000);  (* 43h F9 *)
+    (0x4400, 0x5D00, 0x6700, 0x7100);  (* 44h F10 *)
+    (0, 0, 0, 0);  (* 45h Num Lock *)
+    (0, 0, 0, 0);  (* 46h Scroll Lock *)
+    (0x4700, 0x4737, 0x7700, 0);  (* 47h 7 Home *)
+    (0x4800, 0x4838, 0x8D00, 0);  (* 48h 8 UP *)
+    (0x4900, 0x4939, 0x8400, 0);  (* 49h 9 PgUp *)
+    (0x4A2D, 0x4A2D, 0x8E00, 0x4AF0);  (* 4Ah - *)
+    (0x4B00, 0x4B34, 0x7300, 0);  (* 4Bh 4 Left *)
+    (0x4C00, 0x4C35, 0x8F00, 0);  (* 4Ch 5 *)
+    (0x4D00, 0x4D36, 0x7400, 0);  (* 4Dh 6 Right *)
+    (0x4E2B, 0x4E2B, 0x9000, 0x4EF0);  (* 4Eh + *)
+    (0x4F00, 0x4F31, 0x7500, 0);  (* 4Fh 1 End *)
+    (0x5000, 0x5032, 0x9100, 0);  (* 50h 2 Down *)
+    (0x5100, 0x5133, 0x7600, 0);  (* 51h 3 PgDn *)
+    (0x5200, 0x5230, 0x9200, 0);  (* 52h 0 Ins *)
+    (0x5300, 0x532E, 0x9300, 0);  (* 53h Del *)
+    (0, 0, 0, 0);  (* 54h SysReq *)
+    (0, 0, 0, 0);  (* 55h *)
+    (0x565C, 0x567C, 0, 0);  (* 56h \| *)
+    (0x8500, 0x8700, 0x8900, 0x8B00);  (* 57h F11 *)
+    (0x8600, 0x8800, 0x8A00, 0x8C00)  (* 58h F12 *)
+|]
+
+(* Earlier columns win: a word the key gives alone is that key alone, so
+   space (3920h in all four columns) and Enter (1C0Dh alone and with
+   shift) need no modifier. *)
+let by_word =
+  let tbl = Hashtbl.create 400 in
+  let add word key = if word <> 0 && not (Hashtbl.mem tbl word) then Hashtbl.add tbl word key in
+  Array.iteri
+    (fun scan (alone, shift, ctrl, alt) ->
+      add alone { scan; held = None };
+      add shift { scan; held = Some Shift };
+      add ctrl { scan; held = Some Ctrl };
+      add alt { scan; held = Some Alt })
+    words;
+  tbl
+
+let of_word word = Hashtbl.find_opt by_word word
+
+let modifier_of_code code =
+  let down = code land lnot break_bit and edge = if code land break_bit = 0 then Down else Up in
+  List.find_map
+    (fun m -> if make_code m = down then Some (m, edge) else None)
+    [ Shift; Ctrl; Alt ]
