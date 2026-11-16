@@ -1,0 +1,3 @@
+(test
+ (name dos_cp437_font_test)
+ (libraries dosmachine))
