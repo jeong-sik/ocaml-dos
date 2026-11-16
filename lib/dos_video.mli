@@ -118,6 +118,11 @@ val screen256 : t -> Bytes.t
 (** 256색 모드에서 화면에 보이는 점의 색 번호, 위에서 아래로 한 바이트씩.
     길이는 {!dims} 의 가로 × 세로다. *)
 
+val screen_blanked : t -> bool
+val set_screen_blanked : t -> bool -> unit
+(** 시퀀서 1 번 bit 5(화면 끄기). 포트 3C4h/3C5h 로 써도 같은 비트다. 켜져
+    있으면 그림은 DAC 0 번 색 한 가지다. *)
+
 val cga_color_select : t -> int
 val set_cga_color_select : t -> int -> unit
 (** CGA 4색 모드의 팔레트·바탕색을 고르는 레지스터(포트 0x3D9). *)
