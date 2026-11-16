@@ -4,7 +4,8 @@
    읽고, 레지스터 B 가 이진·12시간 꼴을 고른다. UIP 는 초 경계 244µs
    전부터 1984µs 뒤까지 켜진다. UIP 의 오르내림을 기다리는 루프는 끝나고,
    끝난 뒤 읽은 초는 바뀐 초다. 메모리 크기와 체크섬은 IBM AT 배치를
-   따른다. *)
+   따른다. 레지스터 A 가 고른 주기가 끝나면 레지스터 C 에 PF 가 서고,
+   읽으면 지워진다. *)
 
 let failed = ref 0
 
@@ -146,6 +147,95 @@ let test_uip_edge () =
   check (Printf.sprintf "edge seen right after the update (%d cycles)" cycles)
     (cycles >= pc_hz + after_boundary && cycles < pc_hz + after_boundary + 1000)
 
+(* ---------- 주기 깃발(레지스터 C) ---------- *)
+
+let pf = 0x40
+let irqf = 0x80
+let rtc_hz = 32768
+
+(* 주기가 [ticks] 틱인 탭의 [k] 번째 끝 — 그 사이클부터 PF 가 보인다. *)
+let edge ~ticks k = ((k * ticks * pc_hz) + (rtc_hz - 1)) / rtc_hz
+
+let flags_at m n = Dos_ports.set_now (ports m) n; reg m 0x0C
+
+let test_periodic () =
+  let m = machine ~hour:10 ~minute:0 ~second:0 () in
+  let ticks = 32 in   (* 기본 26h: RS 6, 1024Hz *)
+  check_int "no period has ended at power on" (flags_at m 0) 0;
+  check_int "not before the first end" (flags_at m (edge ~ticks 1 - 1)) 0;
+  check_int "PF at the first end" (flags_at m (edge ~ticks 1)) pf;
+  check_int "reading C clears PF" (flags_at m (edge ~ticks 1)) 0;
+  check_int "PF waits for the next end" (flags_at m (edge ~ticks 2 - 1)) 0;
+  check_int "PF stays until read, over several ends" (flags_at m (edge ~ticks 5)) pf;
+  set m 0x0B 0x42;
+  check_int "PIE adds IRQF" (flags_at m (edge ~ticks 6)) (irqf lor pf);
+  check_int "IRQF goes with PF" (flags_at m (edge ~ticks 6)) 0;
+  set m 0x0B 0x02;
+  (* 1024Hz 의 끝이 지난 뒤 2Hz 로 바꿔도 이미 선 PF 는 남는다. *)
+  Dos_ports.set_now (ports m) (edge ~ticks 7);
+  set m 0x0A 0x2F;
+  check_int "PF of the old rate survives a rate change" (flags_at m (edge ~ticks 7)) pf;
+  check_int "2Hz: nothing within the half second" (flags_at m (pc_hz / 2 - 1)) 0;
+  check_int "2Hz: PF at the half second" (flags_at m (pc_hz / 2)) pf;
+  (* 탭을 바꿔도 사슬의 위상은 그대로다: 512Hz 의 첫 끝은 바꾼 때부터
+     한 주기 뒤가 아니라 사이클 0 에서 센 자리다. *)
+  let m = machine ~hour:10 ~minute:0 ~second:0 () in
+  ignore (flags_at m (edge ~ticks 1 + 1));
+  set m 0x0A 0x27;
+  check_int "512Hz: not before its own end" (flags_at m (edge ~ticks:64 1 - 1)) 0;
+  check_int "512Hz: PF on the chain's end" (flags_at m (edge ~ticks:64 1)) pf;
+  (* RS 1·2 는 짧은 표가 아니라 256·128Hz 다. *)
+  set m 0x0A 0x21;
+  ignore (flags_at m (edge ~ticks:128 3));
+  check_int "RS 1: 256Hz" (flags_at m (edge ~ticks:128 4 - 1)) 0;
+  check_int "RS 1: PF at 1/256 s" (flags_at m (edge ~ticks:128 4)) pf;
+  set m 0x0A 0x22;
+  check_int "RS 2: 128Hz" (flags_at m (edge ~ticks:256 3 - 1)) 0;
+  check_int "RS 2: PF at 1/128 s" (flags_at m (edge ~ticks:256 3)) pf;
+  set m 0x0A 0x23;
+  ignore (flags_at m (edge ~ticks:4 1000));
+  check_int "RS 3: 8192Hz" (flags_at m (edge ~ticks:4 1001)) pf;
+  set m 0x0A 0x20;
+  check_int "RS 0: no tap" (flags_at m (2 * pc_hz)) 0;
+  set m 0x0A 0x66;
+  check_int "divider held in reset: no tap" (flags_at m (3 * pc_hz)) 0;
+  (* 스냅숏은 아직 읽지 않은 PF 와 세기 시작한 때를 지닌다. *)
+  set m 0x0A 0x26;
+  Dos_ports.set_now (ports m) (edge ~ticks 20000);
+  set m 0x0A 0x2F;
+  let round_trip name m k =
+    match Dos_snapshot.save m with
+    | Error e -> check (name ^ " save: " ^ Dos_snapshot.save_error_to_string e) false
+    | Ok bytes -> (
+      match Dos_snapshot.restore bytes with
+      | Error e -> check (name ^ " restore: " ^ Dos_snapshot.error_to_string e) false
+      | Ok r -> k r)
+  in
+  round_trip "unread PF" m (fun r ->
+      check_int "restored PF" (flags_at r (edge ~ticks 20000)) pf);
+  (* 5.25 초에 C 를 읽어 지웠다: 2Hz 의 다음 끝은 5.5 초다. 세기 시작점을
+     잃으면 사이클 0 부터 세어 5.4 초에 PF 가 보인다. *)
+  ignore (flags_at m (pc_hz * 21 / 4));
+  round_trip "count start" m (fun r ->
+      check_int "restored count start" (flags_at r (pc_hz * 27 / 5)) 0;
+      check_int "restored rate" (flags_at r (pc_hz * 11 / 2)) pf)
+
+(* PF 를 기다리는 COM 프로그램: C 를 한 번 읽어 지우고, PF 가 설 때까지
+   C 를 읽는다. 포트 71h 가 늘 0 이면 끝나지 않는다. *)
+let periodic_wait_com =
+  "\xB0\x0C\xE6\x70\xE4\x71"       (* mov al,0Ch; out 70h,al; in al,71h *)
+  ^ "\xE4\x71\xA8\x40\x74\xFA"     (* again: in al,71h; test al,40h; jz again *)
+  ^ "\xCD\x20"
+
+let test_periodic_wait () =
+  let m = machine ~hour:10 ~minute:0 ~second:0 () in
+  Dos_machine.load_com m periodic_wait_com;
+  let report = Dos_machine.run_until m ~max_steps:step_budget ~stop:(fun _ -> false) in
+  check "PF wait ends" (report.Dos_machine.stop_reason = Dos_machine.Program_exited);
+  let cycles = Cpu86.cycles m.Dos_state.cpu in
+  check (Printf.sprintf "PF seen at the first 1024Hz end (%d cycles)" cycles)
+    (cycles >= edge ~ticks:32 1 && cycles < edge ~ticks:32 1 + 100)
+
 (* ---------- 자정 넘김과 스냅숏 ---------- *)
 
 let busy_com = "\xEB\xFE"
@@ -181,6 +271,8 @@ let () =
   test_status ();
   test_uip ();
   test_uip_edge ();
+  test_periodic ();
+  test_periodic_wait ();
   test_midnight_and_snapshot ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;

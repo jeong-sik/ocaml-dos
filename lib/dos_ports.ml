@@ -571,7 +571,7 @@ let port_out t p v =
     if was <> now_high then Dos_pit.gate_edge t.pit2 ~tick:(pit_tick t) ~high:now_high
   | 0x64 -> Dos_kbc.write_command t.kbc ~hz:(cpu_hz t) v
   | 0x70 -> Dos_cmos.select t.cmos v
-  | 0x71 -> Dos_cmos.write t.cmos v
+  | 0x71 -> Dos_cmos.write t.cmos v ~now:t.now ~cpu_hz:(cpu_hz t)
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
   | 0x3C8 -> t.dac_write_index <- v; t.dac_phase <- 0

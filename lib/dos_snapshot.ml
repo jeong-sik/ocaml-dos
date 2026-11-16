@@ -75,8 +75,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    (8-bit PCM or one of three ADPCM sizes), and the DSP carries whether it
    is in MIDI UART mode.
    28: the CMOS carries register A's rate bits and register B after its
-   index (Dos_cmos). *)
-let format_version = 28
+   index (Dos_cmos).
+   29: the CMOS carries the periodic flag raised before its last register A
+   write and the cycle its count starts from, after register B. *)
+let format_version = 29
 
 let digest_hex_len = 32
 let checksum_len = 16
