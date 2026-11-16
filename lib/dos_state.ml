@@ -6,7 +6,6 @@
    같은 키를 같은 순서로 넣으면 같은 화면이 나온다. *)
 
 let vram_base = 0xB8000
-let rows = 25
 
 (* DOS 핸들 표(JFT). 실기 DOS 는 PSP 마다 20칸짜리 표(PSP:18h, 크기는
    PSP:32h)를 두고, 0-4 는 stdin/stdout/stderr/stdaux/stdprn 이 이미
@@ -203,7 +202,7 @@ type input_continuation = {
 (* 이 기계가 받지 못한 INT 호출의 갈래. 기계 동작은 바꾸지 않고 관찰자에게만
    알린다 — 게임을 돌려 무엇이 빠졌는지 찾는 진단용이다. *)
 type unserved =
-  | No_function  (** 호스트 서비스(21h·10h·16h·1Ah·33h)에 이 기능 갈래가 없다 *)
+  | No_function  (** 호스트 서비스(21h·10h·15h·16h·1Ah·33h)에 이 기능 갈래가 없다 *)
   | Iret_stub    (** 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔다 *)
 
 type t = {
@@ -265,6 +264,7 @@ let report_unserved t kind ~vector = t.on_unserved kind ~vector ~ax:(Cpu86.reg16
 (* 화면의 열 수는 모드가 정한다 — 40 열 화면을 80 으로 계산하면 커서와
    스크롤이 한 줄씩 어긋난다. *)
 let cols t = max 1 (Dos_video.text_cols t.video)
+let rows t = Dos_video.text_rows t.video
 
 let rd8 t a = Char.code (Bytes.get t.mem (a land 0xfffff))
 let wr8 t a v = Bytes.set t.mem (a land 0xfffff) (Char.chr (v land 0xff))
@@ -278,6 +278,30 @@ let wr16 t a v = wr8 t a v; wr8 t (a + 1) (v lsr 8)
    is therefore a 20-bit physical address. *)
 let phys_mask = 0xfffff
 let physical seg off = ((seg lsl 4) + off) land phys_mask
+
+(* ---------- DOS 데이터 영역 ----------
+
+   MS-DOS 4.0 CONST2.ASM SWAP_START 의 앞 두 바이트: ErrorMode(INT 24h
+   처리 중), INDOS(DOS 안에 있는 깊이). PRINT 같은 TSR 은 ErrorMode 가
+   INDOS 바로 앞이라고 믿는다. INT 21h AH=34h 가 INDOS 주소를 준다.
+   게스트 메모리에 두어 스냅숏이 메모리째 싣는다. 자리는 IVT·BDA 와 첫
+   PSP(1000h) 사이의 빈 곳이다.
+
+   INDOS 는 [input_continuations] 에서 나온다. DISP.ASM 은 01h..0Ch 를
+   포함한 거의 모든 기능에서 INDOS 를 올리고, 끝나면 내린다. 이 기계의
+   서비스는 차단 읽기 말고는 게스트 코드를 끼우지 않고 끝나니, 게스트가
+   볼 수 있는 값은 기다리는 DOS 읽기의 수다. INT 24h 를 모델링하지 않아
+   ErrorMode 는 늘 0 이다. *)
+let sda_seg = 0x0070
+let sda_error_mode = 0
+let sda_in_dos = 1
+let byte_max = 0xFF
+
+let set_input_continuations t waits =
+  t.input_continuations <- waits;
+  let in_dos = List.length (List.filter (fun w ->
+      match w.request with Dos_input _ -> true | Bios_key -> false) waits) in
+  wr8 t (physical sda_seg sda_in_dos) (min in_dos byte_max)
 
 let finish_service_return t = function
   | Direct_return -> ()
@@ -384,7 +408,7 @@ let get_cursor t = (rd8 t 0x450, rd8 t 0x451)   (* (열, 행) *)
 
 let set_cursor t col row =
   let w = cols t in
-  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows - 1) row) in
+  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows t - 1) row) in
   wr8 t 0x450 col;
   wr8 t 0x451 row;
   let linear = (row * w) + col in
@@ -398,9 +422,56 @@ let cell_addr t r c = vram_base + (((r * cols t) + c) * 2)
 let read_cell t r c = rd16 t (cell_addr t r c)
 let write_cell t r c v = wr16 t (cell_addr t r c) v
 
+(* ---------- 그래픽 모드의 글자 ----------
+
+   그래픽 모드에서 BIOS 와 DOS 의 글자 출력은 글꼴 표의 점을 화면에
+   찍는다. 글꼴 표는 게스트 메모리에 있고 벡터로 찾는다. VGA BIOS 는
+   모드를 세울 때 INT 43h 를 그 모드의 글자 높이 표로 돌려 둔다. CGA
+   모드(4~6)는 128 이상 글자를 INT 1Fh 의 8x8 표에서 찾는다. 프로그램이
+   벡터를 자기 표로 바꾸면 그 글꼴로 그린다(DOSBox int10_char.cpp
+   WriteChar 와 같다). *)
+
+let font_vector = 0x43
+let cga_high_font_vector = 0x1F
+let cga_high_first = 0x80
+
+let graphics t =
+  match Dos_video.kind t.video with
+  | Dos_video.Text -> false
+  | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar | Dos_video.Linear256 -> true
+
+let vector_address t v = (rd16 t ((v * 4) + 2) lsl 4) + rd16 t (v * 4)
+
+let glyph t ch =
+  let height = Dos_video.char_height t.video in
+  let base =
+    match Dos_video.kind t.video with
+    | (Dos_video.Cga4 | Dos_video.Cga2) when ch >= cga_high_first ->
+      vector_address t cga_high_font_vector + ((ch - cga_high_first) * height)
+    | Dos_video.Text | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar
+    | Dos_video.Linear256 ->
+      vector_address t font_vector + (ch * height)
+  in
+  fun line -> rd8 t (base + line)
+
+(* 글자의 바탕: 256색 모드는 주어진 색(AH=09h 의 BH)이다. 그 밖의 모드는
+   0 이고, XOR 쓰기면 XOR 0 이라 바탕이 그대로 남는다. *)
+let glyph_background t ~fg ~back256 =
+  match Dos_video.kind t.video with
+  | Dos_video.Linear256 -> back256
+  | Dos_video.Text | Dos_video.Cga4 | Dos_video.Cga2 | Dos_video.Planar ->
+    fg land Dos_video.xor_pixel
+
+let write_glyph t ~col ~row ch ~fg ~bg =
+  Dos_gtext.draw t.video ~glyph:(glyph t (ch land 0xff)) ~col ~row ~fg ~bg
+
 (* 창 스크롤 — INT 10h AH=06/07 과 teletype 의 줄 넘침이 함께 쓴다.
-   [lines]=0 은 창 전체를 지운다. *)
+   [lines]=0 은 창 전체를 지운다. 그래픽 모드에서 [attr] 는 빈 행을 채울
+   색이다. *)
 let scroll_window t ~up ~lines ~top ~left ~bottom ~right ~attr =
+  if graphics t then
+    Dos_gtext.scroll t.video ~up ~lines ~top ~left ~bottom ~right ~fill:attr
+  else
   let blank = (attr lsl 8) lor 0x20 in
   let lines = if lines = 0 then bottom - top + 1 else lines in
   if up then
@@ -418,12 +489,28 @@ let scroll_window t ~up ~lines ~top ~left ~bottom ~right ~attr =
       done
     done
 
-(* 글자 하나 찍기 — INT 10h teletype 과 INT 21h 출력이 공유한다.
-   마지막 줄을 넘으면 화면을 한 줄 올린다. 넘침을 클램프로 막으면
-   글자가 마지막 칸에 계속 덮어써져 출력이 통째로 사라진다. *)
-let put_char t ch attr =
-  let col, row = get_cursor t in
-  let col = ref col and row = ref row in
+(* 글자를 찍는 두 길. AH=13h 는 텍스트 모드에서도 속성을 쓴다
+   ([Attribute]). teletype(AH=0Eh)과 DOS 출력은 텍스트 모드에서 글자만
+   바꾸고 칸의 속성을 그대로 둔다([Teletype]). 그래픽 모드에서는 둘 다
+   값을 색으로 쓴다(DOSBox int10_char.cpp: INT10_TeletypeOutput 은
+   텍스트 모드에서 속성을 쓰지 않고, INT10_WriteString 은 쓴다). *)
+type ink = Attribute of int | Teletype of int
+
+(* 텍스트 모드에서 칸의 속성을 두고 글자만 바꾼다. 그래픽 모드는 [color]
+   로 그린다. *)
+let write_char_only t ~col ~row ch ~color =
+  if graphics t then
+    write_glyph t ~col ~row ch ~fg:color ~bg:(glyph_background t ~fg:color ~back256:0)
+  else write_cell t row col ((read_cell t row col land 0xFF00) lor (ch land 0xff))
+
+(* 글자 하나 찍기. 마지막 줄을 넘으면 화면을 한 줄 올린다. 넘침을
+   클램프로 막으면 글자가 마지막 칸에 계속 덮어써져 출력이 통째로
+   사라진다. 새 줄은 그래픽 모드면 검정, 텍스트 모드면 이 글자를 찍기 전
+   커서 칸의 속성으로 채운다(DOSBox teletype_output_attr 이 AH=08h 로
+   읽어 쓰는 값). *)
+let output_char t ch ink =
+  let col0, row0 = get_cursor t in
+  let col = ref col0 and row = ref row0 in
   (match ch with
    | 0x0D -> col := 0
    | 0x0A -> incr row
@@ -431,15 +518,25 @@ let put_char t ch attr =
    | 0x09 -> col := min (cols t - 1) ((!col + 8) / 8 * 8)
    | 0x07 -> ()                       (* 벨 — 소리는 내지 않는다 *)
    | _ ->
-     write_cell t !row !col ((attr lsl 8) lor (ch land 0xff));
+     (match ink with
+      | Teletype color -> write_char_only t ~col:!col ~row:!row ch ~color
+      | Attribute attr ->
+        if graphics t then
+          write_glyph t ~col:!col ~row:!row ch ~fg:attr
+            ~bg:(glyph_background t ~fg:attr ~back256:0)
+        else write_cell t !row !col ((attr lsl 8) lor (ch land 0xff)));
      incr col;
      if !col >= cols t then begin col := 0; incr row end);
-  if !row >= rows then begin
-    scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows - 1)
-      ~right:(cols t - 1) ~attr;
-    row := rows - 1
+  if !row >= rows t then begin
+    let fill = if graphics t then 0 else read_cell t row0 col0 lsr 8 in
+    scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows t - 1)
+      ~right:(cols t - 1) ~attr:fill;
+    row := rows t - 1
   end;
   set_cursor t !col !row
+
+let put_char t ch attr = output_char t ch (Attribute attr)
+let teletype t ch color = output_char t ch (Teletype color)
 
 let put_string t s attr = String.iter (fun c -> put_char t (Char.code c) attr) s
 

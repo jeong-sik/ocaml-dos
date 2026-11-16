@@ -44,28 +44,6 @@ let ends_name c = char_type c land f_chk = 0
 let is_delimiter c = char_type c land f_delim = 0
 let is_space c = char_type c land f_sp_chk = 0
 
-(* ---------- 대문자 ----------
-
-   80h..A7h 는 COUNTRY.SYS 미국 437 표(src/DEV/COUNTRY/MKCNTRY.ASM
-   us_ucase — SETUCASE 와 SETUCASEFILE 이 같은 표)이고, A8h 부터는 그대로다.
-   표의 순서는 80h 부터다. *)
-let us437_upcase_80_a7 =
-  [| 128; 154; 069; 065; 142; 065; 143; 128;
-     069; 069; 069; 073; 073; 073; 142; 143;
-     144; 146; 146; 079; 153; 079; 085; 085;
-     089; 153; 154; 155; 156; 157; 158; 159;
-     065; 073; 079; 085; 165; 165; 166; 167 |]
-let high_half = 0x80
-let lower_a = Char.code 'a'
-let lower_z = Char.code 'z'
-let case_bit = 0x20
-
-let upcase c =
-  if c >= lower_a && c <= lower_z then c - case_bit
-  else if c >= high_half && c - high_half < Array.length us437_upcase_80_a7 then
-    us437_upcase_80_a7.(c - high_half)
-  else c
-
 (* ---------- MakeFcb ---------- *)
 
 let blank = Char.code ' '
@@ -90,8 +68,8 @@ let parse opts ~drive_exists ~read ~write si0 =
   let si = ref si0 and di = ref drive_field in
   let dl_bad = ref false and dl_wild = ref false in
   let advance n = si := (!si + n) land offset_mask in
-  (* GETLET: LODSB 뒤 대문자 *)
-  let get_letter () = let c = upcase (read !si) in advance 1; c in
+  (* GETLET: LODSB 뒤 대문자(Dos_country) *)
+  let get_letter () = let c = Dos_country.upcase (read !si) in advance 1; c in
   (* SCANB: 공백·탭을 건너뛴다(대문자 전 글자로 본다) *)
   let rec skip_blanks () = if is_space (read !si) then begin advance 1; skip_blanks () end in
   let store c = write !di c; incr di in

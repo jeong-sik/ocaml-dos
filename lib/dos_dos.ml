@@ -742,27 +742,151 @@ let parse_fcb_service t =
   Cpu86.set_reg8 cpu 0 al;
   Cpu86.set_reg16 cpu 6 next
 
+(* INT 21h AH=38h — MS-DOS 4.0 GETSET.ASM $INTERNATIONAL. 나라는 미국
+   하나다. 다른 나라는 NLSFUNC 가 있어야 하는데, 없으면 1(잘못된 기능)
+   이다(RBIL 은 2 로 적지만 소스를 따른다). DX=FFFFh 면 「나라 바꾸기」로,
+   지금 나라와 같을 때만 된다 — AL=0 도 거절이다. 성공하면 AX=나라
+   번호다. 얻기는 BX 도 나라 번호로 바꾸고(international_ok3), DS:DX 에
+   24 바이트를 쓴다(DI 는 16 비트에서 돈다). 바꾸기는 BX 를 그대로 둔다
+   (international_set 은 international_ok 로 바로 간다). *)
+let error_invalid_function = 1
+let set_country_marker = 0xFFFF
+
+let international_service t =
+  let cpu = t.cpu in
+  let al = Cpu86.reg8 cpu 0 in
+  let requested = if al = 0xFF then Cpu86.reg16 cpu 3 else al in
+  let current = Dos_country.country_code in
+  let dx = Cpu86.reg16 cpu 2 in
+  let succeed () = Cpu86.set_reg16 cpu 0 current; ok t in
+  if dx = set_country_marker then
+    (if requested = current then succeed () else fail t error_invalid_function)
+  else if requested = 0 || requested = current then begin
+    let ds = Cpu86.seg cpu 3 in
+    String.iteri
+      (fun i c -> wr8 t (physical ds ((dx + i) land 0xffff)) (Char.code c))
+      (Dos_country.info ~case_map:Dos_bios.case_map_entry);
+    Cpu86.set_reg16 cpu 3 current;
+    succeed ()
+  end
+  else fail t error_invalid_function
+
 (* FCB 결과 바이트 — MS_CODE.ASM FCB_Ret_OK·FCB_Ret_Err *)
 let fcb_ok = 0
 let fcb_error = 0xFF
 
-(* FCBIO 의 읽기 결과 — FEOF 1, FTRIM 2. 레코드 일부만 읽으면 둘 다다. *)
-type fcb_read = Read_full | Read_eof | Read_partial
+(* FCBIO 의 결과 — FEOF 1, FTRIM 2. 레코드 일부만 읽으면 둘 다다. *)
+type fcb_result = Done | End_of_file | Partial_record
 
-let fcb_read_code = function Read_full -> 0 | Read_eof -> 1 | Read_partial -> 3
+let fcb_result_code = function Done -> 0 | End_of_file -> 1 | Partial_record -> 3
 
-(* 한 레코드를 DTA 로 옮긴다. 레코드 일부만 남았으면 나머지 칸을 0 으로
-   채운다 (FCBIO 의 Blank). *)
-let read_record t data ~off ~record_size =
-  let take = max 0 (min record_size (Bytes.length data - off)) in
-  if take = 0 then Read_eof
-  else begin
-    blit_to_mem t data off t.dta take;
-    for i = take to record_size - 1 do wr8 t (t.dta + i) 0 done;
-    if take < record_size then Read_partial else Read_full
-  end
+(* FCBIO2.ASM 의 FCBOp 비트를 나눈 것 *)
+type fcb_where =
+  | Sequential      (* 14h·15h: 블록과 다음 레코드에서, 나아간다 *)
+  | Random_record   (* 21h·22h: 랜덤 레코드에서, 나아가지 않는다 *)
+  | Random_block    (* 27h·28h: 랜덤 레코드에서 CX 개, 랜덤 레코드도 나아간다 *)
+
+type fcb_dir = Fcb_read | Fcb_write
 
 let fcb_at t = Dos_fcb.locate t (seg_off t 3 2)
+
+(* DOS 날짜·시각 워드 (Date16): 연도-1980 7비트·월 4·일 5, 시 5·분 6·초/2 5 *)
+let dos_date_epoch = 1980
+let date16 t =
+  let y, m, d, h, mi, s = now_fields t in
+  (((y - dos_date_epoch) lsl 9) lor (m lsl 5) lor d, (h lsl 11) lor (mi lsl 5) lor (s / 2))
+
+let set_fcb_size t fcb n =
+  wr16 t (fcb + Dos_fcb.file_size) (n land 0xffff);
+  wr16 t (fcb + Dos_fcb.file_size + 2) ((n lsr 16) land 0xffff)
+
+let fcb_size t fcb =
+  rd16 t (fcb + Dos_fcb.file_size) lor (rd16 t (fcb + Dos_fcb.file_size + 2) lsl 16)
+
+let stamp_fcb t fcb =
+  let date, time = date16 t in
+  wr16 t (fcb + Dos_fcb.date) date;
+  wr16 t (fcb + Dos_fcb.time) time
+
+(* [off] 부터 [count] 레코드를 DTA 로. 마지막 레코드가 덜 찼으면 나머지를
+   0 으로 채우고 한 레코드로 센다 (FCBIO 의 TryBlank). *)
+let fcb_read_records t data ~off ~record_size ~count =
+  let take = max 0 (min (count * record_size) (Bytes.length data - off)) in
+  if take > 0 then blit_to_mem t data off t.dta take;
+  let whole = take / record_size in
+  if take mod record_size <> 0 then begin
+    for i = take to ((whole + 1) * record_size) - 1 do wr8 t (t.dta + i) 0 done;
+    (whole + 1, Partial_record)
+  end
+  else (whole, if whole < count then End_of_file else Done)
+
+(* DTA 의 [count] 레코드를 [off] 에 쓴 새 버퍼. 0 레코드면 파일 길이를
+   [off] 로 맞춘다 (DOS_Write 의 0 바이트 쓰기). 열 때 받은 버퍼는 마운트
+   표의 것과 같으므로 고치지 않고 새로 만든다. *)
+let fcb_write_records t data ~off ~record_size ~count =
+  let n = count * record_size in
+  let len = if n = 0 then off else max (Bytes.length data) (off + n) in
+  let out = Bytes.make len '\000' in
+  Bytes.blit data 0 out 0 (min len (Bytes.length data));
+  for i = 0 to n - 1 do Bytes.set out (off + i) (Char.chr (rd8 t (t.dta + i))) done;
+  out
+
+(* FCBIO2.ASM FCBIO. 순차 위치는 [fcbs] 의 바이트 위치에서 읽고, 블록과
+   다음 레코드는 그와 맞춰 쓴다. *)
+let fcb_io t ~dir ~where =
+  let fcb = fcb_at t in
+  let record_size = Dos_fcb.record_size_of t fcb in
+  let count =
+    match where with
+    | Random_block -> Cpu86.reg16 t.cpu 1
+    | Sequential | Random_record -> 1
+  in
+  let start =
+    match where with
+    | Sequential -> Dos_fcb.current t fcb
+    | Random_record | Random_block -> Dos_fcb.random t fcb ~record_size
+  in
+  Dos_fcb.set_current t fcb start;
+  let report_count n =
+    match where with
+    | Random_block -> Cpu86.set_reg16 t.cpu 1 n
+    | Sequential | Random_record -> ()
+  in
+  match Hashtbl.find_opt t.fcbs fcb with
+  | None ->
+    report_count 0;
+    Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some (data, pos) ->
+    let off =
+      match where with
+      | Sequential -> pos
+      | Random_record | Random_block -> start * record_size
+    in
+    let moved, result, data =
+      match dir with
+      | Fcb_read ->
+        let moved, result = fcb_read_records t data ~off ~record_size ~count in
+        (moved, result, data)
+      | Fcb_write ->
+        let out = fcb_write_records t data ~off ~record_size ~count in
+        set_fcb_size t fcb (Bytes.length out);
+        stamp_fcb t fcb;
+        (count, Done, out)
+    in
+    let next = start + moved in
+    (match where with
+     | Sequential ->
+       Hashtbl.replace t.fcbs fcb (data, off + (moved * record_size));
+       Dos_fcb.set_current t fcb next
+     | Random_record -> Hashtbl.replace t.fcbs fcb (data, off)
+     | Random_block ->
+       Hashtbl.replace t.fcbs fcb (data, next * record_size);
+       Dos_fcb.set_current t fcb next;
+       Dos_fcb.store_random t fcb next
+         ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit));
+    report_count moved;
+    Cpu86.set_reg8 t.cpu 0 (fcb_result_code result)
+
 
 (* 0Fh. DOS 는 블록만 0 으로 지우고 다음 레코드는 건드리지 않는다. 이
    기계는 순차 위치를 [fcbs] 에 따로 두므로, 둘이 어긋나지 않게 다음
@@ -774,47 +898,32 @@ let fcb_open t =
     Hashtbl.replace t.fcbs fcb (data, 0);
     wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
     wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
-    wr16 t (fcb + Dos_fcb.file_size) (Bytes.length data land 0xffff);
-    wr16 t (fcb + Dos_fcb.file_size + 2) ((Bytes.length data lsr 16) land 0xffff);
+    set_fcb_size t fcb (Bytes.length data);
     Dos_fcb.set_current t fcb 0;
     Cpu86.set_reg8 t.cpu 0 fcb_ok
   | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
 
+(* 10h. 쓴 FCB 면 바이트를 FCB 의 파일 크기까지 마운트 표에 되돌린다.
+   열 때 받은 버퍼 그대로면(쓰지 않았으면) 표를 건드리지 않는다 — DOS 도
+   쓰지 않은 파일의 디렉터리 항목은 고치지 않는다. 그사이 파일이
+   지워졌으면 AL=FF 다 ($FCB_Close: 파일을 찾지 못함). *)
 let fcb_close t =
-  Hashtbl.remove t.fcbs (fcb_at t);
-  Cpu86.set_reg8 t.cpu 0 fcb_ok
-
-(* 14h. 끝에 닿으면 위치를 옮기지 않는다. 일부만 읽어도 한 레코드 나아간다. *)
-let fcb_seq_read t =
   let fcb = fcb_at t in
-  let record_size = Dos_fcb.record_size_of t fcb in
-  let record = Dos_fcb.current t fcb in
-  match Hashtbl.find_opt t.fcbs fcb with
-  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
-  | Some (data, pos) ->
-    let result = read_record t data ~off:pos ~record_size in
-    let moved =
-      match result with
-      | Read_eof -> 0
-      | Read_full | Read_partial -> 1
-    in
-    Hashtbl.replace t.fcbs fcb (data, pos + (moved * record_size));
-    Dos_fcb.set_current t fcb (record + moved);
-    Cpu86.set_reg8 t.cpu 0 (fcb_read_code result)
-
-(* 21h. 블록과 다음 레코드를 랜덤 레코드로 맞추고 나아가지 않는다 — 다음
-   14h 는 같은 레코드를 읽는다. *)
-let fcb_random_read t =
-  let fcb = fcb_at t in
-  let record_size = Dos_fcb.record_size_of t fcb in
-  let record = Dos_fcb.random t fcb ~record_size in
-  Dos_fcb.set_current t fcb record;
-  match Hashtbl.find_opt t.fcbs fcb with
-  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
-  | Some (data, _) ->
-    let off = record * record_size in
-    Hashtbl.replace t.fcbs fcb (data, off);
-    Cpu86.set_reg8 t.cpu 0 (fcb_read_code (read_record t data ~off ~record_size))
+  let code =
+    match Hashtbl.find_opt t.fcbs fcb with
+    | None -> fcb_ok
+    | Some (data, _) ->
+      Hashtbl.remove t.fcbs fcb;
+      let name = String.uppercase_ascii (fcb_name t fcb) in
+      (match Hashtbl.find_opt t.host_files name with
+       | None -> fcb_error
+       | Some current when current == data -> fcb_ok
+       | Some _ ->
+         Hashtbl.replace t.host_files name
+           (Bytes.sub data 0 (min (Bytes.length data) (fcb_size t fcb)));
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
 
 (* 23h. 레코드 크기 0 은 128 로 셈하되 고쳐 쓰지 않는다. *)
 let fcb_file_size t =
@@ -837,6 +946,132 @@ let fcb_set_random t =
   Dos_fcb.store_random t fcb (Dos_fcb.current t fcb)
     ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit);
   Cpu86.set_reg8 t.cpu 0 fcb_ok
+
+(* ---------- FCB 지우기·이름 바꾸기 ---------- *)
+
+(* TransFCB 가 거절하는 글자 — FCB.ASM CharType 에서 fFCB 가 꺼진 것.
+   20h 아래 제어 문자도 거절한다. *)
+let fcb_bad_chars = "\"/\\[]:<|>+=;,"
+let fcb_first_name_char = 0x20
+let fcb_name_len = 8
+let fcb_fields_len = 11
+
+(* 이름 8 칸 + 확장자 3 칸을 대문자로 읽는다. 쓸 수 없는 글자가 있거나
+   이름 칸이 비었으면 None 이다 (TransFCB → BadPack). '*' 는 그 칸의 남은
+   자리를 '?' 로 채운다 (NameTrans). *)
+let fcb_pattern_at t field =
+  let raw =
+    String.init fcb_fields_len (fun i -> Char.uppercase_ascii (Char.chr (rd8 t (field + i))))
+  in
+  let bad c = Char.code c < fcb_first_name_char || String.contains fcb_bad_chars c in
+  let name = String.sub raw 0 fcb_name_len
+  and ext = String.sub raw fcb_name_len (fcb_fields_len - fcb_name_len) in
+  if String.exists bad raw || String.trim name = "" then None
+  else Some (expand_stars name ^ expand_stars ext)
+
+let fcb_fields name = let base, ext = to_8_3 name in base ^ ext
+
+let fcb_matches pattern name =
+  let n = fcb_fields name in
+  let rec go i = i = fcb_fields_len || ((pattern.[i] = '?' || pattern.[i] = n.[i]) && go (i + 1)) in
+  go 0
+
+let name_of_fcb_fields f =
+  let trim_right s =
+    let n = ref (String.length s) in
+    while !n > 0 && s.[!n - 1] = ' ' do decr n done;
+    String.sub s 0 !n
+  in
+  let base = trim_right (String.sub f 0 fcb_name_len)
+  and ext = trim_right (String.sub f fcb_name_len (fcb_fields_len - fcb_name_len)) in
+  if ext = "" then base else base ^ "." ^ ext
+
+(* DIR.ASM: 무시하는 비트(읽기 전용·보관·장치)를 뺀 검색 속성이 볼륨 비트
+   하나뿐이면 볼륨 레이블만 찾는다. 이 기계에는 볼륨 레이블이 없다. *)
+let attr_ignore = 0x61
+let attr_volume_id = 0x08
+
+(* 패턴에 맞는 파일을 디렉터리 순서(이름순 — 4Eh 와 같다)로 *)
+let fcb_sources t addr pattern =
+  if Dos_fcb.search_attribute t addr land lnot attr_ignore = attr_volume_id then []
+  else
+    List.sort compare
+      (Hashtbl.fold
+         (fun k data acc -> if fcb_matches pattern k then (k, data) :: acc else acc)
+         t.host_files [])
+
+(* 13h. 하나라도 지우면 성공이다 (DELETE.ASM). *)
+let fcb_delete t =
+  let addr = seg_off t 3 2 in
+  let code =
+    match fcb_pattern_at t (Dos_fcb.locate t addr + Dos_fcb.name) with
+    | None -> fcb_error
+    | Some pattern ->
+      (match fcb_sources t addr pattern with
+       | [] -> fcb_error
+       | found ->
+         List.iter (fun (k, _) -> Hashtbl.remove t.host_files k) found;
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 17h. 새 이름의 '?' 자리에는 원래 이름의 글자가 들어간다 (NEW_RENAME).
+   새 이름이 이미 있으면 거기서 멈추고, 앞에서 바꾼 것은 그대로 둔다
+   (RENAME.ASM BAD_ACC). *)
+let fcb_rename t =
+  let addr = seg_off t 3 2 in
+  let fcb = Dos_fcb.locate t addr in
+  let code =
+    match
+      ( fcb_pattern_at t (fcb + Dos_fcb.name),
+        fcb_pattern_at t (fcb + Dos_fcb.rename_target) )
+    with
+    | None, _ | _, None -> fcb_error
+    | Some pattern, Some target ->
+      let rec go = function
+        | [] -> fcb_ok
+        | (old, data) :: rest ->
+          let source = fcb_fields old in
+          let fresh =
+            name_of_fcb_fields
+              (String.mapi (fun i c -> if c = '?' then source.[i] else c) target)
+          in
+          if Hashtbl.mem t.host_files fresh then fcb_error
+          else begin
+            Hashtbl.remove t.host_files old;
+            Hashtbl.replace t.host_files fresh data;
+            go rest
+          end
+      in
+      (match fcb_sources t addr pattern with
+       | [] -> fcb_error
+       | found -> go found)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 16h. 있으면 비우고 없으면 만든다. '?' 가 든 이름은 만들 수 없다
+   (MKNODE: 이름이 없고 메타 문자가 있으면 경로 에러). 볼륨 레이블을 만드는
+   확장 FCB 는 이 기계에 레이블이 없어 거절한다. *)
+let fcb_create t =
+  let addr = seg_off t 3 2 in
+  let fcb = Dos_fcb.locate t addr in
+  let code =
+    match fcb_pattern_at t (fcb + Dos_fcb.name) with
+    | Some fields
+      when (not (String.contains fields '?'))
+           && Dos_fcb.search_attribute t addr land attr_volume_id = 0 ->
+      let empty = Bytes.empty in
+      Hashtbl.replace t.host_files (name_of_fcb_fields fields) empty;
+      Hashtbl.replace t.fcbs fcb (empty, 0);
+      wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
+      wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
+      set_fcb_size t fcb 0;
+      stamp_fcb t fcb;
+      Dos_fcb.set_current t fcb 0;
+      fcb_ok
+    | Some _ | None -> fcb_error
+  in
+  Cpu86.set_reg8 t.cpu 0 code
 
 (* ---------- 콘솔 입력 ---------- *)
 
@@ -879,26 +1114,30 @@ let ext_read t =
 
 type line_result = Line_complete of string | Line_waiting of line_input
 
+(* DOS 의 콘솔 출력은 BIOS teletype 으로 간다. 텍스트 모드에서는 칸의
+   속성을 그대로 두고, 그래픽 모드에서는 이 색(밝은 회색)으로 그린다. *)
+let dos_output_color = 0x07
+
 let echo_line_character t c =
   if c = 0x09 then begin
     let col, _ = get_cursor t in
     let width = 8 - (col mod 8) in
-    for _ = 1 to width do put_char t 0x20 0x07 done;
+    for _ = 1 to width do teletype t 0x20 dos_output_color done;
     width
   end
   else if c < 0x20 then begin
-    put_char t 0x5e 0x07;
-    put_char t (c + 0x40) 0x07;
+    teletype t 0x5e dos_output_color;
+    teletype t (c + 0x40) dos_output_color;
     2
   end
-  else begin put_char t c 0x07; 1 end
+  else begin teletype t c dos_output_color; 1 end
 
 let erase_line_character t width =
   for _ = 1 to width do
     let col, row = get_cursor t in
     let col, row = if col > 0 then col - 1, row
       else if row > 0 then cols t - 1, row - 1 else 0, 0 in
-    write_cell t row col 0x0720;
+    write_char_only t ~col ~row 0x20 ~color:dos_output_color;
     set_cursor t col row
   done
 
@@ -908,17 +1147,20 @@ let rec read_line t ~capacity line =
   | Some w ->
     let c = ascii_of_key w in
     match c, line.echo_widths with
-    | 0x0d, _ -> put_char t 0x0d 0x07; Line_complete line.text
+    | 0x0d, _ -> teletype t 0x0d dos_output_color; Line_complete line.text
     | (0x08 | 0x7f), width :: widths ->
       erase_line_character t width;
       read_line t ~capacity
         { text = String.sub line.text 0 (String.length line.text - 1); echo_widths = widths }
     | (0x00 | 0x08 | 0x7f), _ -> read_line t ~capacity line
     | 0x0a, _ ->
-      if line.text <> "" then begin put_char t 0x0d 0x07; put_char t 0x0a 0x07 end;
+      if line.text <> "" then begin
+        teletype t 0x0d dos_output_color;
+        teletype t 0x0a dos_output_color
+      end;
       read_line t ~capacity line
     | _, _ when String.length line.text >= capacity - 1 ->
-      put_char t 0x07 0x07; (* Full buffers still wait for CR or an editing key. *)
+      teletype t 0x07 dos_output_color; (* Full buffers still wait for CR or an editing key. *)
       read_line t ~capacity line
     | _, _ ->
       let width = echo_line_character t c in
@@ -941,7 +1183,7 @@ let resume_input t request =
      | None -> Awaiting_input (Dos_input request)
      | Some c ->
        Cpu86.set_reg8 t.cpu 0 c;
-       if echo && c <> 0 then put_char t c 0x07;
+       if echo && c <> 0 then teletype t c dos_output_color;
        Completed)
   | Read_buffered_line ({ base; capacity; line } as input) ->
     (match read_line t ~capacity line with
@@ -954,7 +1196,7 @@ let resume_input t request =
     (match read_line t ~capacity:console_line_capacity line with
      | Line_waiting line -> Awaiting_input (Dos_input (Read_console_line { input with line }))
      | Line_complete text ->
-       put_char t 0x0a 0x07;
+       teletype t 0x0a dos_output_color;
        t.console_pending <-
          if String.length text > 0 && text.[0] = '\026' then "" else text ^ "\r\n";
        return_console_bytes t ~destination ~length)
@@ -993,7 +1235,7 @@ let service_immediate t =
     Cpu86.set_reg8 cpu 0 t.last_child_code;
     Cpu86.set_reg8 cpu 4 0;
     ok t
-  | 0x02 -> put_char t (Cpu86.reg8 cpu 2) 0x07
+  | 0x02 -> teletype t (Cpu86.reg8 cpu 2) dos_output_color
   | 0x06 ->
     (* 직접 콘솔 입출력. DL=FF 면 읽기(ZF 로 있고없음), 아니면 쓰기.
        Turbo Pascal 런타임의 에러 메시지가 이 길로 나온다 — 없으면
@@ -1008,7 +1250,7 @@ let service_immediate t =
         Cpu86.set_reg8 cpu 0 0;
         Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero)
       )
-    else put_char t dl 0x07
+    else teletype t dl dos_output_color
   | 0x09 ->
     (* '$' 로 끝나는 문자열. 길이를 안 주는 대신 끝 표시를 찾는다. *)
     let base = seg_off t 3 2 in
@@ -1016,7 +1258,7 @@ let service_immediate t =
     while (not !stop) && !i < 65536 do
       let c = rd8 t (base + !i) in
       if c = Char.code '$' then stop := true
-      else begin put_char t c 0x07; incr i end
+      else begin teletype t c dos_output_color; incr i end
     done
   | 0x0B ->
     let available = t.ext_scan_pending <> 0 || key_pending t in
@@ -1073,6 +1315,7 @@ let service_immediate t =
     Cpu86.set_reg16 cpu 3 0x1000;
     Cpu86.set_reg16 cpu 1 512;
     Cpu86.set_reg16 cpu 2 0x2000
+  | 0x38 -> international_service t
   | 0x39 | 0x3A | 0x3B ->
     (* 디렉터리가 없는 모델이다. 조용한 성공 대신 '경로 없음' 으로
        답한다 — 성공으로 속이면 게스트가 그 뒤를 헛돈다. *)
@@ -1142,7 +1385,7 @@ let service_immediate t =
     if is_console h then begin
       (* 실기 DOS 는 부팅 때 stdin/stdout/stderr 를 열어 준다 — 없으면
          런타임이 잘못된 핸들(6)로 즉사한다(실측). *)
-      for i = 0 to n - 1 do put_char t (rd8 t (src + i)) 0x07 done;
+      for i = 0 to n - 1 do teletype t (rd8 t (src + i)) dos_output_color done;
       Cpu86.set_reg16 cpu 0 n;
       ok t
     end
@@ -1273,6 +1516,10 @@ let service_immediate t =
       ok t
     end
     else fail t 6
+  | 0x34 ->
+    (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
+    Cpu86.set_seg cpu 0 sda_seg;
+    Cpu86.set_reg16 cpu 3 sda_in_dos
   | 0x51 | 0x62 ->
     (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
        51h 는 DOS 2 때의 내부 이름 *)
@@ -1280,10 +1527,17 @@ let service_immediate t =
   | 0x68 | 0x6A -> ok t                     (* 파일 반영($Commit) — 메모리라 즉시 *)
   | 0x0F -> fcb_open t
   | 0x10 -> fcb_close t
-  | 0x14 -> fcb_seq_read t
-  | 0x21 -> fcb_random_read t
+  | 0x14 -> fcb_io t ~dir:Fcb_read ~where:Sequential
+  | 0x15 -> fcb_io t ~dir:Fcb_write ~where:Sequential
+  | 0x16 -> fcb_create t
+  | 0x21 -> fcb_io t ~dir:Fcb_read ~where:Random_record
+  | 0x22 -> fcb_io t ~dir:Fcb_write ~where:Random_record
+  | 0x27 -> fcb_io t ~dir:Fcb_read ~where:Random_block
+  | 0x28 -> fcb_io t ~dir:Fcb_write ~where:Random_block
   | 0x23 -> fcb_file_size t
   | 0x24 -> fcb_set_random t
+  | 0x13 -> fcb_delete t
+  | 0x17 -> fcb_rename t
   | 0x18 | 0x1D | 0x1E | 0x20 | 0x61 ->
     (* MS_TABLE.ASM 의 빈 칸 CPMFunc: XOR AL,AL 뒤 LEAVEDOS *)
     Cpu86.set_reg8 cpu 0 0

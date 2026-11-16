@@ -1,0 +1,3 @@
+(test
+ (name dos_planar_scan_test)
+ (libraries dosmachine))

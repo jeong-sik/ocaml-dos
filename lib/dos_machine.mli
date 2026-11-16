@@ -227,7 +227,7 @@ val mem_write : t -> int -> int -> unit
 
 val on_unserved : t -> (Dos_state.unserved -> vector:int -> ax:int -> unit) -> unit
 (** 이 기계가 받지 못한 INT 호출을 알려 줄 관찰자를 건다. 기계 동작은 그대로다.
-    [No_function] 은 호스트 서비스(21h·10h·16h·1Ah·33h)에 그 기능 갈래가 없을
+    [No_function] 은 호스트 서비스(21h·10h·15h·16h·1Ah·33h)에 그 기능 갈래가 없을
     때, [Iret_stub] 은 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔을 때다.
     [ax] 는 호출 순간의 AX 다. *)
 
