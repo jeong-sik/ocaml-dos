@@ -50,13 +50,13 @@ let service_status_mask t v =
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
-  | Some (Bios (Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
+  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
   | None -> 0
 
-let create () =
+let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~mem ~video in
+  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
@@ -80,10 +80,10 @@ let create () =
     else Bytes.set mem a (Char.chr (v land 0xff))
   in
   let cpu =
-    (* 1990년대 DOS 게임은 286 이상에서 돌았고 Borland 컴파일러가 186
-       명령을 낸다. 실칩 8086 검증은 Cpu86 쪽 스위트가 I8086 으로 따로
-       돈다. *)
-    Cpu86.create ~model:Cpu86.I80286 ~read ~write
+    (* 기본은 286 이다. 1990년대 DOS 게임은 286 이상에서 돌았고 Borland
+       컴파일러가 186 명령을 낸다. 기본을 바꾸면 게임의 CPU 판별 결과가 모두
+       바뀌므로, 386 은 부르는 쪽이 고른다(RFC 0001 4 단계). *)
+    Cpu86.create ~model ~read ~write
       ~port_in:(fun p -> Dos_ports.port_in ports p)
       ~port_out:(fun p v -> Dos_ports.port_out ports p v)
       ()
@@ -98,14 +98,15 @@ let create () =
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; kbd_requests = 0; last_tick = 0; pending_irq0 = false;
+      kbd_wait = false; kbd_requests = 0; last_tick = 0;
       ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
-      ems_pages = Hashtbl.create 2;
-      ems_mapped = Array.make 4 (0, 0);
+      ems_pages = Dos_ems.boot_handles ();
+      ems_mapped = Array.make Dos_ems.frame_pages None;
+      ems_saved = Hashtbl.create 1;
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
@@ -188,20 +189,26 @@ let step_result t =
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
     let interval = Dos_ports.cycles_per_tick t.ports in
     let cyc = Cpu86.cycles t.cpu in
+    let pic = Dos_ports.pic t.ports in
     if cyc - t.last_tick >= interval then begin
       t.last_tick <- cyc;
-      t.pending_irq0 <- true
+      Dos_pic.raise_irq pic Dos_pic.Timer
     end;
-    (* IRQ0 은 IF 가 켜져 있고 PIC 마스크가 풀렸을 때만 들어간다. 못
-       넣은 틱은 버리지 않고 들고 있다가 다음 기회에 넣는다 — 버리면
-       임계구역이 긴 프로그램에서 시계가 느려진다. HLT 는 그 인터럽트로
-       깨어난다. *)
-    if t.pending_irq0 && interrupts_enabled t
-       && not (Dos_ports.irq0_masked t.ports) then begin
-      t.pending_irq0 <- false;
-      Cpu86.wake t.cpu;
-      ignore (deliver_ivt t 8)
-    end;
+    let kbc = Dos_ports.kbc t.ports in
+    if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
+      Dos_pic.raise_irq pic Dos_pic.Keyboard;
+    (* 요청은 IF 가 켜지고, 마스크가 풀리고, 같거나 높은 줄이 EOI 를 받을
+       때까지 IRR 에 남는다 — 버리면 임계구역이 긴 프로그램에서 시계가
+       느려지고 키가 사라진다. 벡터가 0:0 이면 아무것도 넣지 않고, 그 줄은
+       핸들러가 생길 때까지 계속 묻는다. HLT 는 그 인터럽트로 깨어난다. *)
+    (if Dos_pic.pending pic && interrupts_enabled t then
+       match Dos_pic.next pic with
+       | None -> ()
+       | Some line ->
+         if deliver_ivt t (Dos_pic.vector line) then begin
+           Dos_pic.acknowledge pic line;
+           Cpu86.wake t.cpu
+         end);
     match t.input_continuations with
     | wait :: rest
       when Cpu86.seg t.cpu 1 = wait.return_cs && Cpu86.dump_ip t.cpu = wait.return_ip
@@ -277,7 +284,10 @@ let run_until t ~max_steps ~stop =
 
 (* ---------- 키 ---------- *)
 
-let push_key t word = push_key t word
+let push_key t word =
+  Dos_kbc.press (Dos_ports.kbc t.ports) ~hz:(Dos_ports.cpu_hz t.ports) ~now:(Cpu86.cycles t.cpu) word
+
+let key_unread t = key_pending t || Dos_kbc.holds_key (Dos_ports.kbc t.ports)
 
 (* 굶주림을 보고 하나씩 넣는다. 키를 미리 다 밀어 넣으면 앞선 메뉴의
    "아무 키나" 루프가 전부 먹어 치운다 — 게임이 어떤 상태일 때 넣을지는
@@ -402,7 +412,7 @@ let frame_rgb t =
     let w, h = Dos_video.dims t.video in
     Dos_render.rgb_planar (Dos_video.planes t.video) ~w ~h
       ~attr:(Dos_video.attr_palette t.video) ~pal
-  | Dos_video.Linear256 -> Dos_render.rgb_vga13 t.mem pal
+  | Dos_video.Linear256 -> Dos_render.rgb_indexed (Dos_video.screen256 t.video) pal
 
 let frame_ppm t =
   let w, h = frame_dims t in
@@ -427,7 +437,7 @@ let frame_digest t =
   let h = mix h (Dos_video.cga_color_select t.video) in
   let h = Array.fold_left mix h (Dos_video.attr_palette t.video) in
   Array.fold_left (fun h (r, g, b) -> mix (mix (mix h r) g) b) h (Dos_ports.palette t.ports)
-let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
+let pixel t ~x ~y = Dos_video.screen_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_year <- year;
@@ -435,7 +445,8 @@ let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_day <- day;
   t.epoch_hour <- hour;
   t.epoch_min <- minute;
-  t.epoch_sec <- second
+  t.epoch_sec <- second;
+  Dos_bios.set_ticks_from_clock t
 
 let attach_mouse t = t.mouse.mouse_present <- true
 

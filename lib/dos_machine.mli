@@ -15,7 +15,15 @@
 
 type t = Dos_state.t
 
-val create : unit -> t
+val create : ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> unit -> t
+(** [model] 은 기본이 [I80286] 이다. [I80386] 이면 게스트가 32 비트 레지스터,
+    FS·GS, 0Fh 명령을 쓰고, CPU 판별이 386 을 본다. [speed] 를 주지 않으면
+    IBM PC 의 4.77MHz 다.
+
+    640KB 기계. [mpu401] 이면(기본 아님) 330h 에 UART 전용 MPU-401 을
+    꽂는다([Dos_mpu401]). MIDI 바이트는 버린다 — 소리 장치가 없다. 기본으로
+    꺼 둔다. 카드를 찾은 게임이 intelligent 모드 명령을 쓰면, 이 카드는
+    답하지 않으므로 그 게임은 답을 기다린다. *)
 
 (** {1 적재} *)
 
@@ -103,7 +111,19 @@ val halted : t -> bool
 (** {1 입력} *)
 
 val push_key : t -> int -> unit
-(** BIOS 키 링에 워드 하나. INT 16h 와 INT 21h 입력이 같은 링을 본다. *)
+(** 키 하나를 눌렀다 뗀다. 워드는 BIOS 가 INT 16h 로 돌려줄 (스캔 lsl 8)
+    lor ASCII 다. 키보드 컨트롤러({!Dos_kbc})가 make·break 바이트를 포트
+    0x60 에 차례로 올리고 바이트마다 IRQ1 을 낸다. BIOS INT 9 가 make
+    바이트의 워드를 링에 넣고, INT 16h 와 INT 21h 입력이 그 링을 본다.
+    INT 9 를 가로챈 게임은 포트 0x60 에서 스캔 코드를 직접 읽는다.
+
+    IRQ1 은 IF 가 켜지고 IMR bit1 이 풀려 있어야 들어간다. 그 전까지 키는
+    컨트롤러에 남아 있고 링에는 없다. *)
+
+val key_unread : t -> bool
+(** 넣은 키 가운데 프로그램이 아직 안 가져간 것이 있다 — 링에 있거나,
+    컨트롤러가 make 바이트를 아직 내주지 않았다. break 바이트만 남은 것은
+    키가 아니다. *)
 
 val named_keys : (string * int) list
 (** 이름으로 부를 수 있는 키와 그 BIOS 워드. *)
@@ -188,8 +208,9 @@ val frame_digest : t -> int
     않으니, 화면을 다시 그릴지 정할 때는 이것을 쓴다. *)
 
 val pixel : t -> x:int -> y:int -> int
-(** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는
-    0-255. 텍스트 모드에서는 늘 0 이다. *)
+(** 화면에 보이는 그래픽 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15,
+    256색은 0-255. 256색은 CRTC 시작 주소를 따른다. 텍스트 모드에서는 늘
+    0 이다. *)
 
 (** {1 관측} *)
 
@@ -197,15 +218,18 @@ val cpu_of : t -> Cpu86.t
 val psp_seg_of : t -> int
 
 val mem_read : t -> int -> int
-(** 물리 주소 한 바이트. *)
+(** 물리 주소 한 바이트, RAM 에서. 16색·256색 모드의 0xA0000 창은 비디오
+    어댑터의 평면이라 여기 없다 — 화면은 {!pixel} 로 읽는다. *)
 
 val mem_write : t -> int -> int -> unit
 (** 물리 주소 한 바이트 쓰기({!mem_read} 의 짝). 하네스가 게스트 RAM 에
     상태를 주입하는 용도. 값은 하위 8비트로 잘린다. *)
 
 val tick_count : t -> int
-(** BIOS 타이머 틱(0x40:0x6C). 18.2Hz 가 기본이고 게스트가 PIT 분주비를
-    바꾸면 그만큼 빨라진다. *)
+(** BIOS 타이머 틱(0x40:0x6C). 자정부터 센 수라 처음 값은 기준시각의
+    틱이다(08:00:00 이면 524348). 18.2Hz 가 기본이고 게스트가 PIT
+    분주비를 바꾸면 그만큼 빨라진다. 하루치(0x1800B0)에 닿으면 0 으로
+    돌아간다. *)
 
 val speaker_on : t -> bool
 (** 스피커의 게이트와 데이터가 둘 다 열렸다. 소리는 내지 않는다. *)
@@ -216,4 +240,6 @@ val free_paras : t -> int
 val set_clock :
   t -> year:int -> month:int -> day:int -> hour:int -> minute:int ->
   second:int -> unit
-(** 게스트가 보는 기준시각. 기본은 1990-01-01 08:00:00. *)
+(** 게스트가 보는 기준시각. 기본은 1990-01-01 08:00:00. BIOS 틱
+    (0x40:0x6C)도 이 시각으로 다시 채운다 — 실기 BIOS 가 부팅 때 RTC 를
+    읽어 틱을 채우는 것과 같다. *)

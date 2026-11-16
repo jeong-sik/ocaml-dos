@@ -55,10 +55,12 @@ let () =
 (* ---------- 기다리는 동안 IRQ0 가 본 INDOS ----------
 
    처리기: push ds; push ax; mov ax,0070h; mov ds,ax; mov al,[0001];
-   cs: mov [0300],al; pop ax; pop ds; iret *)
+   cs: mov [0300],al; mov al,20h; out 20h,al; pop ax; pop ds; iret.
+   IRQ0 처리기는 실기처럼 8259 에 EOI 를 보낸다. 안 보내면 IRQ0 이 처리
+   중인 채로 남아 우선순위가 낮은 IRQ1(키보드)이 들어오지 않는다. *)
 let handler =
   "\x1e\x50" ^ "\xb8" ^ w sda ^ "\x8e\xd8" ^ "\xa0" ^ w 1 ^ "\x2e\xa2" ^ w seen
-  ^ "\x58\x1f\xcf"
+  ^ "\xb0\x20\xe6\x20" ^ "\x58\x1f\xcf"
 
 let irq_during_wait read =
   let m = machine (read ^ "\xa3" ^ w 0x200 ^ quit) in
@@ -67,7 +69,7 @@ let irq_during_wait read =
   Dos_state.wr8 m (psp + seen) unseen;
   Dos_state.wr16 m 0x20 handler_at;
   Dos_state.wr16 m 0x22 (psp / 16);
-  m.Dos_state.pending_irq0 <- true;
+  Dos_pic.raise_irq (Dos_ports.pic m.Dos_state.ports) Dos_pic.Timer;
   run m 30;
   m
 

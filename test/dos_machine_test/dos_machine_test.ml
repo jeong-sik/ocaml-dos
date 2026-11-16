@@ -68,7 +68,9 @@ let () =
     ("\xb4\x00\xcd\x16\xb4\x0e\xcd\x10\xb8\x00\x4c\xcd\x21" ^ "Q");
   (* push_key 계약: (스캔<<8)|ASCII 워드 — Q 스캔코드 0x10 *)
   Dos_machine.push_key m ((0x10 lsl 8) lor Char.code 'Q');
-  Dos_machine.run m ~max_steps:200;
+  (* 'Q' 는 shift 다음에 온다 — 키보드가 바이트 하나를 보내는 1ms 가
+     기다리는 스텝으로 2천 남짓이다. *)
+  Dos_machine.run m ~max_steps:20_000;
   checkb "int16 key read" (contains_sub (Dos_machine.screen_text m) "Q") true;
   checkb "int16 program exited" (Dos_machine.exited m) true;
   (* ROM 8x8 글꼴: IBM BIOS 표준 자리 F000:FA6E. 그래픽 모드에서 글자를

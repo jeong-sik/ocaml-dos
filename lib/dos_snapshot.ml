@@ -30,8 +30,27 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    screen of the video mode), so each is two words with no flag.
    10: after its motion counters the mouse carries the AX=0Fh mickey
    ratios, the AX=1Ah speeds, the double-speed threshold and the eighths of
-   a mickey left over from the last move. *)
-let format_version = 10
+   a mickey left over from the last move.
+   11: the ports carry PIT channel 2 (mode, access, latch, count register
+   and the counting segment) right after the cycle counter.
+   12: the payload opens with the CPU model, and an 80386 carries the upper
+   halves of its eight registers and FS, GS after the cycle count.
+   13: whether an MPU-401 is in the machine, and its mode and waiting
+   answers, after the OPL2 timers.
+   14: each OPL2 timer carries its next overflow (or stopped) and a flag
+   that is clear, raised or masked, in place of a one-shot expiry stamp.
+   15: the ports carry the CPU speed (cycles per PIT tick) first, so a
+   restored machine keeps the clock it was saved with.
+   16: EMS carries the OS handle 0 among its handles, a frame page is shown
+   or empty instead of handle 0 standing for empty, and each handle's page
+   map saved by INT 67h AH=47h.
+   17: the interrupt controller (mask, requests, in service, OCW3 read
+   choice) and the keyboard controller (queued bytes, port 0x60, its full
+   flag, the last read) replace the PIC mask, the last scan code and the
+   machine's pending-tick flag.
+   18: the CRTC registers move from the ports to the video adapter, and
+   mode 13h's screen lives in the four planes instead of RAM at 0xA0000. *)
+let format_version = 18
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -62,9 +81,7 @@ let save_error_to_string (Unsaveable message) = "machine cannot be saved: " ^ me
 
 let reg = C.word
 let handle_number = C.range 0 (max_handles - 1)
-let ems_handle_key = C.range Dos_ems.first_handle Dos_ems.max_handle
-(* [ems_mapped] uses handle 0 for "nothing mapped". *)
-let ems_mapped_handle = C.range 0 Dos_ems.max_handle
+let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
 let cursor_flag = C.range min_int 0
 (* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
 let cursor_kind = C.range 0 1
@@ -89,11 +106,17 @@ let check_consistency t =
         if acc = None && not (Array.for_all page_ok pages) then Some h else acc)
       t.ems_pages None
   in
-  let mapped_ok (h, p) =
-    (h = 0 && p = 0)
-    || (match Hashtbl.find_opt t.ems_pages h with
-        | Some pages -> p < Array.length pages
-        | None -> false)
+  let shown_ok = function
+    | None -> true
+    | Some (h, p) ->
+      (match Hashtbl.find_opt t.ems_pages h with
+       | Some pages -> p < Array.length pages
+       | None -> false)
+  in
+  let saved_ok h m =
+    Hashtbl.mem t.ems_pages h
+    && Array.length m = Dos_ems.frame_pages
+    && Array.for_all shown_ok m
   in
   let return_ok = function
     | Direct_return -> true
@@ -119,9 +142,12 @@ let check_consistency t =
   | Some h -> Error (Printf.sprintf "EMS handle %d has a page that is not 0 or %d bytes" h
                        Dos_ems.page_bytes)
   | None ->
-    if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
-    else if not (Array.for_all mapped_ok t.ems_mapped) then
+    if not (Hashtbl.mem t.ems_pages Dos_ems.os_handle) then Error "the EMS OS handle is missing"
+    else if Array.length t.ems_mapped <> Dos_ems.frame_pages then Error "EMS frame size differs"
+    else if not (Array.for_all shown_ok t.ems_mapped) then
       Error "an EMS frame page maps a page that does not exist"
+    else if not (Hashtbl.fold (fun h m acc -> acc && saved_ok h m) t.ems_saved true) then
+      Error "an EMS saved page map names a handle or page that does not exist"
     else if not (List.for_all input_ok t.input_continuations) then
       Error "an input continuation has inconsistent state"
     else if not (List.for_all (fun frame -> return_ok frame.parent_service_return) t.exec_frames) then
@@ -142,6 +168,14 @@ let put_list w ~what put l =
 
 let put_pairs w ~what ~a ~b l =
   put_list w ~what (fun (x, y) -> C.put w ~what a x; C.put w ~what b y) l
+
+(* An EMS frame page: shown (handle, logical page) or empty. *)
+let put_shown w = function
+  | None -> C.put_bool w false
+  | Some (h, p) ->
+    C.put_bool w true;
+    C.put w ~what:"EMS mapping" ems_handle_key h;
+    C.put w ~what:"EMS mapping" C.word p
 
 let put_service_return w = function
   | Direct_return -> C.put_bool w false
@@ -249,24 +283,40 @@ let put_frame w f handles =
   put_pairs w ~what:"parent block" ~a:C.word ~b:C.word parent_blocks;
   put_pairs w ~what:"parent handle" ~a:handle_number ~b:C.count handles
 
+(* The CPU model as one byte, the first of the payload: [read_payload] builds
+   the machine from it before reading anything else. *)
+let model_code = function
+  | Cpu86.I8086 -> 0
+  | Cpu86.I80186 -> 1
+  | Cpu86.I80286 -> 2
+  | Cpu86.I80386 -> 3
+
+let model_of_code = function
+  | 0 -> Some Cpu86.I8086
+  | 1 -> Some Cpu86.I80186
+  | 2 -> Some Cpu86.I80286
+  | 3 -> Some Cpu86.I80386
+  | _ -> None
+
 (* Every [Dos_state.t] field is named: a field added to the machine fails the
    build here until the snapshot carries it or says why not. [read_payload]
    reads in exactly this order with the same ranges. *)
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; pending_irq0; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped;
+        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved;
         mouse } = t
   in
   let put what r v = C.put w ~what r v in
+  put "cpu model" C.byte (model_code (Cpu86.model cpu));
   let { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted;
-        saved_cycles } = Cpu86.save_state cpu
+        saved_cycles; saved_386 } = Cpu86.save_state cpu
   in
   C.put_int_array w ~what:"registers" reg saved_regs;
   C.put_int_array w ~what:"segments" reg saved_segs;
@@ -274,6 +324,12 @@ let write_payload w t =
   put "flags" reg saved_flags;
   C.put_bool w saved_halted;
   put "cycles" C.count saved_cycles;
+  (match saved_386 with
+   | Some { Cpu86.saved_regs_hi; saved_fs; saved_gs } ->
+     C.put_int_array w ~what:"upper halves" reg saved_regs_hi;
+     put "fs" reg saved_fs;
+     put "gs" reg saved_gs
+   | None -> ());
   C.put_bytes w mem;
   Dos_video.write_state w video;
   Dos_ports.write_state w ports;
@@ -297,7 +353,6 @@ let write_payload w t =
   C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
   put "last tick" C.count last_tick;
-  C.put_bool w pending_irq0;
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
@@ -314,7 +369,12 @@ let write_payload w t =
       put "EMS handle" ems_handle_key k;
       put_list w ~what:"EMS page" (C.put_bytes w) (Array.to_list pages))
     (sorted_bindings ems_pages);
-  put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
+  put_list w ~what:"EMS saved map"
+    (fun (k, m) ->
+      put "EMS saved map" ems_handle_key k;
+      put_list w ~what:"EMS saved mapping" (put_shown w) (Array.to_list m))
+    (sorted_bindings ems_saved);
+  put_list w ~what:"EMS mapping" (put_shown w) (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_cursor_flag;
         mouse_graphics_cursor; mouse_text_cursor;
         mouse_dx; mouse_dy; mouse_motion; mouse_carry_x; mouse_carry_y;
@@ -395,6 +455,19 @@ let get_list r ~what get =
 let get_pairs r ~what ~a ~b =
   get_list r ~what (fun () -> let x = C.get r ~what a in let y = C.get r ~what b in (x, y))
 
+let get_shown r =
+  if C.get_bool r then begin
+    let h = C.get r ~what:"EMS mapping" ems_handle_key in
+    let p = C.get r ~what:"EMS mapping" C.word in
+    Some (h, p)
+  end
+  else None
+
+let get_frame r ~what =
+  let m = Array.of_list (get_list r ~what (fun () -> get_shown r)) in
+  if Array.length m <> Dos_ems.frame_pages then C.fail "EMS frame size differs";
+  m
+
 let fill_table tbl bindings =
   Hashtbl.reset tbl;
   List.iter
@@ -442,7 +515,12 @@ let get_input_request r =
 let read_payload r =
   (* A fresh machine brings the closures (memory, ports, the interrupt hook)
      and the containers; everything else is overwritten from the bytes. *)
-  let t = Dos_machine.create () in
+  let model =
+    match model_of_code (C.get r ~what:"cpu model" C.byte) with
+    | Some model -> model
+    | None -> C.fail "invalid cpu model"
+  in
+  let t = Dos_machine.create ~model () in
   let get what rng = C.get r ~what rng in
   let saved_regs = get_int_array r ~what:"registers" ~len:8 reg in
   let saved_segs = get_int_array r ~what:"segments" ~len:4 reg in
@@ -450,8 +528,18 @@ let read_payload r =
   let saved_flags = get "flags" reg in
   let saved_halted = C.get_bool r in
   let saved_cycles = get "cycles" C.count in
+  let saved_386 =
+    match model with
+    | Cpu86.I80386 ->
+      let saved_regs_hi = get_int_array r ~what:"upper halves" ~len:8 reg in
+      let saved_fs = get "fs" reg in
+      let saved_gs = get "gs" reg in
+      Some { Cpu86.saved_regs_hi; saved_fs; saved_gs }
+    | Cpu86.I8086 | Cpu86.I80186 | Cpu86.I80286 -> None
+  in
   Cpu86.load_state t.cpu
-    { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles };
+    { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles;
+      saved_386 };
   C.fill_bytes r t.mem;
   Dos_video.read_state r t.video;
   Dos_ports.read_state r t.ports;
@@ -508,7 +596,6 @@ let read_payload r =
   t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
   t.last_tick <- get "last tick" C.count;
-  t.pending_irq0 <- C.get_bool r;
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
@@ -545,9 +632,12 @@ let read_payload r =
     (get_list r ~what:"EMS handle" (fun () ->
          let k = get "EMS handle" ems_handle_key in
          (k, Array.of_list (get_list r ~what:"EMS page" (fun () -> C.get_bytes r)))));
-  let mapped = get_pairs r ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word in
-  if List.length mapped <> Array.length t.ems_mapped then C.fail "EMS frame size differs";
-  List.iteri (fun i p -> t.ems_mapped.(i) <- p) mapped;
+  fill_table t.ems_saved
+    (get_list r ~what:"EMS saved map" (fun () ->
+         let k = get "EMS saved map" ems_handle_key in
+         (k, get_frame r ~what:"EMS saved mapping")));
+  let mapped = get_frame r ~what:"EMS mapping" in
+  Array.blit mapped 0 t.ems_mapped 0 (Array.length mapped);
   let m = t.mouse in
   m.mouse_present <- C.get_bool r;
   m.mouse_x <- get "mouse x" C.any;
