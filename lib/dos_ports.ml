@@ -478,8 +478,10 @@ let port_in t p =
   | Some v -> v
   | None ->
   match fm_alias t (p land 0xffff) with
-  | 0x20 -> Dos_pic.read_command t.pic
-  | 0x21 -> Dos_pic.read_mask t.pic
+  | 0x20 -> Dos_pic.read_command t.pic Dos_pic.Master
+  | 0x21 -> Dos_pic.read_mask t.pic Dos_pic.Master
+  | 0xA0 -> Dos_pic.read_command t.pic Dos_pic.Slave
+  | 0xA1 -> Dos_pic.read_mask t.pic Dos_pic.Slave
   | 0x40 -> Dos_pit.read t.pit0 ~tick:(pit_tick t)
   | 0x42 -> Dos_pit.read t.pit2 ~tick:(pit_tick t)
   | 0x60 -> Dos_kbc.read_data t.kbc ~hz:(cpu_hz t) ~now:t.now
@@ -539,8 +541,10 @@ let port_out t p v =
   else begin
   mpu_port_out t (p land 0xffff) v;
   match fm_alias t (p land 0xffff) with
-  | 0x20 -> Dos_pic.write_command t.pic v
-  | 0x21 -> Dos_pic.write_mask t.pic v
+  | 0x20 -> Dos_pic.write_command t.pic Dos_pic.Master v
+  | 0x21 -> Dos_pic.write_mask t.pic Dos_pic.Master v
+  | 0xA0 -> Dos_pic.write_command t.pic Dos_pic.Slave v
+  | 0xA1 -> Dos_pic.write_mask t.pic Dos_pic.Slave v
   | 0x40 ->
     Dos_pit.write t.pit0 ~tick:(pit_tick t) ~gate:channel0_gate v;
     pit0_changed t

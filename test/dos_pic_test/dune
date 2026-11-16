@@ -1,0 +1,3 @@
+(test
+ (name dos_pic_test)
+ (libraries dosmachine))

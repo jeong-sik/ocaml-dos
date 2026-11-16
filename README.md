@@ -206,8 +206,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   15MB 를 KB 단위 first fit 으로 나눠 주고, 핸들 32개, 잠금, 크기 바꾸기,
   이동(0Bh)을 받는다. 이동은 CPU 버스를 지나서 평면 그래픽 창도 게스트
   쓰기처럼 받는다. HMA·A20·UMB 는 없다
-- **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), 8259 PIC(IRR·
-  ISR·마스크, EOI 두 가지, OCW3 읽기 — IRQ0 이 IRQ1 보다 앞선다), 8042
+- **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), 8259 PIC 두 개(20h·21h 와
+  A0h·A1h. IRR·ISR·마스크, EOI 두 가지, OCW3 읽기 — IRQ0 이 IRQ1 보다 앞서고,
+  두 번째 칩의 IRQ8-15 는 첫 칩의 IRQ2 자리에서 벡터 70h-77h 로 들어온다), 8042
   키보드 컨트롤러(0x60 데이터·0x64 상태, 바이트마다 IRQ1, 컨트롤러·키보드 명령), 8237 DMA
   (채널 0-3 의 주소·카운트·모드·마스크·TC 상태, 페이지 레지스터 81h-83h·87h
   — 장치가 한 바이트씩 당겨 간다), VGA DAC(0x3C8/0x3C9),
@@ -614,7 +615,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch·AllocMethod) |
 | `Dos_error` | INT 21h 에러 코드의 class·action·locus 와 기능마다 돌려줄 수 있는 코드 (MS-DOS 4.0 `MS_TABLE.ASM`) |
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, 스피커. PIC·DMA·키보드 포트는 아래 셋에 넘긴다 |
-| `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
+| `Dos_pic` | 8259 인터럽트 컨트롤러 두 개(AT 캐스케이드) — 어느 IRQ 를 언제 넣는가 |
 | `Dos_dma` | 8237 DMA 컨트롤러 — 장치가 메모리의 어느 바이트를 언제 가져가는가 |
 | `Dos_sb` | Sound Blaster 2.0 DSP — 포트 답, PCM·ADPCM 블록 시간, MIDI UART, IRQ(소리 없음) |
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가, 컨트롤러·키보드 명령의 답 |

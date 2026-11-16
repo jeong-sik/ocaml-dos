@@ -81,8 +81,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    or a directory entry (by name). Host file keys are read back only in
    their canonical Dos_path form.
    30: the CMOS carries the periodic flag raised before its last register A
-   write and the cycle its count starts from, after register B. *)
-let format_version = 30
+   write and the cycle its count starts from, after register B.
+   31: the slave 8259 (mask, requests, in service, OCW3 read choice) after
+   the master's. *)
+let format_version = 31
 
 let digest_hex_len = 32
 let checksum_len = 16

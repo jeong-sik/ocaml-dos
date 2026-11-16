@@ -242,23 +242,23 @@ let test_pic () =
   check "the timer comes first" (next p = Some Timer);
   acknowledge p Timer;
   check "a line in service shadows the lines below it" (next p = None);
-  write_command p 0x0B;
-  check "OCW3 reads ISR" (read_command p = 0x01);
-  write_command p 0x0A;
-  check "OCW3 reads IRR" (read_command p = 0x02);
-  write_command p 0x20;
+  write_command p Master 0x0B;
+  check "OCW3 reads ISR" (read_command p Master = 0x01);
+  write_command p Master 0x0A;
+  check "OCW3 reads IRR" (read_command p Master = 0x02);
+  write_command p Master 0x20;
   check "a non-specific EOI" (next p = Some Keyboard);
   acknowledge p Keyboard;
   raise_irq p Timer;
   check "the timer preempts a keyboard handler" (next p = Some Timer);
-  write_mask p 0x01;
+  write_mask p Master 0x01;
   check "the mask hides a line" (next p = None);
-  check "the mask reads back" (read_mask p = 0x01);
-  write_command p 0x61;
-  write_command p 0x0B;
-  check "a specific EOI on IRQ1" (read_command p = 0x00);
-  write_command p 0x11;
-  check "an ICW1 changes nothing" (read_mask p = 0x01 && read_command p = 0x00)
+  check "the mask reads back" (read_mask p Master = 0x01);
+  write_command p Master 0x61;
+  write_command p Master 0x0B;
+  check "a specific EOI on IRQ1" (read_command p Master = 0x00);
+  write_command p Master 0x11;
+  check "an ICW1 changes nothing" (read_mask p Master = 0x01 && read_command p Master = 0x00)
 
 (* F: a snapshot taken while bytes are still in the controller. *)
 let save m = match Dos_snapshot.save m with
