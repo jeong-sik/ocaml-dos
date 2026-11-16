@@ -200,6 +200,39 @@ let dac_set idx (r, g, bl) =
   mov_dx 0x3C8 ^ mov_al idx ^ "\xee"
   ^ mov_dx 0x3C9 ^ mov_al r ^ "\xee" ^ mov_al g ^ "\xee" ^ mov_al bl ^ "\xee"
 
+(* 프레임 지문은 [frame_rgb] 가 읽는 것을 다 봐야 한다. 색만 바꾸는 세 길
+   (DAC, 속성 팔레트, CGA 색 선택)은 화면 메모리를 건드리지 않아 화면
+   지문이 못 본다 — 그래서 프레임 지문이 따로 있다. *)
+let test_frame_digest_sees_the_picture () =
+  let differs name ~memory mode change =
+    let plain = run_com (set_mode mode ^ quit) in
+    let changed = run_com (set_mode mode ^ change ^ quit) in
+    check_true (name ^ ": 화면 지문")
+      ((Dos_machine.screen_digest plain <> Dos_machine.screen_digest changed) = memory);
+    check_true (name ^ ": 그림은 바뀐다")
+      (Dos_machine.frame_rgb plain <> Dos_machine.frame_rgb changed);
+    check_true (name ^ ": 프레임 지문도 바뀐다")
+      (Dos_machine.frame_digest plain <> Dos_machine.frame_digest changed)
+  in
+  (* AH=0Ch: AL 색, CX·DX 좌표 *)
+  differs "점 하나" ~memory:true 0x13 (mov_bx 0 ^ mov_cx 1 ^ mov_dx 1 ^ mov_ax 0x0C0F ^ int_ 0x10);
+  List.iter
+    (fun (name, rgb) -> differs ("DAC " ^ name) ~memory:false 0x13 (dac_set 0 rgb))
+    [ ("빨강", (63, 0, 0)); ("초록", (0, 63, 0)); ("파랑", (0, 0, 63)) ];
+  (* AX=1000h: BL 색 번호를 BH DAC 자리로 *)
+  differs "속성 팔레트" ~memory:false 0x12 (mov_ax 0x1000 ^ mov_bx 0x3F00 ^ int_ 0x10);
+  (* 포트 3D9h 아래 네 비트가 배경색 — 빈 화면이 그 색이 된다 *)
+  differs "CGA 색 선택" ~memory:false 0x04 (mov_dx 0x3D9 ^ mov_al 0x01 ^ "\xee");
+  (* 0Dh 와 0Eh 의 빈 화면은 메모리도 팔레트도 같고 크기만 다르다 *)
+  let d = run_com (set_mode 0x0D ^ quit) in
+  let e = run_com (set_mode 0x0E ^ quit) in
+  check_true "모드: 화면 지문은 같다" (Dos_machine.screen_digest d = Dos_machine.screen_digest e);
+  check_true "모드: 그림 크기는 다르다" (Dos_machine.frame_dims d <> Dos_machine.frame_dims e);
+  check_true "모드: 프레임 지문도 다르다" (Dos_machine.frame_digest d <> Dos_machine.frame_digest e);
+  let a = run_com (set_mode 0x13 ^ quit) in
+  let b = run_com (set_mode 0x13 ^ quit) in
+  check "같은 화면은 같은 지문" (Dos_machine.frame_digest a) (Dos_machine.frame_digest b)
+
 (* 실기 BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다. 앞
    프로그램이 페이드아웃으로 DAC 을 검게 두고 끝나도, 다음 프로그램이
    모드만 세우면 기본색이 보인다(삼국지3 카피프로텍션 화면이 이 길이다).
@@ -279,6 +312,55 @@ let test_cga_mode_4 () =
     (rgb_at m ~x:9 ~y:1 = (0xFF, 0x55, 0xFF));
   check "이웃은 바탕색" (Dos_machine.pixel m ~x:8 ~y:1) 0
 
+(* INT 10h AH=0Bh: BH=0 은 바탕색과 밝기, BH=1 은 팔레트. 모드 4 의 기본값
+   30h(팔레트 1, 어두움, 검은 바탕)에서 시작한다. *)
+let test_cga_bios_palette () =
+  let palette bh bl = mov_ah 0x0B ^ mov_bx ((bh lsl 8) lor bl) ^ int_ 0x10 in
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 0 0x11 (* 파란 바탕 + 밝기 *)
+           ^ palette 1 0x00 (* 팔레트 0: 초록·빨강·갈색 *)
+           ^ palette 2 0x01 (* 다른 BH 는 아무것도 바꾸지 않는다 *)
+           ^ quit)
+         "")
+  in
+  check_true "밝은 팔레트 0 에서 색 번호 2 는 밝은 빨강"
+    (rgb_at m ~x:9 ~y:1 = (0xFF, 0x55, 0x55));
+  check_true "바탕은 BL 의 하위 니블(파랑)" (rgb_at m ~x:8 ~y:1 = (0x00, 0x00, 0xAA));
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 1 0x01 ^ palette 1 0xFE (* BL 은 비트 0 만 본다: 팔레트 0 *)
+           ^ palette 0 0xE1 (* 하위 5 비트만: 파란 바탕, 어두움, 팔레트 그대로 *)
+           ^ quit)
+         "")
+  in
+  check_true "BL 의 다른 비트는 팔레트를 바꾸지 않는다: 색 번호 2 는 빨강"
+    (rgb_at m ~x:9 ~y:1 = (0xAA, 0x00, 0x00));
+  check_true "바탕은 파랑" (rgb_at m ~x:8 ~y:1 = (0x00, 0x00, 0xAA));
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+           set_mode 0x04
+           ^ mov_ah 0x0C ^ mov_al 2 ^ mov_bx 0 ^ mov_cx 9 ^ mov_dx 1
+           ^ int_ 0x10
+           ^ palette 0 0x01
+           ^ quit)
+         "")
+  in
+  check_true "BH=0 은 기본 팔레트 1 을 지킨다: 색 번호 2 는 자홍"
+    (rgb_at m ~x:9 ~y:1 = (0xAA, 0x00, 0xAA))
+
 let test_cga_mode_6 () =
   let m =
     run_com
@@ -312,7 +394,71 @@ let test_forty_column_text () =
   check_s "나머지는 다음 줄로"
     (List.nth lines 1) (String.make 5 'A' ^ String.make 35 ' ')
 
+(* 렌더러가 색 표를 미리 만들고 바이트를 여덟 점마다 한 번 읽어도, 점마다
+   평면 비트를 모아 DAC 을 읽던 원래 정의와 같은 바이트를 내야 한다.
+   원래 정의를 그대로 옮겨 두고 무작위 평면·팔레트로 견준다. 너비 20 은
+   8 의 배수가 아니라 마지막 바이트가 다음 줄에 걸치는 경우다. *)
+let reference_planar planes ~w ~h ~attr ~pal =
+  let dac8 v = (max 0 (min 63 v) * 255) / 63 in
+  let img = Bytes.make (w * h * 3) '\000' in
+  let bytes_per_row = w / 8 in
+  for y = 0 to h - 1 do
+    for x = 0 to w - 1 do
+      let off = ((y * bytes_per_row) + (x / 8)) land 0xffff in
+      let bit = 7 - (x mod 8) in
+      let idx = ref 0 in
+      Array.iteri
+        (fun p plane ->
+          if (Char.code (Bytes.get plane off) lsr bit) land 1 = 1 then
+            idx := !idx lor (1 lsl p))
+        planes;
+      let r, g, b = pal.(attr.(!idx land 0x0f) land 0xff) in
+      let i = ((y * w) + x) * 3 in
+      Bytes.set img i (Char.chr (dac8 r));
+      Bytes.set img (i + 1) (Char.chr (dac8 g));
+      Bytes.set img (i + 2) (Char.chr (dac8 b))
+    done
+  done;
+  Bytes.to_string img
+
+let test_planar_render_matches_reference () =
+  let rng = Random.State.make [| 0x3c0 |] in
+  let plane_size = 0x10000 in
+  List.iter
+    (fun (w, h) ->
+      let planes =
+        Array.init 4 (fun _ ->
+            Bytes.init plane_size (fun _ -> Char.chr (Random.State.int rng 256)))
+      in
+      let attr = Array.init 21 (fun _ -> Random.State.int rng 256) in
+      let pal =
+        Array.init 256 (fun _ ->
+            (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
+      in
+      check_true
+        (Printf.sprintf "평면 렌더가 점 단위 정의와 같다 (%dx%d)" w h)
+        (Dos_render.rgb_planar planes ~w ~h ~attr ~pal
+         = reference_planar planes ~w ~h ~attr ~pal))
+    [ (640, 480); (320, 200); (20, 3) ]
+
+let test_vga13_render_matches_reference () =
+  let rng = Random.State.make [| 0x13 |] in
+  let mem = Bytes.init (1024 * 1024) (fun _ -> Char.chr (Random.State.int rng 256)) in
+  let pal =
+    Array.init 256 (fun _ ->
+        (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
+  in
+  let dac8 v = (v * 255) / 63 in
+  let expected =
+    String.init (320 * 200 * 3) (fun i ->
+        let r, g, b = pal.(Char.code (Bytes.get mem (0xA0000 + (i / 3)))) in
+        Char.chr (dac8 (match i mod 3 with 0 -> r | 1 -> g | _ -> b)))
+  in
+  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_vga13 mem pal = expected)
+
 let () =
+  test_planar_render_matches_reference ();
+  test_vga13_render_matches_reference ();
   test_bios_pixel_mode_0d ();
   test_set_reset_bit_mask ();
   test_write_mode_1_copies_latches ();
@@ -324,8 +470,10 @@ let () =
   test_mode_set_keeps_dac_when_inhibited ();
   test_text_glyph_not_mirrored ();
   test_cga_mode_4 ();
+  test_cga_bios_palette ();
   test_cga_mode_6 ();
   test_forty_column_text ();
+  test_frame_digest_sees_the_picture ();
   if !failed = 0 then print_endline "dos 그래픽: all passed"
   else begin
     Printf.eprintf "dos 그래픽: %d failures\n%!" !failed;

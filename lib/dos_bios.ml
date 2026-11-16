@@ -12,7 +12,7 @@ open Dos_state
 (* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
    전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
    삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
+let host_served = [ 0x00; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
@@ -151,6 +151,12 @@ let private_service_vector t raw =
 let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
+
+(* 포트 0x3D9 의 비트: 하위 4 비트가 바탕색, 비트 4 가 밝기, 비트 5 가
+   팔레트(Dos_render.cga4_colors). *)
+let cga_color_select_port = 0x3D9
+let cga_background_bits = 0x1F
+let cga_palette_bit = 0x20
 
 let video t =
   let cpu = t.cpu in
@@ -308,6 +314,20 @@ let video t =
     Cpu86.set_reg8 cpu 0 0x1A;
     Cpu86.set_reg8 cpu 3 0x08;
     Cpu86.set_reg8 cpu 7 0x00
+  | 0x0B ->
+    (* CGA 색 선택. BH=0 은 BL 의 하위 5 비트(바탕색 4 비트 + 밝기)를,
+       BH=1 은 BL 비트 0 으로 팔레트를 바꾼다. 나머지 비트는 그대로다.
+       SeaBIOS vgasrc/stdvga.c(28aa46349b97)의
+       stdvga_set_cga_background_color·stdvga_set_cga_palette 가 바꾸는
+       자리와 같다. 그 BIOS 는 VGA 속성 레지스터로 흉내 내고, 이 기계는
+       CGA 처럼 포트 0x3D9 로 그린다. 다른 BH 는 SeaBIOS 처럼 무시한다. *)
+    let old = Dos_video.cga_color_select t.video and bl = Cpu86.reg8 cpu 3 in
+    let set v = Dos_ports.port_out t.ports cga_color_select_port v in
+    (match Cpu86.reg8 cpu 7 with
+     | 0x00 -> set ((old land lnot cga_background_bits) lor (bl land cga_background_bits))
+     | 0x01 ->
+       set ((old land lnot cga_palette_bit) lor (if bl land 1 = 0 then 0 else cga_palette_bit))
+     | _ -> ())
   | _ -> ()
 
 (* ---------- INT 16h 키보드 ---------- *)
