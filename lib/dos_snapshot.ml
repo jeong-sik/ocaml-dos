@@ -23,8 +23,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    6: DOS byte/line continuations, partial echo widths, and remaining cooked
    console bytes are carried explicitly.
    7: the mouse carries each button's press and release log (INT 33h
-   AX=05h/06h) and the AX=07h/08h ranges. *)
-let format_version = 7
+   AX=05h/06h) and the AX=07h/08h ranges.
+   8: the mouse carries its cursor flag (an int, not a visible bool) and
+   the AX=09h graphics and AX=0Ah text cursor shapes. *)
+let format_version = 8
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -58,6 +60,9 @@ let handle_number = C.range 0 (max_handles - 1)
 let ems_handle_key = C.range Dos_ems.first_handle Dos_ems.max_handle
 (* [ems_mapped] uses handle 0 for "nothing mapped". *)
 let ems_mapped_handle = C.range 0 Dos_ems.max_handle
+let cursor_flag = C.range min_int 0
+(* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
+let cursor_kind = C.range 0 1
 let file_pos = C.count
 let vector = C.byte
 
@@ -302,7 +307,8 @@ let write_payload w t =
       put_list w ~what:"EMS page" (C.put_bytes w) (Array.to_list pages))
     (sorted_bindings ems_pages);
   put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
-  let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
+  let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_cursor_flag;
+        mouse_graphics_cursor; mouse_text_cursor;
         mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
         mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
         mouse_range_y } = mouse
@@ -311,7 +317,24 @@ let write_payload w t =
   put "mouse x" C.any mouse_x;
   put "mouse y" C.any mouse_y;
   put "mouse buttons" C.any mouse_buttons;
-  C.put_bool w mouse_visible;
+  put "mouse cursor flag" cursor_flag mouse_cursor_flag;
+  (match mouse_graphics_cursor with
+   | Default_arrow -> put "graphics cursor" cursor_kind 0
+   | Custom_cursor { hot_x; hot_y; screen_mask; cursor_mask } ->
+     put "graphics cursor" cursor_kind 1;
+     put "cursor hot x" C.word hot_x;
+     put "cursor hot y" C.word hot_y;
+     C.put_int_array w ~what:"cursor screen mask" C.word screen_mask;
+     C.put_int_array w ~what:"cursor mask" C.word cursor_mask);
+  (match mouse_text_cursor with
+   | Software_text { screen_mask; cursor_mask } ->
+     put "text cursor" cursor_kind 0;
+     put "text screen mask" C.word screen_mask;
+     put "text cursor mask" C.word cursor_mask
+   | Hardware_text { first_line; last_line } ->
+     put "text cursor" cursor_kind 1;
+     put "text cursor first line" C.word first_line;
+     put "text cursor last line" C.word last_line);
   put "mouse dx" C.any mouse_dx;
   put "mouse dy" C.any mouse_dy;
   put "mouse handler mask" C.word mouse_handler_mask;
@@ -517,7 +540,27 @@ let read_payload r =
   m.mouse_x <- get "mouse x" C.any;
   m.mouse_y <- get "mouse y" C.any;
   m.mouse_buttons <- get "mouse buttons" C.any;
-  m.mouse_visible <- C.get_bool r;
+  m.mouse_cursor_flag <- get "mouse cursor flag" cursor_flag;
+  m.mouse_graphics_cursor <-
+    (match get "graphics cursor" cursor_kind with
+     | 0 -> Default_arrow
+     | _ ->
+       let hot_x = get "cursor hot x" C.word in
+       let hot_y = get "cursor hot y" C.word in
+       let mask what = get_int_array r ~what ~len:cursor_rows C.word in
+       let screen_mask = mask "cursor screen mask" in
+       let cursor_mask = mask "cursor mask" in
+       Custom_cursor { hot_x; hot_y; screen_mask; cursor_mask });
+  m.mouse_text_cursor <-
+    (match get "text cursor" cursor_kind with
+     | 0 ->
+       let screen_mask = get "text screen mask" C.word in
+       let cursor_mask = get "text cursor mask" C.word in
+       Software_text { screen_mask; cursor_mask }
+     | _ ->
+       let first_line = get "text cursor first line" C.word in
+       let last_line = get "text cursor last line" C.word in
+       Hardware_text { first_line; last_line });
   m.mouse_dx <- get "mouse dx" C.any;
   m.mouse_dy <- get "mouse dy" C.any;
   m.mouse_handler_mask <- get "mouse handler mask" C.word;

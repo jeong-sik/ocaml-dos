@@ -9,15 +9,39 @@
 
 open Dos_state
 
-(* 27h(옛 방식 상주 종료) 포함 — 호스트 구현으로 가야 하는 벡터에만
-   전용 스텁을 준다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을
-   삼켜 서비스가 조용히 무시된다(실측: TSR 의 INT 27h). *)
-let host_served = [ 0x00; 0x10; 0x16; 0x20; 0x21; 0x27; 0x33; 0x67 ]
+(* 호스트 구현으로 가야 하는 벡터. 스텁을 까는 [install] 과 서비스를
+   고르는 [Dos_machine.host_service] 가 모두 [host_vector] 하나에서
+   나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
+   조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
+   12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
+type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type host_vector =
+  | Bios of bios_service
+  | Dos_divide_overflow
+  | Dos_terminate
+  | Dos_call
+  | Dos_keep
+  | Ems
+
+let host_vector = function
+  | 0x00 -> Some Dos_divide_overflow
+  | 0x10 -> Some (Bios Video)
+  | 0x11 -> Some (Bios Equipment)
+  | 0x12 -> Some (Bios Memory_size)
+  | 0x16 -> Some (Bios Keyboard)
+  | 0x1A -> Some (Bios Time_of_day)
+  | 0x20 -> Some Dos_terminate
+  | 0x21 -> Some Dos_call
+  | 0x27 -> Some Dos_keep
+  | 0x33 -> Some (Bios Mouse)
+  | 0x67 -> Some Ems
+  | _ -> None
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
    0x20, 호스트 서빙 벡터의 되돌림 스텁은 0x100 부터 16바이트씩. *)
 let rom_seg = 0xF000
+let timer_vector = 0x08
 let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
 let bios_int8_off = 0x0040
@@ -91,8 +115,7 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
-  set_ivt t 0x08 bios_int8_off rom_seg;          (* 타이머 IRQ0 *)
-  set_ivt t 0x67 emm_entry_off rom_seg;          (* EMS — 헤더 0 번지 *)
+  set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* BIOS 데이터 영역 — 실기 부팅 값. CRT 루틴이 화면 폴링 포트를
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
@@ -119,27 +142,26 @@ let install t =
      Pascal 의 Intr 썽크는 INT 명령 없이 IVT 를 직접 읽어 그 주소로
      retf 한다(실측: 빈 IVT[10h] 로 0000:0000 추락). 스텁 본체는
      "int 사설벡터; iret" 이고, 사설 벡터는 비어 있어 호스트 훅이 받는다. *)
+  (* EMS 는 헤더 0 번지의 스텁으로 간다 — EMS 런타임이 세그먼트+0x0A 를
+     읽기 때문이다. 나머지 벡터는 전부 IRET 스텁으로 채운다. 실기 BIOS 는
+     모든 벡터가 ROM/DOS 를 가리켜서, 프로그램이 훅을 걸며 되읽은 "옛
+     벡터" 가 0:0 이 아니다. 하나라도 비워 두면 체인 복귀가 0000:0000
+     으로 떨어진다. *)
   let off = ref stub_area in
-  List.iter
-    (fun v ->
+  for v = 0 to 255 do
+    match host_vector v with
+    | Some Ems ->
+      set_ivt t v emm_entry_off rom_seg;
+      t.stubs <- (v, emm_entry_off) :: t.stubs
+    | Some (Bios _ | Dos_divide_overflow | Dos_terminate | Dos_call | Dos_keep) ->
       let a = (rom_seg * 16) + !off in
       wr8 t a 0xCD;
       wr8 t (a + 1) (private_vector v);
       wr8 t (a + 2) 0xCF;
       set_ivt t v !off rom_seg;
       t.stubs <- (v, !off) :: t.stubs;
-      off := !off + stub_stride)
-    host_served;
-  (* 0x67 은 위의 일괄 배정을 덮어써 헤더 0 번지로 — EMS 런타임이
-     세그먼트+0x0A 를 읽기 때문이다. 되돌림 스텁 자리는 비워 둔다. *)
-  set_ivt t 0x67 emm_entry_off rom_seg;
-  t.stubs <- (0x67, emm_entry_off) :: t.stubs;
-  (* 나머지 벡터는 전부 IRET 스텁으로 채운다. 실기 BIOS 는 모든 벡터가
-     ROM/DOS 를 가리켜서, 프로그램이 훅을 걸며 되읽은 "옛 벡터" 가 0:0
-     이 아니다. 하나라도 비워 두면 체인 복귀가 0000:0000 으로 떨어진다. *)
-  for v = 0 to 255 do
-    if not (List.mem v (0x08 :: host_served)) then
-      set_ivt t v iret_stub_off rom_seg
+      off := !off + stub_stride
+    | None -> if v <> timer_vector then set_ivt t v iret_stub_off rom_seg
   done;
   (* IBM PC BIOS(5150)는 8x8 글꼴 표를 F000:FA6E 에 둔다. 그래픽 모드에서
      글자를 직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 —
@@ -189,6 +211,9 @@ let private_service_vector t raw =
 let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
+
+(* 속성 컨트롤러의 색 번호 레지스터 00h~0Fh *)
+let palette_regs = 16
 
 (* 포트 0x3D9 의 비트: 하위 4 비트가 바탕색, 비트 4 가 밝기, 비트 5 가
    팔레트(Dos_render.cga4_colors). *)
@@ -290,19 +315,31 @@ let video t =
        (* 색 번호 하나를 DAC 자리로: BL=색 번호, BH=DAC 자리 *)
        Dos_video.set_attr_palette t.video (Cpu86.reg8 cpu 3)
          (Cpu86.reg8 cpu 7)
+     | 0x01 -> Dos_video.set_overscan t.video (Cpu86.reg8 cpu 7)
      | 0x02 ->
-       (* 열여섯 색 + 테두리를 한 번에: ES:DX 가 17 바이트 *)
+       (* 열여섯 색 + 테두리를 한 번에: ES:DX 가 17 바이트. 마지막 바이트는
+          테두리(속성 11h)다 — 그다음 번호인 10h(모드 제어)가 아니다
+          (RBIL INT 10/AX=1002h, SeaBIOS stdvga_set_all_palette_reg). *)
        let src = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 2 in
-       for i = 0 to 16 do
+       for i = 0 to palette_regs - 1 do
          Dos_video.set_attr_palette t.video i (rd8 t (src + i))
-       done
+       done;
+       Dos_video.set_overscan t.video (rd8 t (src + palette_regs))
+     | 0x03 ->
+       (* BL bit 0: 1 이면 깜박임, 0 이면 바탕 열여섯 색(SeaBIOS
+          stdvga_set_palette_blinking) *)
+       Dos_video.set_text_blink t.video (Cpu86.reg8 cpu 3 land 1 <> 0)
      | 0x07 ->
-       Cpu86.set_reg8 cpu 7
-         (Dos_video.attr_palette t.video).(Cpu86.reg8 cpu 3 land 0x1f)
+       (* 속성 레지스터는 00h~14h 다. 그 밖의 BL 은 BH 를 두고 돌아간다. *)
+       let attr = Dos_video.attr_palette t.video in
+       let bl = Cpu86.reg8 cpu 3 in
+       if bl < Array.length attr then Cpu86.set_reg8 cpu 7 attr.(bl)
+     | 0x08 -> Cpu86.set_reg8 cpu 7 (Dos_video.overscan t.video)
      | 0x09 ->
        let dst = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 2 in
        let attr = Dos_video.attr_palette t.video in
-       for i = 0 to 16 do wr8 t (dst + i) attr.(i) done
+       for i = 0 to palette_regs - 1 do wr8 t (dst + i) attr.(i) done;
+       wr8 t (dst + palette_regs) (Dos_video.overscan t.video)
      | 0x10 ->
        (* 한 색: BX=번호, DH=R CH=G CL=B *)
        let idx = Cpu86.reg16 cpu 3 land 0xff in
@@ -481,13 +518,20 @@ let clock t =
 let mouse_driver_installed = 0xFFFF
 let mouse_buttons_reported = 2
 
+(* AX=2Ah 가 DX 로 알리는 마우스 종류. 04h 는 IBM(PS/2) 마우스다(RBIL
+   INT 33/002A 표 03179). 이 기계의 마우스는 하네스가 움직여 실제 포트가
+   없다. DOSBox-X 와 같은 값을 준다. *)
+let mouse_type_ps2 = 0x04
+
 (* 00h 와 21h 가 함께 되돌리는 드라이버 상태. HelpPC 2.10 INT 33,0: 커서를
-   숨기고, 사용자 핸들러 마스크를 0 으로 하고, 범위를 모드 최대로 한다.
-   마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이 건 핸들러가
-   그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로 옮기지는
-   않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
+   숨기고 모양을 기본으로 하고, 사용자 핸들러 마스크를 0 으로 하고, 범위를
+   모드 최대로 한다. 마스크가 0 이면 핸들러를 부르지 않는다 — 앞 프로그램이
+   건 핸들러가 그 메모리를 놓은 뒤에 불리지 않는다. 커서를 화면 가운데로
+   옮기지는 않는다. 모드마다 가상 화면 크기를 두지 않아 가운데를 모른다. *)
 let reset_mouse_driver m =
-  m.mouse_visible <- false;
+  m.mouse_cursor_flag <- cursor_flag_after_reset;
+  m.mouse_graphics_cursor <- Default_arrow;
+  m.mouse_text_cursor <- default_text_cursor;
   m.mouse_handler_mask <- 0;
   m.mouse_range_x <- None;
   m.mouse_range_y <- None;
@@ -511,8 +555,11 @@ let mouse t =
       Cpu86.set_reg16 cpu 3 mouse_buttons_reported;
       reset_mouse_driver m
     end
-  | 0x01 -> m.mouse_visible <- true
-  | 0x02 -> m.mouse_visible <- false
+  | 0x01 ->
+    (* 깃발을 하나 올리되 0 에서 멈춘다. 02h 를 n 번 불렀으면 01h 도 n 번
+       불러야 보인다(RBIL INT 33/0002, DOSBox-X mouse.cpp). *)
+    if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1
+  | 0x02 -> m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
   | 0x03 ->
     Cpu86.set_reg16 cpu 1 m.mouse_x;
     Cpu86.set_reg16 cpu 2 m.mouse_y;
@@ -554,6 +601,37 @@ let mouse t =
     Cpu86.set_reg16 cpu 2 (m.mouse_dy land 0xffff);
     m.mouse_dx <- 0;
     m.mouse_dy <- 0
+  | 0x09 ->
+    (* 그래픽 커서: BX·CX 핫스폿, ES:DX 마스크 서른두 워드. 오프셋은
+       세그먼트 안에서 돈다. 돌려주는 값은 없다. *)
+    let seg = Cpu86.seg cpu 0 lsl 4 and off = Cpu86.reg16 cpu 2 in
+    let row k = rd16 t (seg + ((off + (2 * k)) land 0xffff)) in
+    m.mouse_graphics_cursor <-
+      Custom_cursor
+        { hot_x = Cpu86.reg16 cpu 3; hot_y = Cpu86.reg16 cpu 1;
+          screen_mask = Array.init cursor_rows row;
+          cursor_mask = Array.init cursor_rows (fun k -> row (cursor_rows + k)) }
+  | 0x0A ->
+    (* 텍스트 커서: BX=0 이면 CX·DX 가 마스크, 아니면 스캔 줄이다. RBIL 은
+       BX 0·1 만 적는다. 그 밖의 값은 DOSBox-X 처럼 하드웨어로 본다. CRTC 의
+       커서 모양은 바꾸지 않는다 — 마우스 커서를 그리는 곳이 아직 없다. *)
+    let cx = Cpu86.reg16 cpu 1 and dx = Cpu86.reg16 cpu 2 in
+    m.mouse_text_cursor <-
+      (match Cpu86.reg16 cpu 3 with
+       | 0 -> Software_text { screen_mask = cx; cursor_mask = dx }
+       | _ -> Hardware_text { first_line = cx; last_line = dx })
+  | 0x2A ->
+    (* GET CURSOR HOT SPOT(RBIL INT 33/002A): AX 깃발, BX·CX 핫스폿, DX 종류.
+       RBIL 은 깃발을 AX 로 적는다. DOSBox-X 는 AL 만 쓴다. *)
+    let hot_x, hot_y =
+      match m.mouse_graphics_cursor with
+      | Default_arrow -> default_hot_spot
+      | Custom_cursor { hot_x; hot_y; _ } -> (hot_x, hot_y)
+    in
+    Cpu86.set_reg16 cpu 0 (m.mouse_cursor_flag land 0xffff);
+    Cpu86.set_reg16 cpu 3 hot_x;
+    Cpu86.set_reg16 cpu 1 hot_y;
+    Cpu86.set_reg16 cpu 2 mouse_type_ps2
   | 0x0C ->
     (* DEFINE INTERRUPT SUBROUTINE PARAMETERS — CX 마스크, ES:DX 루틴.
        돌려주는 값은 없다(Ralf Brown rb-5968: Return 없음). AX 를 건드리면
@@ -565,17 +643,12 @@ let mouse t =
 
 (* ---------- 묶음 ---------- *)
 
-let service t vec =
-  if vec = 0x16 && (Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10)
-  then read_key t
-  else begin
-  (match vec with
-  | 0x10 -> video t
-  | 0x11 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410)
-  | 0x12 -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413)
-  | 0x16 -> keyboard t
-  | 0x1A -> clock t
-  | 0x33 -> mouse t
-  | _ -> ());
-  Completed
-  end
+let service t s =
+  match s with
+  | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
+  | Keyboard -> keyboard t; Completed
+  | Video -> video t; Completed
+  | Equipment -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x410); Completed
+  | Memory_size -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413); Completed
+  | Time_of_day -> clock t; Completed
+  | Mouse -> mouse t; Completed

@@ -31,24 +31,28 @@ let accept_service t ~return_to = function
        guest hook, where the interrupt entry already cleared IF. *)
     Cpu86.set_flags t.cpu ((flags lor Cpu86.f_interrupt) land lnot Cpu86.f_trap)
 
+(* [None]: IVT 가 0:0 인 벡터. 실기라면 0000:0000 으로 뛴다. *)
 let host_service t ~return_to v =
-  match v with
-  | 0x00 -> Dos_dos.divide_overflow t; Control_transferred
-  | 0x20 -> Dos_dos.terminate t; Control_transferred
-  | 0x21 -> Dos_dos.service t ~return_to
-  | 0x27 -> Dos_dos.int27 t; Control_transferred
-  | 0x67 -> Dos_ems.service t; Completed
-  | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
-  | _ -> Completed
+  match Dos_bios.host_vector v with
+  | Some Dos_divide_overflow -> Dos_dos.divide_overflow t; Control_transferred
+  | Some Dos_terminate -> Dos_dos.terminate t; Control_transferred
+  | Some Dos_call -> Dos_dos.service t ~return_to
+  | Some Dos_keep -> Dos_dos.int27 t; Control_transferred
+  | Some Ems -> Dos_ems.service t; Completed
+  | Some (Bios s) -> Dos_bios.service t s
+  | None -> Completed
 
+(* 게스트 훅을 지나 서비스를 불렀을 때 호출자의 FLAGS 로 돌려줄 비트. *)
 let service_status_mask t v =
   let ah = Cpu86.reg8 t.cpu 4 in
-  let fn = if v = 0x21 && ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
-  match v, fn with
-  | 0x16, (0x01 | 0x11) -> Cpu86.f_zero
-  | 0x21, 0x06 -> Cpu86.f_zero
-  | 0x21, _ -> Cpu86.f_carry
-  | _ -> 0
+  match Dos_bios.host_vector v with
+  | Some (Bios Keyboard) -> if ah = 0x01 || ah = 0x11 then Cpu86.f_zero else 0
+  | Some (Bios Time_of_day) -> Cpu86.f_carry
+  | Some Dos_call ->
+    let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
+    if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
+  | Some (Bios (Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
+  | None -> 0
 
 let create () =
   let mem = Bytes.make (1024 * 1024) '\000' in
@@ -108,7 +112,10 @@ let create () =
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
            키보드 모드로 강제한다(전투 배치 같은 마우스 UI 잠김). *)
         mouse_present = true; mouse_x = 0; mouse_y = 0;
-        mouse_buttons = 0; mouse_visible = false;
+        mouse_buttons = 0;
+        mouse_cursor_flag = Dos_state.cursor_flag_after_reset;
+        mouse_graphics_cursor = Dos_state.Default_arrow;
+        mouse_text_cursor = Dos_state.default_text_cursor;
         mouse_dx = 0; mouse_dy = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
         mouse_presses = Dos_state.new_button_logs ();
@@ -381,7 +388,10 @@ let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
   match Dos_video.kind t.video with
-  | Dos_video.Text -> Dos_render.rgb_text t.mem ~cols:(cols t)
+  | Dos_video.Text ->
+    Dos_render.rgb_text t.mem ~cols:(cols t)
+      ~attr:(Dos_video.attr_palette t.video) ~pal
+      ~blink:(Dos_video.text_blink t.video)
   | Dos_video.Cga4 ->
     Dos_render.rgb_cga4 t.mem ~mode:(Dos_video.mode t.video)
       ~color_select:(Dos_video.cga_color_select t.video)
