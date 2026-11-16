@@ -1,0 +1,3 @@
+(test
+ (name dos_mouse_callback_test)
+ (libraries dosmachine))

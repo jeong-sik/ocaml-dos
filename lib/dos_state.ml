@@ -38,6 +38,20 @@ type handle = {
 (* INT 33h AX=0x0C 로 건 마우스 이벤트 핸들러의 등록. [mouse_handler_mask]
    0 은 미등록 — 마스크가 0 이면 주소가 남아 있어도 부르지 않는다. 세 값은
    16비트(Cpu86.set_reg16·set_seg 가 마스크한다). *)
+(* AX=05h·06h 가 돌려주는 버튼 하나의 기록: 마지막 호출 뒤 누른(뗀) 횟수와
+   마지막으로 누른(뗀) 자리. *)
+type button_log = { mutable times : int; mutable last_x : int; mutable last_y : int }
+
+(* 왼쪽·오른쪽·가운데. 버튼 i 는 버튼 상태의 비트 i 다. *)
+let mouse_button_count = 3
+
+let new_button_logs () =
+  Array.init mouse_button_count (fun _ -> { times = 0; last_x = 0; last_y = 0 })
+
+(* AX=07h·08h 의 범위. None 은 드라이버의 기본값인 화면 전체다 — 이
+   기계는 화면 크기로 자르지 않고 하네스가 준 좌표를 그대로 쓴다. *)
+let clamp_to range v = match range with None -> v | Some (lo, hi) -> max lo (min hi v)
+
 type mouse = {
   mutable mouse_present : bool;
   mutable mouse_x : int;
@@ -49,6 +63,10 @@ type mouse = {
   mutable mouse_handler_mask : int;
   mutable mouse_handler_seg : int;
   mutable mouse_handler_off : int;
+  mouse_presses : button_log array;
+  mouse_releases : button_log array;
+  mutable mouse_range_x : (int * int) option;
+  mutable mouse_range_y : (int * int) option;
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
