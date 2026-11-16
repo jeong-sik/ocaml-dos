@@ -35,9 +35,16 @@
     POPF·IRET 로 쓸 수 있는 FLAGS bit12-14(IOPL·NT). bit15 는 0 이다. 게임은
     bit12-14 가 남는지로 386 을 가른다. 명령 길이는 15 바이트까지다. 결함도
     286 과 다르다: 받지 않는 명령의 LOCK 은 INT 6, SS 로 세그먼트 끝을 넘으면
-    INT 12, 결함 난 문자열 명령은 그 반복을 처음부터 다시 한다. 32 비트
-    피연산자·주소(66h·67h)와 0x0F 확장은 아직 없어 [Unsupported] 다(RFC 0001
-    2·3 단계). 근거는 SingleStepTests/80386 실모드다. *)
+    INT 12, 결함 난 문자열 명령은 그 반복을 처음부터 다시 한다.
+
+    66h 는 80386.csv 의 66 열이 고른 155 opcode 의 피연산자를 32 비트로
+    바꾼다. 주소는 16 비트 그대로다. 실칩이 설명서를 글자 그대로 읽은 것과
+    다른 자리가 셋 있다. 세그먼트 레지스터의 32 비트 PUSH·POP 은 SP 를 4
+    움직이고 워드 하나만 오간다. POPAD 는 ESP 의 위 16 비트를 스택의 ESP
+    자리에서 가져온다. PUSHAD 는 EDI 부터 쓰고 세그먼트 끝을 넘는 첫 자리에서
+    INT 12 다. EIP 가 FFFFh 를 넘는 RET·점프는 CS 한계 밖이라 INT 13 이다. 67h 와
+    0x0F 확장은 아직 없어 [Unsupported] 다(RFC 0001 2·3 단계). 근거는
+    SingleStepTests/80386 실모드다. *)
 type model = I8086 | I80186 | I80286 | I80386
 
 exception Unsupported of string

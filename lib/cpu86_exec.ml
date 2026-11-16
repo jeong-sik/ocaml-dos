@@ -380,16 +380,16 @@ let step t =
         else op_write t width opd (op_read t width (Reg 0));
         8
       (* --- string ops (rep prefix 소비) --- *)
-      | 0xa4 -> string_op t ctx false Movs; 9
-      | 0xa5 -> string_op t ctx true Movs; 9
-      | 0xa6 -> string_op t ctx false Cmps; 9
-      | 0xa7 -> string_op t ctx true Cmps; 9
-      | 0xaa -> string_op t ctx false Stos; 7
-      | 0xab -> string_op t ctx true Stos; 7
-      | 0xac -> string_op t ctx false Lods; 7
-      | 0xad -> string_op t ctx true Lods; 7
-      | 0xae -> string_op t ctx false Scas; 7
-      | 0xaf -> string_op t ctx true Scas; 7
+      | 0xa4 -> string_op t ctx 8 Movs; 9
+      | 0xa5 -> string_op t ctx 16 Movs; 9
+      | 0xa6 -> string_op t ctx 8 Cmps; 9
+      | 0xa7 -> string_op t ctx 16 Cmps; 9
+      | 0xaa -> string_op t ctx 8 Stos; 7
+      | 0xab -> string_op t ctx 16 Stos; 7
+      | 0xac -> string_op t ctx 8 Lods; 7
+      | 0xad -> string_op t ctx 16 Lods; 7
+      | 0xae -> string_op t ctx 8 Scas; 7
+      | 0xaf -> string_op t ctx 16 Scas; 7
       (* --- ret / jmp far / mov rm,imm --- *)
       | 0xc2 ->
         let n = fetch16 t in
@@ -549,10 +549,10 @@ let step t =
          | _ -> unsupported t ctx "group FE/FF");
         15
       (* --- 186 string I/O. rep 접두어가 그대로 먹는다. --- *)
-      | 0x6c -> string_op t ctx false Ins; 14
-      | 0x6d -> string_op t ctx true Ins; 14
-      | 0x6e -> string_op t ctx false Outs; 14
-      | 0x6f -> string_op t ctx true Outs; 14
+      | 0x6c -> string_op t ctx 8 Ins; 14
+      | 0x6d -> string_op t ctx 16 Ins; 14
+      | 0x6e -> string_op t ctx 8 Outs; 14
+      | 0x6f -> string_op t ctx 16 Outs; 14
       (* --- bound (186): 배열 인덱스가 [하한,상한] 밖이면 INT 5.
              Turbo Pascal 의 {$R+} 범위 검사가 이 명령을 낸다. --- *)
       | 0x62 ->
@@ -600,10 +600,12 @@ let step t =
             | I8086 | I80186 -> ignore (t.read (at t b o)))
          | Reg _ -> ());
         2
-      (* --- 나머지는 예외로 알린다 — 조용한 오동작 대신 하네스가
-             다음에 구현할 명령을 읽는다. --- *)
+      (* --- 386 의 66h 형태([operand32_form])는 0xFF 를 넘어 여기에만 닿는다.
+             나머지는 예외로 알린다 — 조용한 오동작 대신 하네스가 다음에
+             구현할 명령을 읽는다. --- *)
       | _ ->
-        unsupported t ctx (Printf.sprintf "opcode %02x" opcode)
+        if opcode land operand32_form <> 0 then Cpu86_exec32.dispatch t ctx
+        else unsupported t ctx (Printf.sprintf "opcode %02x" opcode)
       end
       with Fault vector ->
         t.ip <- base_ip;

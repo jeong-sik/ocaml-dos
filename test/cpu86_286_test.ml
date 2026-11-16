@@ -12,7 +12,7 @@ let check name got want =
     Printf.eprintf "FAIL %s: got %04x want %04x\n%!" name got want
   end
 
-let cpu model code =
+let cpu_mem model code =
   let mem = Bytes.make (1024 * 1024) '\000' in
   String.iteri (fun i c -> Bytes.set mem i c) code;
   let read a = Char.code (Bytes.get mem (a land 0xfffff)) in
@@ -22,7 +22,9 @@ let cpu model code =
   Cpu86.set_ip t 0;
   Cpu86.set_seg t 2 0x1000;
   Cpu86.set_reg16 t 4 0x0100;
-  t
+  (t, mem)
+
+let cpu model code = fst (cpu_mem model code)
 
 let run t n = for _ = 1 to n do ignore (Cpu86.step t) done
 let ax t = Cpu86.reg16 t 0
@@ -136,6 +138,8 @@ let fault_of model code setup =
   Cpu86.set_int_hook t (fun n -> if !taken = None then taken := Some (n, Cpu86.dump_ip t));
   ignore (Cpu86.step t);
   (t, !taken)
+
+let nothing_386 _ = ()
 
 let check_taken name got want =
   let show = function None -> "none" | Some (n, ip) -> Printf.sprintf "INT %d from %04x" n ip in
@@ -347,6 +351,206 @@ let test_386 () =
   let _, got = fault_of Cpu86.I80186 "\xf6\xfb" (idiv 0x81c1 0x7c) in
   check_taken "186 idiv edge" got (Some (0, 2))
 
+(* 66h on the 386: the 32-bit width the prefix gives the instructions in
+   80386.csv's 66 column and no other, and the places SingleStepTests/80386
+   shows the 386 parting from a plain reading of the manual. The stack is
+   1000:0100, so SS:x is byte 10000h + x. *)
+let test_386_operand32 () =
+  let m386 = Cpu86.I80386 in
+  let r32 t n = Cpu86.reg32 t n in
+  let stack = 0x10000 in
+  let byte mem a = Char.code (Bytes.get mem a) in
+  let dword mem a = byte mem a lor (byte mem (a + 1) lsl 8) lor (byte mem (a + 2) lsl 16)
+                    lor (byte mem (a + 3) lsl 24) in
+  let cf_zf = Cpu86.f_carry lor Cpu86.f_zero in
+  (* mov eax,12345678h; add ebx,eax *)
+  let t = cpu m386 "\x66\xb8\x78\x56\x34\x12\x66\x01\xc3" in
+  Cpu86.set_reg32 t 3 0xedcba988;
+  run t 2;
+  check "o32 mov eax,imm32" (r32 t 0) 0x12345678;
+  check "o32 add ebx,eax wraps at 2^32" (r32 t 3) 0;
+  check "o32 add sets CF and ZF" (Cpu86.flags t land cf_zf) cf_zf;
+  check "286: 66h is no prefix"
+    (Bool.to_int (match Cpu86.step (cpu Cpu86.I80286 "\x66\x40") with
+                  | _ -> false | exception Cpu86.Unsupported _ -> true)) 1;
+  (* mov al,12h is a byte instruction: 66h leaves it one immediate byte *)
+  let t = cpu m386 "\x66\xb0\x12\x66\x40" in
+  Cpu86.set_reg32 t 0 0xffff0000;
+  run t 2;
+  check "o32 mov al,imm8 then inc eax" (r32 t 0) 0xffff0013;
+  (* add ebx,-1 by 83 /0: the imm8 sign-extends to 32 bits *)
+  let t = cpu m386 "\x66\x83\xc3\xff" in
+  Cpu86.set_reg32 t 3 0x00010000;
+  run t 1;
+  check "o32 83 sign-extends" (r32 t 3) 0x0000ffff;
+  (* mul ebx: FFFFFFFFh squared is FFFFFFFE_00000001h *)
+  let t = cpu m386 "\x66\xf7\xe3" in
+  Cpu86.set_reg32 t 0 0xffffffff;
+  Cpu86.set_reg32 t 3 0xffffffff;
+  run t 1;
+  check "o32 mul EAX" (r32 t 0) 1;
+  check "o32 mul EDX" (r32 t 2) 0xfffffffe;
+  check "o32 mul CF" (Cpu86.flags t land Cpu86.f_carry) Cpu86.f_carry;
+  let divide edx eax ebx t =
+    Cpu86.set_reg32 t 2 edx;
+    Cpu86.set_reg32 t 0 eax;
+    Cpu86.set_reg32 t 3 ebx
+  in
+  let t, got = fault_of m386 "\x66\xf7\xf3" (divide 1 5 2) in
+  check_taken "o32 div 1_00000005h by 2" got None;
+  check "o32 div quotient" (r32 t 0) 0x80000002;
+  check "o32 div remainder" (r32 t 2) 1;
+  let _, got = fault_of m386 "\x66\xf7\xf3" (divide 2 0 2) in
+  check_taken "o32 div quotient past 32 bits" got (Some (0, 0));
+  let t, got = fault_of m386 "\x66\xf7\xfb" (divide 0xffffffff 0xfffffff9 2) in
+  check_taken "o32 idiv -7 by 2" got None;
+  check "o32 idiv quotient" (r32 t 0) 0xfffffffd;
+  check "o32 idiv remainder" (r32 t 2) 0xffffffff;
+  (* imul ebx: -1 * -1 = 1 fits, so CF is clear *)
+  let t = cpu m386 "\x66\xf7\xeb" in
+  Cpu86.set_reg32 t 0 0xffffffff;
+  Cpu86.set_reg32 t 3 0xffffffff;
+  run t 1;
+  check "o32 imul EDX:EAX" (r32 t 2 lxor r32 t 0) 1;
+  check "o32 imul CF" (Cpu86.flags t land Cpu86.f_carry) 0;
+  (* push eax; pop ebx: four bytes, SP by 4 *)
+  let t, mem = cpu_mem m386 "\x66\x50\x66\x5b" in
+  Cpu86.set_reg32 t 0 0xdeadbeef;
+  run t 1;
+  check "o32 push eax SP" (Cpu86.reg16 t 4) 0xfc;
+  check "o32 push eax bytes" (dword mem (stack + 0xfc)) 0xdeadbeef;
+  run t 1;
+  check "o32 pop ebx" (r32 t 3) 0xdeadbeef;
+  (* push es moves SP by 4 and writes one word (6606: two bytes written) *)
+  let t, mem = cpu_mem m386 "\x66\x06" in
+  Bytes.set mem (stack + 0xfe) '\x55';
+  Bytes.set mem (stack + 0xff) '\x55';
+  Cpu86.set_seg t 0 0x1234;
+  run t 1;
+  check "o32 push es SP" (Cpu86.reg16 t 4) 0xfc;
+  check "o32 push es leaves the upper word" (dword mem (stack + 0xfc)) 0x55551234;
+  (* pop es at SP=FFFE reads one word: no INT 12 (6607) *)
+  let t, got = fault_of m386 "\x66\x07" (fun t -> Cpu86.set_reg16 t 4 0xfffe) in
+  check_taken "o32 pop es at FFFE" got None;
+  check "o32 pop es SP" (Cpu86.reg16 t 4) 2;
+  (* pushad at SP=1Ah writes EDI first at FFFA, then INT 12 on ESI's FFFE;
+     SP stays and EDI stays written (6660) *)
+  let t, mem = cpu_mem m386 "\x66\x60" in
+  let taken = ref None in
+  Cpu86.set_int_hook t (fun n -> if !taken = None then taken := Some (n, Cpu86.dump_ip t));
+  Cpu86.set_reg16 t 4 0x1a;
+  Cpu86.set_reg32 t 7 0x7f3e2ee6;
+  ignore (Cpu86.step t);
+  check_taken "o32 pushad across the segment end" !taken (Some (12, 0));
+  check "o32 pushad SP after the fault" (Cpu86.reg16 t 4) 0x1a;
+  check "o32 pushad wrote EDI first" (dword mem (stack + 0xfffa)) 0x7f3e2ee6;
+  check "o32 pushad did not write EAX" (dword mem (stack + 0x16)) 0;
+  (* popad takes ESP's upper half from its slot (6661) *)
+  let t, mem = cpu_mem m386 "\x66\x61" in
+  Bytes.set mem (stack + 0x100 + 14) '\xcd';
+  Bytes.set mem (stack + 0x100 + 15) '\xab';
+  run t 1;
+  check "o32 popad ESP" (r32 t 4) 0xabcd0120;
+  (* jmp rel32: EIP past FFFFh is INT 13 from the prefix; back to 0 runs *)
+  let _, got = fault_of m386 "\x66\xe9\x00\x00\x01\x00" nothing_386 in
+  check_taken "o32 jmp past the CS limit" got (Some (13, 0));
+  let t, got = fault_of m386 "\x66\xe9\xfa\xff\xff\xff" nothing_386 in
+  check_taken "o32 jmp back" got None;
+  check "o32 jmp back IP" (Cpu86.dump_ip t) 0;
+  (* cwde; cdq *)
+  let t = cpu m386 "\x66\x98\x66\x99" in
+  Cpu86.set_reg32 t 0 0x12348000;
+  run t 2;
+  check "o32 cwde" (r32 t 0) 0xffff8000;
+  check "o32 cdq" (r32 t 2) 0xffffffff;
+  (* movsd: four bytes, SI and DI by 4 *)
+  let t, mem = cpu_mem m386 "\x66\xa5" in
+  Cpu86.set_seg t 0 0x2000;
+  Cpu86.set_seg t 3 0x3000;
+  Bytes.blit_string "\x01\x02\x03\x04" 0 mem 0x30000 4;
+  run t 1;
+  check "o32 movsd" (dword mem 0x20000) 0x04030201;
+  check "o32 movsd SI" (Cpu86.reg16 t 6) 4;
+  (* shl eax,4 by C1 *)
+  let t = cpu m386 "\x66\xc1\xe0\x04" in
+  Cpu86.set_reg32 t 0 0x18000001;
+  run t 1;
+  check "o32 shl eax,4" (r32 t 0) 0x80000010;
+  check "o32 shl CF" (Cpu86.flags t land Cpu86.f_carry) Cpu86.f_carry;
+  (* cdq on a positive EAX whose bit 15 is set *)
+  let t = cpu m386 "\x66\x99" in
+  Cpu86.set_reg32 t 0 0x00008000;
+  Cpu86.set_reg32 t 2 0xffffffff;
+  run t 1;
+  check "o32 cdq of 8000h" (r32 t 2) 0;
+  (* idiv by a negative divisor: 7 / -2 = -3 r 1 *)
+  let t, got = fault_of m386 "\x66\xf7\xfb" (divide 0 7 0xfffffffe) in
+  check_taken "o32 idiv by -2" got None;
+  check "o32 idiv by -2 quotient" (r32 t 0) 0xfffffffd;
+  check "o32 idiv by -2 remainder" (r32 t 2) 1;
+  (* a 32-bit shift count is five bits: shl eax,33 is shl eax,1 *)
+  let t = cpu m386 "\x66\xc1\xe0\x21" in
+  Cpu86.set_reg32 t 0 0x40000001;
+  run t 1;
+  check "o32 shl eax,33" (r32 t 0) 0x80000002;
+  (* prefixes in any order and repeated: 66 66, 66 then FS, 66 then REP *)
+  let t = cpu m386 "\x66\x66\xb8\x78\x56\x34\x12" in
+  run t 1;
+  check "o32 66 66 mov eax" (r32 t 0) 0x12345678;
+  let t, mem = cpu_mem m386 "\x66\x64\xa1\x10\x00" in
+  Cpu86.set_seg t 4 0x2000;
+  Bytes.blit_string "\x11\x22\x33\x44" 0 mem 0x20010 4;
+  run t 1;
+  check "o32 fs: mov eax,[10h]" (r32 t 0) 0x44332211;
+  let t, mem = cpu_mem m386 "\x66\xf3\xab" in
+  Cpu86.set_seg t 0 0x2000;
+  Cpu86.set_reg16 t 1 2;
+  Cpu86.set_reg32 t 0 0xa1b2c3d4;
+  run t 1;
+  check "o32 rep stosd CX" (cx t) 0;
+  check "o32 rep stosd second dword" (dword mem 0x20004) 0xa1b2c3d4;
+  let _, got = fault_of m386 "\x66\xf0\x89\x04" nothing_386 in
+  check_taken "o32 66 lock mov [si],eax" got (Some (6, 0));
+  (* lodsd at SI=FFFEh crosses the segment end: INT 13 *)
+  let _, got = fault_of m386 "\x66\xad" (fun t -> Cpu86.set_reg16 t 6 0xfffe) in
+  check_taken "o32 lodsd at FFFE" got (Some (13, 0));
+  (* enter with a display whose read crosses: EBP comes back whole (66C8) *)
+  let t, got = fault_of m386 "\x66\xc8\x00\x00\x02" (fun t -> Cpu86.set_reg32 t 5 0x00010001) in
+  check_taken "o32 enter display read past FFFF" got (Some (12, 0));
+  check "o32 enter fault keeps EBP" (r32 t 5) 0x00010001;
+  check "o32 enter fault keeps SP" (Cpu86.reg16 t 4) 0x100;
+  (* call far ptr16:32 pushes CS and EIP as dwords *)
+  let t, mem = cpu_mem m386 "\x66\x9a\x34\x12\x00\x00\x00\x20" in
+  Cpu86.set_seg t 1 0;
+  run t 1;
+  check "o32 call far SP" (Cpu86.reg16 t 4) 0xf8;
+  check "o32 call far pushed EIP" (dword mem (stack + 0xf8)) 8;
+  check "o32 call far pushed CS" (dword mem (stack + 0xfc)) 0;
+  check "o32 call far CS:IP" ((Cpu86.seg t 1 lsl 16) lor Cpu86.dump_ip t) 0x20001234;
+  (* loop counts CX down first: CX=1 falls through *)
+  let t = cpu m386 "\x66\xe2\xfd" in
+  Cpu86.set_reg16 t 1 1;
+  run t 1;
+  check "o32 loop at CX=1 falls through" (Cpu86.dump_ip t) 3;
+  (* mov eax,es clears EAX's upper half (668C) *)
+  let t = cpu m386 "\x66\x8c\xc0" in
+  Cpu86.set_reg32 t 0 0xffffffff;
+  Cpu86.set_seg t 0 0x1234;
+  run t 1;
+  check "o32 mov eax,es" (r32 t 0) 0x1234;
+  (* imul ebx: 10000h squared does not fit 32 bits *)
+  let t = cpu m386 "\x66\xf7\xeb" in
+  Cpu86.set_reg32 t 0 0x10000;
+  Cpu86.set_reg32 t 3 0x10000;
+  run t 1;
+  check "o32 imul overflow EDX" (r32 t 2) 1;
+  check "o32 imul overflow CF" (Cpu86.flags t land Cpu86.f_carry) Cpu86.f_carry;
+  (* LOCK with 66h: add [si],eax runs, mov [si],eax is INT 6 *)
+  let _, got = fault_of m386 "\xf0\x66\x01\x04" nothing_386 in
+  check_taken "o32 lock add [si],eax" got None;
+  let _, got = fault_of m386 "\xf0\x66\x89\x04" nothing_386 in
+  check_taken "o32 lock mov [si],eax" got (Some (6, 0))
+
 (* repz stops on a difference, repnz on a match: cmpsb over zeros *)
 let test_rep_kind () =
   List.iter
@@ -361,6 +565,7 @@ let test_rep_kind () =
 
 let () =
   test_rep_kind ();
+  test_386_operand32 ();
   test_386 ();
   test_faults ();
   test_bcd ();

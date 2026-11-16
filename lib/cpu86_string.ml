@@ -10,10 +10,10 @@ open Cpu86_alu
 type string_unit = Movs | Cmps | Stos | Lods | Scas | Ins | Outs
 
 (* string ops: DS:[SI] → ES:[DI], DF 가 방향. rep 은 CX 카운터 —
-   cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. *)
-let string_op t ctx word (unit_kind : string_unit) =
-  let width = if word then 16 else 8 in
-  let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
+   cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. [width] 는 8·16·32
+   비트이고 32 는 386 의 66h 형태다. *)
+let string_op t ctx width (unit_kind : string_unit) =
+  let d = (width / 8) * (if t.df then -1 else 1) in
   let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
   (* 포인터는 그 명령이 쓰는 것만 전진한다 — movs/cmps=SI·DI 둘 다,
      stos/scas=DI 만, lods=SI 만. (둘 다 전진시키면 lodsb+stosw 조합이
@@ -27,8 +27,14 @@ let string_op t ctx word (unit_kind : string_unit) =
      처리기를 세우지 않으려고 접근 전에 따진다.
      386 은 그 반복을 처음부터 다시 한다: SI·DI·CX 가 반복 앞 값이다
      (SingleStepTests/80386 A5 A7 AB AD AF 6D 6F). [restart] 가 되돌린다. *)
+  (* 더블워드는 386 에만 있고, 386 의 [guard] 는 접근 자신과 같은 결함만 내니
+     따질 것이 없다. *)
+  let crosses off = width = 16 && overruns t off in
+  let read opd = if width = 32 then op_read32 t opd else op_read t width opd in
+  let write opd v = if width = 32 then op_write32 t opd v else op_write t width opd v in
+  let acc () = if width = 32 then get32 t 0 else op_read t width (Reg 0) in
   let guard r sreg ~cx_taken =
-    if word && overruns t t.regs.(r) then begin
+    if crosses t.regs.(r) then begin
       (match t.model with
        | I80386 -> ()
        | I8086 | I80186 | I80286 ->
@@ -42,17 +48,17 @@ let string_op t ctx word (unit_kind : string_unit) =
   let si_sreg = match ctx.ovr with Some s -> s | None -> sreg_ds in
   let read_si ~cx_taken =
     guard 6 si_sreg ~cx_taken;
-    let v = op_read t width (Mem (si_sreg, t.regs.(6))) in
+    let v = read (Mem (si_sreg, t.regs.(6))) in
     adv 6; v
   in
   let read_di ~cx_taken =
     guard 7 sreg_es ~cx_taken;
-    let v = op_read t width (Mem (sreg_es, t.regs.(7))) in
+    let v = read (Mem (sreg_es, t.regs.(7))) in
     adv 7; v
   in
   let write_di v =
     guard 7 sreg_es ~cx_taken:2;
-    op_write t width (Mem (sreg_es, t.regs.(7))) v;
+    write (Mem (sreg_es, t.regs.(7))) v;
     adv 7
   in
   let run_once () =
@@ -72,19 +78,24 @@ let string_op t ctx word (unit_kind : string_unit) =
           (src, read_di ~cx_taken:1)
       in
       ignore (alu_result t 7 src dst width)
-    | Stos -> write_di (if word then reg16 t 0 else reg8 t 0)
-    | Lods ->
-      let v = read_si ~cx_taken:1 in
-      (if word then set_reg16 t 0 v else set_reg8 t 0 v)
+    | Stos -> write_di (acc ())
+    | Lods -> write (Reg 0) (read_si ~cx_taken:1)
     | Scas ->
-      let acc = if word then reg16 t 0 else reg8 t 0 in
-      ignore (alu_result t 7 acc (read_di ~cx_taken:1) width)
+      let a = acc () in
+      ignore (alu_result t 7 a (read_di ~cx_taken:1) width)
     | Ins (* 186: ES:[DI] <- 포트 DX *) ->
       let p = reg16 t 2 in
-      write_di (if word then port_in16 t p else t.port_in p)
+      write_di
+        (match width with
+         | 8 -> t.port_in p
+         | 16 -> port_in16 t p
+         | _ -> port_in32 t p)
     | Outs (* 186: 포트 DX <- DS:[SI] *) ->
       let p = reg16 t 2 and v = read_si ~cx_taken:1 in
-      if word then port_out16 t p v else t.port_out p v
+      (match width with
+       | 8 -> t.port_out p v
+       | 16 -> port_out16 t p v
+       | _ -> port_out32 t p v)
   in
   let restart f =
     match t.model with
