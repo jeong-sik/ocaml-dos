@@ -187,7 +187,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
   쓴 바이트는 닫을 때 파일이 된다, 29h 이름 나누기), findfirst/findnext,
-  메모리 할당(48h/49h/4Ah),
+  메모리 할당(48h/49h/4Ah, 58h first·best·last fit),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기.
   MZ 는 헤더의 페이지 수만큼 싣고 뒤에 붙은 데이터는 싣지 않는다. 자식은
@@ -558,7 +558,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | 모듈 | 맡은 것 |
 |---|---|
 | `Cpu86` | 8086/186 코어. 메모리와 포트는 콜백으로 바깥에 있다 |
-| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch) |
+| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch·AllocMethod) |
 | `Dos_error` | INT 21h 에러 코드의 class·action·locus 와 기능마다 돌려줄 수 있는 코드 (MS-DOS 4.0 `MS_TABLE.ASM`) |
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, 스피커. PIC·DMA·키보드 포트는 아래 셋에 넘긴다 |
 | `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
