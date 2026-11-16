@@ -1,9 +1,16 @@
 (** BIOS 표면 — ROM 코드, 인터럽트 벡터표, BIOS 데이터 영역, 그리고
-    INT 10h(비디오)·11h(장비)·12h(메모리)·16h(키보드)·1Ah(시각)·
+    INT 10h(비디오)·11h(장비)·12h(메모리)·15h(시스템)·16h(키보드)·1Ah(시각)·
     33h(마우스) 서비스. *)
 
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
-type host_vector = Bios of bios_service | Dos_terminate | Dos_call | Dos_keep | Ems
+type bios_service =
+  | Keyboard_irq | Video | Equipment | Memory_size | System | Keyboard | Time_of_day | Mouse
+type host_vector =
+  | Bios of bios_service
+  | Dos_divide_overflow
+  | Dos_terminate
+  | Dos_call
+  | Dos_keep
+  | Ems
 
 val host_vector : int -> host_vector option
 (** 호스트가 구현을 갖고 있는 벡터. [install] 이 깔 스텁과
@@ -28,6 +35,10 @@ val read_key : Dos_state.t -> Dos_state.service_result
 
 val service : Dos_state.t -> bios_service -> Dos_state.service_result
 (** BIOS 서비스 하나를 실행한다. *)
+
+val case_map_entry : int * int
+(** INT 21h AH=38h 표의 대문자 루틴 (세그먼트, 오프셋). [install] 이 ROM 에
+    {!Dos_country.case_map_code} 를 싣는다. *)
 
 val set_ticks_from_clock : Dos_state.t -> unit
 (** BIOS 틱(0x46C)을 지금 시각의 시·분·초로 채우고 자정 넘김(0x470)을
