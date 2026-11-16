@@ -1,0 +1,102 @@
+(* 문자열 명령 MOVS·CMPS·STOS·LODS·SCAS·INS·OUTS 와 rep 접두. *)
+
+open Cpu86_state
+open Cpu86_fault
+open Cpu86_decode
+open Cpu86_alu
+
+(* string 명령의 단위. 정수 태그 대신 합타입이라 새 단위를 더할 때
+   포인터 전진 규칙과 실행 본체 양쪽에서 컴파일러가 누락을 잡는다. *)
+type string_unit = Movs | Cmps | Stos | Lods | Scas | Ins | Outs
+
+(* string ops: DS:[SI] → ES:[DI], DF 가 방향. rep 은 CX 카운터 —
+   cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. *)
+let string_op t ctx word (unit_kind : string_unit) =
+  let seg_si () =
+    let s = match ctx.ovr with Some s -> s | None -> 3 in
+    Mem (t.segs.(s) lsl 4, t.regs.(6))
+  in
+  let seg_di () = Mem (t.segs.(0) lsl 4, t.regs.(7)) in
+  let width = if word then 16 else 8 in
+  let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
+  let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
+  (* 포인터는 그 명령이 쓰는 것만 전진한다 — movs/cmps=SI·DI 둘 다,
+     stos/scas=DI 만, lods=SI 만. (둘 다 전진시키면 lodsb+stosw 조합이
+     반복당 DI+3 — ZZT 화면 stride-3 오염의 뿌리, 실측.)
+     [guard r] 는 레지스터 r 이 짚는 접근 바로 앞에 선다. 286 이 그
+     접근에서 세그먼트 끝을 넘으면 그 포인터는 이미 움직였고 뒤 접근은
+     일어나지 않는다. REP 이면 CX 는 이 반복에서 [cx_taken] 번 줄어
+     있다: 읽기는 1, 쓰기는 다음 반복 몫까지 2, CMPS 의 첫 읽기는 0
+     이다(SingleStepTests/80286 A5 A7 AB AD AF 6D 6F 의 INT 13 사례
+     전부). 레지스터를 되돌리지 않는 결함으로 던진다. 접근마다 예외
+     처리기를 세우지 않으려고 접근 전에 따진다. *)
+  let guard r ~cx_taken =
+    if word && overruns t t.regs.(r) then begin
+      adv r;
+      (match ctx.rep with
+       | Some _ -> t.regs.(1) <- (t.regs.(1) - cx_taken) land 0xffff
+       | None -> ());
+      fault vector_segment_overrun
+    end
+  in
+  let read_si ~cx_taken =
+    guard 6 ~cx_taken;
+    let v = op_read t width (seg_si ()) in
+    adv 6; v
+  in
+  let read_di ~cx_taken =
+    guard 7 ~cx_taken;
+    let v = op_read t width (seg_di ()) in
+    adv 7; v
+  in
+  let write_di v =
+    guard 7 ~cx_taken:2;
+    op_write t width (seg_di ()) v;
+    adv 7
+  in
+  let run_once () =
+    match unit_kind with
+    | Movs -> write_di (read_si ~cx_taken:1)
+    | Cmps ->
+      (* 286 은 ES:[DI] 를 먼저 읽는다 — DI 에서 넘친 결함은 SI 를 그대로
+         두고, SI 에서 넘친 결함은 DI 도 옮겨 둔다. 8086·186 은 SI 부터
+         읽는 순서를 그대로 둔다. *)
+      let src, dst =
+        match t.model with
+        | I80286 ->
+          let dst = read_di ~cx_taken:0 in
+          (read_si ~cx_taken:1, dst)
+        | I8086 | I80186 ->
+          let src = read_si ~cx_taken:1 in
+          (src, read_di ~cx_taken:1)
+      in
+      ignore (alu_result t 7 src dst width)
+    | Stos -> write_di (if word then reg16 t 0 else reg8 t 0)
+    | Lods ->
+      let v = read_si ~cx_taken:1 in
+      (if word then set_reg16 t 0 v else set_reg8 t 0 v)
+    | Scas ->
+      let acc = if word then reg16 t 0 else reg8 t 0 in
+      ignore (alu_result t 7 acc (read_di ~cx_taken:1) width)
+    | Ins (* 186: ES:[DI] <- 포트 DX *) ->
+      let p = reg16 t 2 in
+      write_di (if word then port_in16 t p else t.port_in p)
+    | Outs (* 186: 포트 DX <- DS:[SI] *) ->
+      let p = reg16 t 2 and v = read_si ~cx_taken:1 in
+      if word then port_out16 t p v else t.port_out p v
+  in
+  match ctx.rep with
+  | None -> run_once ()
+  | Some want_zf ->
+    if t.regs.(1) = 0 then ()  (* CX=0: 실행 없음 *)
+    else begin
+      let continue_ = ref true in
+      while !continue_ && t.regs.(1) <> 0 do
+        run_once ();
+        t.regs.(1) <- t.regs.(1) - 1;
+        (* 비교 계열만 ZF 로 조기 종료한다 *)
+        (match unit_kind with
+         | Cmps | Scas -> continue_ := (t.zf = want_zf)
+         | Movs | Stos | Lods | Ins | Outs -> ())
+      done
+    end
