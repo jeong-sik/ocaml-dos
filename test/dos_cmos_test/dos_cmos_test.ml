@@ -5,7 +5,8 @@
    전부터 1984µs 뒤까지 켜진다. UIP 의 오르내림을 기다리는 루프는 끝나고,
    끝난 뒤 읽은 초는 바뀐 초다. 메모리 크기와 체크섬은 IBM AT 배치를
    따른다. 레지스터 A 가 고른 주기가 끝나면 레지스터 C 에 PF 가 서고,
-   읽으면 지워진다. *)
+   읽으면 지워진다. PIE 가 켜져 있으면 IRQ8 이 오르고, C 를 읽을 때까지
+   다시 오르지 않는다. BIOS 의 INT 70h 는 C 를 읽고 두 칩에 EOI 를 보낸다. *)
 
 let failed = ref 0
 
@@ -236,6 +237,163 @@ let test_periodic_wait () =
   check (Printf.sprintf "PF seen at the first 1024Hz end (%d cycles)" cycles)
     (cycles >= edge ~ticks:32 1 && cycles < edge ~ticks:32 1 + 100)
 
+(* ---------- IRQ8 ---------- *)
+
+let pie_on = 0x42
+let pie_off = 0x02
+
+let due m n = Dos_ports.set_now (ports m) n; Dos_ports.rtc_irq_due (ports m)
+let pic m = Dos_ports.pic (ports m)
+
+let test_irq_line () =
+  let m = machine ~hour:10 ~minute:0 ~second:0 () in
+  let e = edge ~ticks:32 in
+  check "PIE off: no IRQ8" (not (due m (e 1)));
+  ignore (flags_at m (e 1));
+  set m 0x0B pie_on;
+  check "not before the next end" (not (due m (e 2 - 1)));
+  check "IRQ8 rises at the end" (due m (e 2));
+  check "it rises once" (not (due m (e 2)));
+  (* while the line is up, other registers leave it up *)
+  Dos_pic.raise_irq (pic m) Dos_pic.Rtc;
+  ignore (reg m 0x0A);
+  set m 0x0B (pie_on lor 0x04);
+  check "reading A and writing B keep the request" (Dos_pic.requested (pic m) Dos_pic.Rtc);
+  Dos_pic.lower_irq (pic m) Dos_pic.Rtc;
+  check "an end while the line is up raises nothing" (not (due m (e 4)));
+  Dos_pic.raise_irq (pic m) Dos_pic.Rtc;
+  check_int "reading C" (flags_at m (e 4)) (irqf lor pf);
+  check "reading C withdraws an untaken request" (not (Dos_pic.requested (pic m) Dos_pic.Rtc));
+  check "after C the next end counts" (not (due m (e 5 - 1)));
+  check "and raises IRQ8" (due m (e 5));
+  Dos_pic.raise_irq (pic m) Dos_pic.Rtc;
+  Dos_ports.set_now (ports m) (e 5);
+  set m 0x0B pie_off;
+  check "PIE off withdraws the request" (not (Dos_pic.requested (pic m) Dos_pic.Rtc));
+  check "PIE off: nothing later" (not (due m (e 9)));
+  (* PF stood before PIE came on: IRQF rises with PIE (86Box
+     timer_update_irq on a register B write). *)
+  set m 0x0B pie_on;
+  check "PIE on over a standing PF rises at once" (due m (e 9));
+  (* PF kept across a register A write, then PIE: IRQF rises at once too *)
+  ignore (flags_at m (e 9));
+  set m 0x0B pie_off;
+  Dos_ports.set_now (ports m) (e 10 + 1);
+  set m 0x0A 0x26;
+  set m 0x0B pie_on;
+  check "PIE on over a PF kept by A rises at once" (due m (e 10 + 1));
+  ignore (flags_at m (e 10 + 1));
+  let e n = e (n + 1) in
+  ignore (flags_at m (e 9));
+  (* the snapshot keeps the line and the next rise *)
+  let mid = (e 9 + e 10) / 2 in
+  Dos_ports.set_now (ports m) mid;
+  let round_trip name m k =
+    match Dos_snapshot.save m with
+    | Error e -> check (name ^ " save: " ^ Dos_snapshot.save_error_to_string e) false
+    | Ok bytes -> (
+      match Dos_snapshot.restore bytes with
+      | Error e -> check (name ^ " restore: " ^ Dos_snapshot.error_to_string e) false
+      | Ok r -> k r)
+  in
+  check "the line is down mid-period" (not (due m mid));
+  round_trip "next rise" m (fun r ->
+      check "restored: not before the next end" (not (due r (e 10 - 1)));
+      check "restored: rises at the next end" (due r (e 10)));
+  check "the line rises" (due m (e 10));
+  round_trip "line up" m (fun r ->
+      set r 0x0B pie_on;
+      check "restored: the line stays up" (not (due r (e 12)));
+      ignore (flags_at r (e 12));
+      check "restored: reading C re-arms it" (due r (e 13)))
+
+(* COM 프로그램: INT 70h 를 걸고 PIE 를 켠 뒤 IRQ8 을 기다린다. 처리기는
+   센 뒤 [tail] 을 한다 — 스스로 C 를 읽고 EOI 하거나, 옛 벡터(BIOS)로
+   간다. *)
+let irq8_vector = 0x70
+let count_at = 0x300
+let old_vector_at = 0x304
+let handler_at = 0x400
+let wanted = 4
+
+let le16 n = Printf.sprintf "%c%c" (Char.chr (n land 0xff)) (Char.chr ((n lsr 8) land 0xff))
+
+let irq8_program ~handler =
+  let hook =
+    "\x31\xc0\x8e\xc0"                                   (* xor ax,ax; mov es,ax *)
+    ^ "\x26\xa1" ^ le16 (irq8_vector * 4) ^ "\xa3" ^ le16 old_vector_at
+    ^ "\x26\xa1" ^ le16 ((irq8_vector * 4) + 2) ^ "\xa3" ^ le16 (old_vector_at + 2)
+    ^ "\xfa"                                                (* cli *)
+    ^ "\x26\xc7\x06" ^ le16 (irq8_vector * 4) ^ le16 handler_at
+    ^ "\x26\x8c\x0e" ^ le16 ((irq8_vector * 4) + 2)        (* mov es:[1C2h],cs *)
+    ^ "\xb0\x0b\xe6\x70\xe4\x71\x0c\x40\xe6\x71"         (* B |= PIE *)
+    ^ "\xfb"                                                (* sti *)
+  in
+  let wait =
+    "\x80\x3e" ^ le16 count_at ^ String.make 1 (Char.chr wanted)  (* again: cmp byte [count],N *)
+    ^ "\x72\xf9"                                           (* jb again *)
+  in
+  let code = hook ^ wait ^ "\xcd\x20" in
+  assert (0x100 + String.length code <= count_at);
+  code ^ String.make (handler_at - 0x100 - String.length code) '\x00' ^ handler
+
+let own_handler =
+  "\x50"
+  ^ "\x2e\xfe\x06" ^ le16 count_at                         (* inc byte cs:[count] *)
+  ^ "\xb0\x0c\xe6\x70\xe4\x71"                              (* read C *)
+  ^ "\xb0\x20\xe6\xa0\xe6\x20"                              (* EOI both *)
+  ^ "\x58\xcf"
+
+let chaining_handler =
+  "\x2e\xfe\x06" ^ le16 count_at                           (* inc byte cs:[count] *)
+  ^ "\x2e\xff\x2e" ^ le16 old_vector_at                     (* jmp far cs:[old] *)
+
+let run_irq8 name handler =
+  let m = machine ~hour:10 ~minute:0 ~second:0 () in
+  Dos_machine.load_com m (irq8_program ~handler);
+  let report = Dos_machine.run_until m ~max_steps:step_budget ~stop:(fun _ -> false) in
+  check (name ^ ": the program sees four IRQ8") (report.Dos_machine.stop_reason = Dos_machine.Program_exited);
+  let cycles = Cpu86.cycles m.Dos_state.cpu in
+  let fourth = edge ~ticks:32 wanted in
+  check (Printf.sprintf "%s: the fourth at the fourth 1024Hz end (%d, end %d)" name cycles fourth)
+    (cycles >= fourth && cycles < fourth + 300);
+  let pic = pic m in
+  Dos_pic.write_command pic Dos_pic.Slave 0x0B;
+  Dos_pic.write_command pic Dos_pic.Master 0x0B;
+  check_int (name ^ ": nothing left in service")
+    (Dos_pic.read_command pic Dos_pic.Slave lor Dos_pic.read_command pic Dos_pic.Master) 0
+
+(* IRQ9-15 의 BIOS 기본 루틴은 두 칩에 EOI 를 보낸다. 줄을 올릴 장치가
+   없어서, 하네스가 두 칩을 서비스 중으로 둔 뒤 프로그램이 INT 를 부른다.
+   78h 는 두 번째 칩 범위 밖이라 IRET 뿐이다. *)
+let in_service m =
+  let pic = pic m in
+  Dos_pic.write_command pic Dos_pic.Slave 0x0B;
+  Dos_pic.write_command pic Dos_pic.Master 0x0B;
+  let v = Dos_pic.read_command pic Dos_pic.Slave lsl 8 lor Dos_pic.read_command pic Dos_pic.Master in
+  Dos_pic.write_command pic Dos_pic.Slave 0x0A;
+  Dos_pic.write_command pic Dos_pic.Master 0x0A;
+  v
+
+let slave_and_cascade = 0x0104
+
+let default_handler name vector want =
+  let m = machine ~hour:10 ~minute:0 ~second:0 () in
+  Dos_machine.load_com m ("\xcd" ^ String.make 1 (Char.chr vector) ^ "\xcd\x20");
+  Dos_pic.raise_irq (pic m) Dos_pic.Rtc;
+  Dos_pic.acknowledge (pic m) Dos_pic.Rtc;
+  check_int (name ^ ": both chips in service first") (in_service m) slave_and_cascade;
+  ignore (Dos_machine.run_until m ~max_steps:step_budget ~stop:(fun _ -> false));
+  check (name ^ ": the program ends") (Dos_machine.exited m);
+  check_int (name ^ ": in service after") (in_service m) want
+
+let test_irq8_programs () =
+  run_irq8 "own handler" own_handler;
+  run_irq8 "BIOS handler" chaining_handler;
+  default_handler "INT 71h" 0x71 0;
+  default_handler "INT 77h" 0x77 0;
+  default_handler "INT 78h" 0x78 slave_and_cascade
+
 (* ---------- 자정 넘김과 스냅숏 ---------- *)
 
 let busy_com = "\xEB\xFE"
@@ -273,6 +431,8 @@ let () =
   test_uip_edge ();
   test_periodic ();
   test_periodic_wait ();
+  test_irq_line ();
+  test_irq8_programs ();
   test_midnight_and_snapshot ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;

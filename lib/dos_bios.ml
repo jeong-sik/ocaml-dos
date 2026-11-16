@@ -161,11 +161,43 @@ let hw_irq_default =
 
 let is_hw_irq_vector v = v >= hw_irq_first_vector && v < hw_irq_first_vector + hw_irq_lines
 
+(* IRQ8-15 의 벡터(70h-77h). 두 번째 8259 의 줄이라 처리기는 두 칩 모두에
+   EOI 를 보낸다, 두 번째 칩 먼저(SeaBIOS src/hw/pic.h pic_eoi2,
+   28aa46349b97). 쓰는 장치가 없는 줄의 기본 루틴은 그것만 한다(SeaBIOS
+   handle_hwpic2). *)
+let slave_irq_first_vector = Dos_pic.vector Dos_pic.Rtc
+let is_slave_irq_vector v =
+  v >= slave_irq_first_vector && v < slave_irq_first_vector + hw_irq_lines
+
+let slave_eoi =
+  "\xb0\x20\xe6\xa0"              (* mov al,20h; out 0A0h,al (두 번째 칩 EOI) *)
+  ^ "\xe6\x20"                      (* out 20h,al (첫 칩 EOI) *)
+
+let hw_irq2_default = "\x50" ^ slave_eoi ^ "\x58\xcf"   (* push ax ... pop ax; iret *)
+
+(* INT 70h(IRQ8, RTC): 레지스터 C 를 읽어 깃발을 지우고 줄을 내린 뒤 두
+   칩에 EOI. SeaBIOS src/clock.c handle_70 이 하는 일에서 알람(INT 4Ah)과
+   INT 15h 83h·86h 의 기다리기를 뺀 것이다. C 를 안 읽으면 IRQ8 이 다시
+   오르지 않는다. *)
+let rtc_irq_default =
+  "\x50"                            (* push ax *)
+  ^ "\xb0\x0c\xe6\x70\xe4\x71"      (* mov al,0Ch; out 70h,al; in al,71h *)
+  ^ slave_eoi
+  ^ "\x58\xcf"                      (* pop ax; iret *)
+
 (* The XMS control function goes on the first paragraph after the INT 8
    routine, so a longer routine moves it instead of being overwritten. *)
 let paragraph = 16
 let xms_entry_off =
   (bios_int8_off + String.length bios_int8 + paragraph - 1) / paragraph * paragraph
+
+let next_paragraph off = (off + paragraph - 1) / paragraph * paragraph
+
+(* 두 IRQ8-15 루틴은 XMS 진입점 뒤 문단마다 하나씩, 스텁 영역(0100h) 앞에
+   둔다. *)
+let rtc_irq_off = next_paragraph (xms_entry_off + String.length xms_control)
+let hw_irq2_off = next_paragraph (rtc_irq_off + String.length rtc_irq_default)
+let () = assert (hw_irq2_off + String.length hw_irq2_default <= stub_area)
 
 (* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
    3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
@@ -307,6 +339,12 @@ let install t =
   Bytes.blit_string hw_irq_default 0 t.mem
     ((rom_seg * 16) + hw_irq_off)
     (String.length hw_irq_default);
+  Bytes.blit_string rtc_irq_default 0 t.mem
+    ((rom_seg * 16) + rtc_irq_off)
+    (String.length rtc_irq_default);
+  Bytes.blit_string hw_irq2_default 0 t.mem
+    ((rom_seg * 16) + hw_irq2_off)
+    (String.length hw_irq2_default);
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* POST 는 부팅 모드를 세우며 화면을 지운다: 공백, 속성 07h. 이게
      없으면 화면 메모리가 0(검정 위 검정)이라, 칸의 속성을 두는 teletype
@@ -363,9 +401,15 @@ let install t =
       t.stubs <- (v, !off) :: t.stubs;
       off := !off + stub_stride
     | None ->
-      (* 쓰는 장치가 없는 하드웨어 IRQ 줄은 EOI 루틴, 그 밖은 IRET 스텁 *)
+      (* 쓰는 장치가 없는 하드웨어 IRQ 줄은 EOI 루틴, IRQ8 은 RTC 루틴,
+         그 밖은 IRET 스텁 *)
       if v <> timer_vector then
-        set_ivt t v (if is_hw_irq_vector v then hw_irq_off else iret_stub_off) rom_seg
+        set_ivt t v
+          (if is_hw_irq_vector v then hw_irq_off
+           else if v = slave_irq_first_vector then rtc_irq_off
+           else if is_slave_irq_vector v then hw_irq2_off
+           else iret_stub_off)
+          rom_seg
   done;
   (* IBM PC BIOS(5150)는 8x8 글꼴 표를 F000:FA6E 에 둔다. 그래픽 모드에서
      글자를 직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 —

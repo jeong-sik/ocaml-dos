@@ -250,6 +250,7 @@ let step_result t =
     (* 채널 0 의 OUT 이 오르면 IRQ0 을 요청한다. 그 사이 여러 번 올랐어도
        IRR 은 한 비트다. *)
     if Dos_ports.irq0_due t.ports then Dos_pic.raise_irq pic Dos_pic.Timer;
+    if Dos_ports.rtc_irq_due t.ports then Dos_pic.raise_irq pic Dos_pic.Rtc;
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;
