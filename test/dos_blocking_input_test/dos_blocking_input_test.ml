@@ -10,6 +10,11 @@ let exit = "\xb8\x00\x4c\xcd\x21"
 let marker = "\xb2\x58\xb4\x02\xcd\x21"
 let bios_read ah = "\xb4" ^ String.make 1 (Char.chr ah) ^ "\xcd\x16"
 let run m n = Dos_machine.run_until m ~max_steps:n ~stop:(fun _ -> false)
+
+(* A typed key reaches the ring through the keyboard controller: a byte
+   takes about 1 ms, some 2,400 idle steps, and an upper-case letter is two
+   bytes (shift, then the letter). *)
+let key_steps = 20_000
 let read_word m off = Dos_state.rd16 m (0x10000 + off)
 
 let machine code =
@@ -41,11 +46,11 @@ let test_bios_blocking ah =
   List.iter (fun current ->
       Dos_machine.push_key current 0x1051;
       Dos_machine.push_key current 0x1352;
-      ignore (run current 100);
+      ignore (run current key_steps);
       check "key completes and exits" (Dos_machine.exited current);
       check "exact key returned" (read_word current 0x200 = 0x1051);
       check "marker runs after input" ((Dos_machine.screen_text current).[0] = 'X');
-      check "one read consumes one key" (Dos_state.peek_key current = 0x1352);
+      check "one read consumes one key" (Dos_machine.key_unread current);
       check "completed continuation removed" (current.Dos_state.input_continuations = []))
     [m; resumed];
   check "restored wait has identical outcome" (save m = save resumed)
@@ -54,7 +59,8 @@ let test_polling () =
   let code = bios_read 0x01 ^ store 0x200 ^ bios_read 0x11 ^ store 0x202
              ^ bios_read 0x00 ^ store 0x204 ^ exit in
   let m = machine code in
-  Dos_machine.push_key m 0x1051;
+  (* A key already in the BIOS buffer when the program starts. *)
+  Dos_state.ring_push m 0x1051;
   ignore (run m 100);
   check "polls then read exit" (Dos_machine.exited m);
   List.iter (fun off -> check "poll peeks without consuming" (read_word m off = 0x1051))
@@ -70,13 +76,16 @@ let test_polling () =
 let test_irq_wait () =
   let m = machine (bios_read 0 ^ store 0x200 ^ marker ^ exit) in
   ignore (run m 2);
-  (* IRQ handler increments a memory counter, then IRET. It cannot complete
-     the waiting read, even if a key arrives before that IRET. *)
+  (* IRQ handler increments a memory counter, sends the PIC its EOI, then
+     IRET. It cannot complete the waiting read, even if a key arrives before
+     that IRET. *)
   String.iteri (fun i c -> Dos_state.wr8 m (0x10400 + i) (Char.code c))
-    "\x2e\xfe\x06\x00\x03\xcf";
+    ("\x2e\xfe\x06\x00\x03"   (* inc byte cs:[0300] *)
+     ^ "\x50\xb0\x20\xe6\x20\x58" (* push ax; mov al,20h; out 20h,al; pop ax *)
+     ^ "\xcf");
   Dos_state.wr16 m 0x20 0x400;
   Dos_state.wr16 m 0x22 0x1000;
-  m.Dos_state.pending_irq0 <- true;
+  Dos_pic.raise_irq (Dos_ports.pic m.Dos_state.ports) Dos_pic.Timer;
   ignore (Dos_machine.step_result m);
   check "IRQ executes while waiting" (Dos_state.rd8 m 0x10300 = 1);
   check "IRQ did not discard wait" (List.length m.Dos_state.input_continuations = 1);
@@ -85,10 +94,11 @@ let test_irq_wait () =
   check "snapshot inside IRQ carries underlying wait" (save resumed = saved);
   List.iter (fun current ->
       Dos_machine.push_key current 0x1051;
-      ignore (Dos_machine.step_result current); (* IRET *)
-      check "IRQ does not consume the waiting key" (Dos_state.key_pending current);
+      (* push ax; mov al,20h; out 20h,al; pop ax; iret *)
+      for _ = 1 to 5 do ignore (Dos_machine.step_result current) done;
+      check "IRQ does not consume the waiting key" (Dos_machine.key_unread current);
       check "IRET reaches suspended boundary" (Cpu86.dump_ip (Dos_machine.cpu_of current) = 0x104);
-      ignore (run current 100);
+      ignore (run current key_steps);
       check "IRQ wait resumes with the key" (read_word current 0x200 = 0x1051);
       check "IRQ wait reaches exit" (Dos_machine.exited current)) [m; resumed];
   check "IRQ snapshot resumes identically" (save m = save resumed)
@@ -110,7 +120,7 @@ let test_old_vector_chain () =
   check "host wait enables timer interrupts" (Dos_state.interrupts_enabled m);
   let m = restore (save m) in
   Dos_machine.push_key m 0x1051;
-  ignore (run m 100);
+  ignore (run m key_steps);
   check "hook chain completes once" (Dos_state.rd8 m 0x10300 = 1 && Dos_machine.exited m);
   check "hook chain returns key" (read_word m 0x200 = 0x1051)
 
@@ -174,7 +184,8 @@ let test_deferred_trap () =
     "\x2e\xfe\x06\x00\x03\xcf";
   Dos_state.wr16 m 4 0x400;
   Dos_state.wr16 m 6 0x1000;
-  Dos_machine.push_key m 0x1051;
+  (* The BIOS put the key in the ring; the wait completes at this step. *)
+  Dos_state.ring_push m 0x1051;
   ignore (Dos_machine.step_result m);
   check "deferred trap precedes caller store" (read_word m 0x200 = 0);
   check "deferred trap enters debugger" (Cpu86.dump_ip cpu = 0x400);
@@ -200,7 +211,7 @@ let test_idle_clock_reaches_irq () =
   check "timer IRQ did not unblock the caller" (not (Dos_machine.exited m) && read_word m 0x200 = 0);
   let resumed = restore (save m) in
   Dos_machine.push_key resumed 0x1051;
-  ignore (run resumed 100);
+  ignore (run resumed key_steps);
   check "timer IRQ returns to restored wait" (Dos_machine.exited resumed && read_word resumed 0x200 = 0x1051)
 
 let () =

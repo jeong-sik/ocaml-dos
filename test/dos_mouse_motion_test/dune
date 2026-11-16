@@ -1,0 +1,3 @@
+(test
+ (name dos_mouse_motion_test)
+ (libraries dosmachine))
