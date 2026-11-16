@@ -33,6 +33,7 @@ let accept_service t ~return_to = function
 
 let host_service t ~return_to v =
   match v with
+  | 0x00 -> Dos_dos.divide_overflow t; Control_transferred
   | 0x20 -> Dos_dos.terminate t; Control_transferred
   | 0x21 -> Dos_dos.service t ~return_to
   | 0x27 -> Dos_dos.int27 t; Control_transferred
@@ -79,7 +80,7 @@ let create () =
     (* 1990년대 DOS 게임은 286 이상에서 돌았고 Borland 컴파일러가 186
        명령을 낸다. 실칩 8086 검증은 Cpu86 쪽 스위트가 I8086 으로 따로
        돈다. *)
-    Cpu86.create ~model:Cpu86.I80186 ~read ~write
+    Cpu86.create ~model:Cpu86.I80286 ~read ~write
       ~port_in:(fun p -> Dos_ports.port_in ports p)
       ~port_out:(fun p v -> Dos_ports.port_out ports p v)
       ()
@@ -110,6 +111,9 @@ let create () =
         mouse_buttons = 0; mouse_visible = false;
         mouse_dx = 0; mouse_dy = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
+        mouse_presses = Dos_state.new_button_logs ();
+        mouse_releases = Dos_state.new_button_logs ();
+        mouse_range_x = None; mouse_range_y = None;
       };
     }
   in
@@ -137,13 +141,13 @@ let create () =
    몸통은 Dos_dos 에 있다 — EXEC(AH=4Bh) 자식을 같은 코드로 싣기
    때문이다. 여기선 루트 프로그램을 싣는 얼굴만 남긴다. *)
 
-let load_com t image =
+let load_com ?name ?tail t image =
   t.input_continuations <- [];
   t.console_pending <- "";
-  Dos_dos.load_com t image
+  Dos_dos.load_com ?name ?tail t image
 
-let load_exe t image =
-  Dos_dos.load_exe t image;
+let load_exe ?name ?tail t image =
+  Dos_dos.load_exe ?name ?tail t image;
   t.input_continuations <- [];
   t.console_pending <- ""
 
@@ -407,6 +411,15 @@ let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 let speaker_on t = Dos_ports.speaker_on t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
+
+(* [frame_rgb] 가 읽는 입력을 하나씩 섞는다. [frame_rgb] 가 새 입력을
+   읽게 되면 여기에도 넣는다. *)
+let frame_digest t =
+  let mix h v = Hashtbl.hash (h, v) in
+  let h = mix (Dos_video.screen_digest t.video) (Dos_video.mode t.video) in
+  let h = mix h (Dos_video.cga_color_select t.video) in
+  let h = Array.fold_left mix h (Dos_video.attr_palette t.video) in
+  Array.fold_left (fun h (r, g, b) -> mix (mix (mix h r) g) b) h (Dos_ports.palette t.ports)
 let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
@@ -421,6 +434,11 @@ let attach_mouse t = t.mouse.mouse_present <- true
 
 let set_mouse t ~x ~y ~buttons =
   let m = t.mouse in
+  (* 하네스는 놓을 자리를 준다. AX=07h·08h 범위 밖이면 범위 끝에 놓고,
+     이동량과 이동 이벤트도 그 자리로 센다 — 범위 밖 자리를 거듭 줘도
+     움직이지 않은 마우스가 이벤트를 내지 않는다. *)
+  let x = Dos_state.clamp_to m.mouse_range_x x
+  and y = Dos_state.clamp_to m.mouse_range_y y in
   let moved = x <> m.mouse_x || y <> m.mouse_y in
   m.mouse_dx <- m.mouse_dx + (x - m.mouse_x);
   m.mouse_dy <- m.mouse_dy + (y - m.mouse_y);
@@ -428,6 +446,21 @@ let set_mouse t ~x ~y ~buttons =
   m.mouse_y <- y;
   let old_buttons = m.mouse_buttons in
   m.mouse_buttons <- buttons;
+  for i = 0 to Dos_state.mouse_button_count - 1 do
+    let bit = 1 lsl i in
+    let log =
+      match old_buttons land bit <> 0, buttons land bit <> 0 with
+      | false, true -> Some m.mouse_presses.(i)
+      | true, false -> Some m.mouse_releases.(i)
+      | false, false | true, true -> None
+    in
+    Option.iter
+      (fun (l : Dos_state.button_log) ->
+        l.times <- l.times + 1;
+        l.last_x <- m.mouse_x;
+        l.last_y <- m.mouse_y)
+      log
+  done;
   (* AX=0x0C 등록에 닿은 이벤트를 핸들러에 far call 로 건넨다. 비트 번호는
      실기 마우스 드라이버와 같다(Ralf Brown rb-5968): 0x01 이동,
      0x02/0x04 왼쪽 누름/뗌, 0x08/0x10 오른쪽 누름/뗌, 0x20/0x40 가운데
