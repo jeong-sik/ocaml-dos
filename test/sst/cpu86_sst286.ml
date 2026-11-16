@@ -18,8 +18,8 @@ let baseline_path =
   let exe_dir = Filename.dirname Sys.argv.(0) in
   let candidates =
     [ Filename.concat exe_dir "sst80286-baseline.txt";
-      Filename.concat exe_dir "../../../test/sst80286-baseline.txt";
-      "test/sst80286-baseline.txt" ]
+      Filename.concat exe_dir "../../../../test/sst/sst80286-baseline.txt";
+      "test/sst/sst80286-baseline.txt" ]
   in
   match List.find_opt Sys.file_exists candidates with Some p -> p | None -> List.hd candidates
 

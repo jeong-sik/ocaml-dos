@@ -31,13 +31,13 @@
 
 남은 4,827 은 나눗셈이 0 나눗셈이나 몫 넘침으로 트랩할 때 인터럽트
 프레임에 밀리는 플래그다. 나눗셈이 성공하는 경로는 전부 일치한다.
-`test/sst8086-baseline.txt` 가 이 수를 붙잡고 있어서, 넘으면 테스트가
+`test/cpu86_vtest/sst8086-baseline.txt` 가 이 수를 붙잡고 있어서, 넘으면 테스트가
 깨진다.
 
 ```sh
 # 데이터셋을 /tmp/sst8086/v1 에 풀어 두고
 ALL=$(ls /tmp/sst8086/v1/*.json.gz | xargs -n1 basename | sed 's/\.json\.gz$//' | paste -sd, -)
-SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
+SST_FILES="$ALL" dune exec --root . test/cpu86_vtest/cpu86_vtest.exe
 ```
 
 데이터셋이 없으면 이 스위트는 건너뛴다(CI 가 그렇다).
@@ -45,14 +45,14 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
 `I80286` 은 Harris N80C286-12 에서 뽑은
 [SingleStepTests/80286](https://github.com/SingleStepTests/80286) 실모드
 327 파일, 147만 8천 케이스로 잰다. 형식은 JSON 이 아니라
-[MOO](https://github.com/dbalsom/moo) 라 `test/moo.ml` 이 읽는다. fail 은
-2 이고 사유는 `test/sst80286-baseline.txt` 에 있다: IVT 바이트가 빠진
+[MOO](https://github.com/dbalsom/moo) 라 `test/sst/moo.ml` 이 읽는다. fail 은
+2 이고 사유는 `test/sst/sst80286-baseline.txt` 에 있다: IVT 바이트가 빠진
 테스트 하나, SP=BP=FFFF 인 ENTER 하나다.
 
 ```sh
 # 데이터셋을 /tmp/sst80286/v1_real_mode 에 받아 두고(약 310MB)
 ALL=$(ls /tmp/sst80286/v1_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.MOO\.gz$//' | paste -sd, -)
-SST_FILES="$ALL" dune exec --root . test/cpu86_sst286.exe
+SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst286.exe
 ```
 
 `I80386` 은 Intel 386EX 에서 뽑은
@@ -69,7 +69,7 @@ fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문�
 ```sh
 # 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)
 ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67)*0F' | sed 's/\.MOO\.gz$//' | paste -sd, -)
-SST_FILES="$ALL" dune exec --root . test/cpu86_sst386.exe
+SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
 ```
 
 ### 어느 칩을 흉내내는가
@@ -239,7 +239,7 @@ dune runtest --force
 실게임 통합 검증은 게임 파일이 있을 때만 돈다.
 
 ```sh
-ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_test.exe
+ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_test/zzt_run_test.exe
 ```
 
 ## 게임 돌리기
