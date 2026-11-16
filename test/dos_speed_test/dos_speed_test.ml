@@ -58,7 +58,7 @@ let test_speed_of_mhz () =
 let ports speed =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  Dos_ports.create ~speed ~mem ~video
+  Dos_ports.create ~speed ~mpu401:false ~mem ~video
 
 let pit_count t =
   let lo = Dos_ports.port_in t 0x40 in
@@ -94,41 +94,36 @@ let test_ports () =
   Dos_ports.set_now f 200_000;
   check "fast vsync over by 200000 cycles" (not (vsync_bit f))
 
-(* OPL 타이머 1: 레지스터 2 = FFh 면 80µs 스텝 256 개. PC 는 382×256 =
-   97792 사이클, 10 배 기계는 955×256 = 244480 사이클 뒤에 끝난다. *)
+(* OPL 타이머는 레지스터 값에서 256 까지 센다. 값 00h 는 칸 256 개다.
+   타이머 1 은 80µs 칸: PC 는 382×256 = 97792 사이클, 10 배 기계는
+   955×256 = 244480 사이클에 넘친다. 타이머 2 는 320µs 칸: PC 는
+   1527×256 = 390912, 10 배 기계는 3817×256 = 977152 사이클이다. *)
+let opl_t1_status = 0xC0                  (* IRQ + 타이머 1 *)
+let opl_t2_status = 0xA0                  (* IRQ + 타이머 2 *)
+let opl_start_t1 = 0x21                   (* 타이머 2 마스크, 타이머 1 시작 *)
+let opl_start_t2 = 0x42                   (* 타이머 1 마스크, 타이머 2 시작 *)
+
 let test_opl () =
-  let arm t =
+  let arm t ~count_reg ~start =
     Dos_ports.set_now t 0;
     List.iter
       (fun (reg, v) -> Dos_ports.port_out t 0x388 reg; Dos_ports.port_out t 0x389 v)
-      [ (0x04, 0x60); (0x04, 0x80); (0x02, 0xFF); (0x04, 0x21) ]
+      [ (0x04, 0x60); (0x04, 0x80); (count_reg, 0x00); (0x04, start) ]
   in
-  let expired t = Dos_ports.port_in t 0x388 land 0xC0 = 0xC0 in
-  let p = ports pc and f = ports fast in
-  arm p;
-  arm f;
-  Dos_ports.set_now p 200_000;
-  Dos_ports.set_now f 200_000;
-  check "PC OPL timer 1 done by 200000 cycles" (expired p);
-  check "fast OPL timer 1 still running at 200000 cycles" (not (expired f));
-  Dos_ports.set_now f 250_000;
-  check "fast OPL timer 1 done by 250000 cycles" (expired f);
-  (* 타이머 2: 320µs 스텝 256 개. PC 는 1527×256 = 390912 사이클, 10 배
-     기계는 3817×256 = 977152 사이클. *)
-  let arm2 t =
-    Dos_ports.set_now t 0;
-    List.iter
-      (fun (reg, v) -> Dos_ports.port_out t 0x388 reg; Dos_ports.port_out t 0x389 v)
-      [ (0x04, 0x60); (0x04, 0x80); (0x03, 0xFF); (0x04, 0x22) ]
+  let raised t ~now bits =
+    Dos_ports.set_now t now;
+    Dos_ports.port_in t 0x388 land bits = bits
   in
-  arm2 p;
-  arm2 f;
-  Dos_ports.set_now p 500_000;
-  Dos_ports.set_now f 500_000;
-  check "PC OPL timer 2 done by 500000 cycles" (expired p);
-  check "fast OPL timer 2 still running at 500000 cycles" (not (expired f));
-  Dos_ports.set_now f 1_000_000;
-  check "fast OPL timer 2 done by 1000000 cycles" (expired f)
+  List.iter
+    (fun (name, speed, count_reg, start, bits, due) ->
+      let t = ports speed in
+      arm t ~count_reg ~start;
+      check (name ^ " quiet one cycle before") (not (raised t ~now:(due - 1) bits));
+      check (name ^ " raised on time") (raised t ~now:due bits))
+    [ ("PC OPL timer 1", pc, 0x02, opl_start_t1, opl_t1_status, 382 * 256);
+      ("fast OPL timer 1", fast, 0x02, opl_start_t1, opl_t1_status, 955 * 256);
+      ("PC OPL timer 2", pc, 0x03, opl_start_t2, opl_t2_status, 1527 * 256);
+      ("fast OPL timer 2", fast, 0x03, opl_start_t2, opl_t2_status, 3817 * 256) ]
 
 (* ---------- 기계 ---------- *)
 
@@ -147,6 +142,23 @@ let run_fast_machine () =
   in
   check "busy loop ran to the cycle budget" (report.Dos_machine.stop_reason = Dos_machine.Stop_requested);
   m
+
+(* PIT 채널 2 도 PIT 틱으로 센다. 모드 0 에 N 을 쓰면 OUT(포트 0x61 bit5)이
+   N+1 틱 뒤에 높아진다. 10 배 기계에서는 그 틱이 10 배 사이클이다. *)
+let pit2_mode0 = 0xB0                    (* 채널 2, 하위·상위 바이트, 모드 0 *)
+let pit2_count = 0x800
+
+let test_pit2 () =
+  let t = ports fast in
+  Dos_ports.set_now t 0;
+  Dos_ports.port_out t 0x61 0x01;        (* GATE 2 열기 *)
+  Dos_ports.port_out t 0x43 pit2_mode0;
+  Dos_ports.port_out t 0x42 (pit2_count land 0xFF);
+  Dos_ports.port_out t 0x42 (pit2_count lsr 8);
+  let out2 now = Dos_ports.set_now t now; Dos_ports.port_in t 0x61 land 0x20 <> 0 in
+  let due = (pit2_count + 1) * fast_factor in
+  check "fast PIT channel 2 low one cycle before" (not (out2 (due - 1)));
+  check "fast PIT channel 2 high after N+1 ticks" (out2 due)
 
 let test_machine m =
   (* IRQ0 은 655360 사이클마다: 1200 만 사이클이면 18 번. 틱을 세는 기준은
@@ -174,6 +186,7 @@ let () =
   test_speed_of_mhz ();
   test_ports ();
   test_opl ();
+  test_pit2 ();
   let m = run_fast_machine () in
   test_machine m;
   test_snapshot m;
