@@ -9,7 +9,7 @@ open Cpu86_decode
 let bcd_threshold t ~old_af ~nib =
   match t.model with
   | I8086 | I80186 -> if old_af && nib then 0x9F else 0x99
-  | I80286 -> 0x99
+  | I80286 | I80386 -> 0x99
 
 (* BCD 조정 4종(ZZT/TP 런타임 실측 요구: AAA). 두 번째 보정의 경계값은
    8086 에서 Intel 문서의 99H 가 아니라 실칩 관측에서 뽑았다: AF 가 이미
@@ -57,7 +57,7 @@ let das t =
     set_reg8 t 0 (reg8 t 0 - 0x60);
     t.cf <- true
   end else
-    t.cf <- (match t.model with I8086 | I80186 -> false | I80286 -> borrow);
+    t.cf <- (match t.model with I8086 | I80186 -> false | I80286 | I80386 -> borrow);
   let r = reg8 t 0 in
   t.zf <- r = 0; t.sf <- r land 0x80 <> 0; t.pf <- parity_even r;
   4
@@ -71,7 +71,7 @@ let aaa t =
      | I8086 | I80186 ->
        set_reg8 t 0 (reg8 t 0 + 6);
        set_reg8 t 4 (reg8 t 4 + 1)
-     | I80286 -> set_reg16 t 0 (reg16 t 0 + 0x106));
+     | I80286 | I80386 -> set_reg16 t 0 (reg16 t 0 + 0x106));
     t.af <- true; t.cf <- true
   end else begin
     t.af <- false; t.cf <- false
@@ -85,7 +85,7 @@ let aas t =
      | I8086 | I80186 ->
        set_reg8 t 0 (reg8 t 0 - 6);
        set_reg8 t 4 (reg8 t 4 - 1)
-     | I80286 -> set_reg16 t 0 (reg16 t 0 - 0x106));
+     | I80286 | I80386 -> set_reg16 t 0 (reg16 t 0 - 0x106));
     t.af <- true; t.cf <- true
   end else begin
     t.af <- false; t.cf <- false
@@ -105,7 +105,7 @@ let aam t ctx =
        AL 을 한 비트 오른쪽으로 민 값으로 세운다. SingleStepTests/
        80286 D4 의 aam 0 열한 건이 모두 이 규칙을 따른다(FFh → PF=0,
        97h → PF=1). 표본이 적어 마이크로코드의 이유는 모른다. *)
-    let r = match t.model with I8086 | I80186 -> 0 | I80286 -> al lsr 1 in
+    let r = match t.model with I8086 | I80186 -> 0 | I80286 | I80386 -> al lsr 1 in
     t.zf <- r = 0; t.sf <- r land 0x80 <> 0; t.pf <- parity_even r;
     t.cf <- false; t.of_ <- false; t.af <- false;
     divide_error t ctx
