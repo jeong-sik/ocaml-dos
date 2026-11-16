@@ -1,0 +1,3 @@
+(test
+ (name dos_mpu401_test)
+ (libraries dosmachine))
