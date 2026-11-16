@@ -222,6 +222,12 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   를 기다리는 지연 루프가 끝난다. 읽기-되돌림 명령(0x43, bit 7-6 = 11)
   은 채널 0·2 의 카운트와 상태 바이트(OUT, NULL COUNT, 쓴 그대로의
   제어 워드)를 잡는다
+- **Sound Blaster 2.0**(켤 때만, `--sound-blaster`): 220h 의 DSP 2.01 —
+  리셋 뒤 AAh, E1h 버전 2.01, 시간 상수(40h)에 맞춰 DMA 채널 1 에서
+  블록(14h·1Ch·48h·90h·91h)을 한 바이트씩 가져가고 블록 끝·F2h·80h 에
+  IRQ 7 을 올린다. 228h·229h 는 OPL2 다. 소리는 내지 않는다. ADPCM·DMA
+  입력·MIDI 는 없어서 그런 전송을 고른 게임은 IRQ 를 기다리다 멈춘다 —
+  그래서 기본은 카드가 없는 기계다
 - **화면**: 아래 표의 모든 모드. RGB·PPM 으로 내보내고, 코드 페이지 437
   을 UTF-8 로 옮긴 텍스트도 준다
 
@@ -409,6 +415,8 @@ dune exec --root . bin/dosboot.exe -- --com KOEI.COM --mount ... --steps 0 \
 
 진단은 `--trace N`(N 스텝마다 CS:IP), `--int-trace`(INT 명령),
 `--dump ADDR,LEN`(메모리), `--save NAME=PATH`(게스트가 쓴 파일 꺼내기).
+`--sound-blaster` 는 카드를 꽂는다 — 게임 설정에서 Sound Blaster
+(220h, IRQ 7, DMA 1)를 고를 때 쓴다.
 
 `--unserved` 는 이 기계가 받지 못한 INT 호출을 끝에 stderr 로 센다.
 `no-function` 은 호스트 서비스(21h·10h·15h·16h·1Ah·2Fh·33h)에 그 기능이 없을 때,
@@ -592,6 +600,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, 스피커. PIC·DMA·키보드 포트는 아래 셋에 넘긴다 |
 | `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
 | `Dos_dma` | 8237 DMA 컨트롤러 — 장치가 메모리의 어느 바이트를 언제 가져가는가 |
+| `Dos_sb` | Sound Blaster 2.0 DSP — 포트 답, 블록 시간, IRQ(소리 없음) |
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가, 컨트롤러·키보드 명령의 답 |
 | `Dos_keymap` | BIOS 키 워드 ↔ 키·수식키 표 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러, 시퀀서, CRTC |

@@ -163,7 +163,7 @@ let () =
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
   let scenario = ref [] and digests = ref [] and args = ref "" and cpu_mhz = ref None
-  and mpu401 = ref false in
+  and mpu401 = ref false and sound_blaster = ref false in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -218,6 +218,8 @@ let () =
       ("--mouse", Arg.Set_string mouse, "X,Y,BUTTONS  마우스를 붙이고 위치를 준다");
       ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
        "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다");
+      ("--sound-blaster", Arg.Set sound_blaster,
+       "  Sound Blaster 2.0 을 꽂는다(220h, IRQ 7, DMA 1, 소리 없음)");
       ("--clock", Arg.Set_string clock,
        "Y-M-D,H:M:S  게스트가 보는 기준시각 (기본 1990-1-1,8:0:0)");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
@@ -252,7 +254,9 @@ let () =
         prerr_endline ("bad --cpu-mhz: " ^ e);
         exit 2)
   in
-  let m = Dos_machine.create ?model:!cpu ~speed ~mpu401:!mpu401 () in
+  let m =
+    Dos_machine.create ?model:!cpu ~speed ~mpu401:!mpu401 ~sound_blaster:!sound_blaster ()
+  in
   let record_unserved, print_unserved = unserved_tally () in
   if !unserved then Dos_machine.on_unserved m record_unserved;
   (match String.split_on_char ',' !clock with
