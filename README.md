@@ -57,8 +57,9 @@ SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst286.exe
 
 `I80386` 은 Intel 386EX 에서 뽑은
 [SingleStepTests/80386](https://github.com/SingleStepTests/80386) 실모드로
-잰다. 0Fh 확장은 아직 없어 0Fh 로 시작하지 않는 780 파일, 149만 8,600
-케이스를 돌린다. 66h·67h 가 없는 325 파일, 66h 194 파일, 67h 261 파일이다.
+잰다. 실모드 941 파일, 175만 8,700 케이스를 모두 돌린다. 0Fh 로 시작하지
+않는 780 파일(66h·67h 가 없는 325, 66h 194, 67h 261)과 0Fh 161 파일(66h
+없는 97, 660F·67660F 64)이다.
 fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문자열이
 칩이 이미 가져온 자기 코드를 덮는 경우라, 프리페치 큐가 없는 이 모델로는
 맞출 수 없다(#159). 포트 22h·23h 는 CPU 가 아니라
@@ -68,7 +69,7 @@ fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문�
 
 ```sh
 # 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)
-ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67)*0F' | sed 's/\.MOO\.gz$//' | paste -sd, -)
+ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.MOO\.gz$//' | paste -sd, -)
 SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
 ```
 
@@ -100,7 +101,7 @@ SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
 | LEA·LES·LDS·BOUND·CALL/JMP FAR 의 레지스터 피연산자, MOV CS, 8C·8E 의 reg 4-7, 8F·C6·C7 의 reg≠0 | 별칭으로 돌거나 Unsupported | INT 6 |
 | BOUND 범위 밖 | INT 5 가 다음 명령으로 돌아간다 | BOUND 자신으로 돌아간다 |
 
-기계(`Dos_machine`)는 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
+기계(`Dos_machine`)는 기본으로 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
 요구하고 위 자리로 확인한다. 루카스아츠의 Monkey Island 2 와 Day of the
 Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으로 돈다.
 
@@ -141,8 +142,9 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 | 66h RET | FFFFh 위 EIP 는 INT 13 이다 |
 | 67h SIB 인덱스 없음(4) | 배율이 베이스에 곱해진다 |
 
-기계는 아직 `I80286` 으로 돈다. 0Fh 확장(RFC 0001 3 단계)과 스냅숏·
-`dosboot --cpu 386`(4 단계)이 있어야 386 을 요구하는 게임이 돈다.
+`dosboot --cpu 386` 이면 기계가 `I80386` 으로 돈다. 32 비트 레지스터·FS·GS·
+0Fh 명령을 쓰는 게임이 돌고, 스냅숏도 386 상태를 담는다. 보호 모드는 아직
+없다(RFC 0005).
 
 바이트 IDIV 는 286·386 모두 몫이 음수이고 |피젯수| >> 7 이 |젯수| + 80h
 이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도 INT 0 이 아니다.
