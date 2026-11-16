@@ -20,17 +20,33 @@ val resume_input : Dos_state.t -> Dos_state.dos_input_request -> Dos_state.servi
 val terminate : Dos_state.t -> unit
 (** INT 20h — RET 로 돌아온 프로그램의 종료. *)
 
+val divide_overflow : Dos_state.t -> unit
+(** INT 0 — DOS 의 기본 처리. 콘솔에 "Divide overflow" 를 쓰고 프로그램을
+    종료 코드 0 으로 끝낸다(MS-DOS 2.0 CTRLC.ASM 의 DIVOV). *)
+
 val init_memory : Dos_state.t -> psp_seg:int -> unit
 (** 적재 직후의 메모리 소유 상태. 실기처럼 프로그램이 남은 전부를
     가진다 — AH=4Ah 로 줄여야 AH=48h 이 성공한다. *)
 
-val load_com : ?psp_seg:int -> ?child:bool -> Dos_state.t -> string -> unit
-(** COM 이미지를 기계에 싣는다. 루트는 세그 0x1000, EXEC 자식은
-    [psp_seg] 자리에 64KB 블록 한 장을 얹는다. *)
+val load_com : ?name:string -> ?tail:string -> Dos_state.t -> string -> unit
+(** COM 이미지를 루트 프로그램으로 PSP 세그 0x1000 에 싣는다. EXEC 자식은
+    AH=4Bh 가 싣는다.
 
-val load_exe : ?psp_seg:int -> ?child:bool -> Dos_state.t -> string -> unit
-(** MZ EXE 이미지를 싣는다. [psp_seg] 가 없으면 memtop 아래 루트
-    배치, 있으면(자식) 그 자리에 남은 메모리를 통째로 블록으로 받는다. *)
+    [name] 은 C: 루트 디렉터리의 파일 이름(예: [GAME.COM])이다. 주면 환경
+    블록 꼬리에 워드 1 과 [C:\GAME.COM] 을 쓴다 — C 런타임의 argv[0] 이
+    이것이다. 없으면 꼬리를 쓰지 않는다. 0x500 의 환경 자리(256 바이트)를
+    넘는 이름은 [Invalid_argument].
+
+    [tail] 은 명령 이름 바로 뒤 글자들이다("GAME a" 면 [" a"]). PSP:80h 에
+    길이, 81h 부터 글자와 0Dh 를 쓴다. 없으면 빈 꼬리다. 126 바이트를
+    넘거나 CR 이 들어 있으면 아무것도 싣지 않고 [Invalid_argument]. *)
+
+val load_exe : ?name:string -> ?tail:string -> Dos_state.t -> string -> unit
+(** MZ EXE 이미지를 memtop 아래 루트 자리에 싣는다. 적재 모듈은 헤더의
+    페이지 수가 정한다(MS-DOS 4.0 EXEC.ASM) — 파일 뒤에 붙은 데이터는
+    싣지 않는다. 헤더가 파일 안의 모듈을 말하지 않으면 [Invalid_argument].
+    [name]·[tail] 은 [load_com] 과 같다. EXEC 자식은 AH=4Bh 가 같은 규칙으로
+    싣고, 환경을 따로 받는다. *)
 
 val int27 : Dos_state.t -> unit
 (** INT 27h — 옛 방식 상주 종료. DX 오프셋까지 자기 블록을 남긴다. *)
