@@ -10,14 +10,20 @@
    CPU 사이클 4 다. 분주비 65536 이면 262144 사이클 = 18.2Hz. *)
 let cpu_cycles_per_pit_tick = 4
 
-(* 포트 0x61 bit4(리프레시)가 뒤집히는 주기. 실기 15.09kHz 는 CPU
-   사이클로 약 158. 지연 루프가 이 비트를 세며 시간을 잰다. *)
-let refresh_toggle_cycles = 158
+(* 포트 0x61 bit4(리프레시)가 뒤집히는 주기. AT 이후 기계에서 이 비트는
+   PIT 채널 1 의 리프레시 요청마다 뒤집힌다. 채널 1 의 분주비는 18 이라
+   PIT 18 틱 = 15.0857µs(216 / 14.31818MHz) 마다, CPU 사이클로 18 × 4 = 72
+   다(PCTIM003 7.4·7.37 절). 지연 루프가 이 비트를 세며 시간을 잰다. *)
+let refresh_toggle_cycles = 72
 
 (* YM3812(OPL2) 타이머 한 스텝 — T1 은 80µs, T2 는 320µs 를 CPU
    사이클(4.77MHz)로 환산한 값. *)
 let opl_t1_step = 382
 let opl_t2_step = 1527
+
+(* 포트 201h: 버튼 넷이 떼어지고(bit4~7 = 1) 축 넷이 방전된(bit0~3 = 0)
+   상태. *)
+let game_port_released = 0xF0
 
 let crtc_regs = 25
 let dac_entries = 256
@@ -205,8 +211,10 @@ let port_in t p =
   | 0x70 -> t.cmos_index
   | 0x71 -> 0x00
   (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
-     통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측). *)
-  | 0x201 -> 0x00
+     통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측).
+     버튼 비트(4~7)는 0 이 눌림이라 1 로 둔다(86Box joystick_standard.c
+     는 0xF0 에서 시작해 누른 버튼의 비트를 지운다). *)
+  | 0x201 -> game_port_released
   | 0x3C6 -> t.dac_mask
   | 0x3C7 -> if t.dac_phase = 0 then 0x00 else 0x03
   | 0x3C8 -> t.dac_write_index
