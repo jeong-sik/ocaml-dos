@@ -59,6 +59,60 @@ let with_byte s i f =
   Bytes.set b i (f s.[i]);
   Bytes.to_string b
 
+(* A 386 machine: after POPF sets IOPL 3, each turn adds 10000h to EAX and
+   puts EAX >> 12 in GS and EAX >> 16 in FS. A snapshot that dropped or
+   swapped the upper halves, FS, GS or IOPL would resume a different machine. *)
+let regs386_com =
+  "\x9C\x58\x0D\x00\x30\x50\x9D"            (* pushf; pop ax; or ax,3000h; push ax; popf *)
+  ^ "\x66\xB8\x01\x00\x00\x00"              (* mov eax,1 *)
+  ^ "\x66\xBB\x00\x00\x01\x00"              (* mov ebx,10000h *)
+  ^ "\x66\x01\xD8"                          (* loop: add eax,ebx *)
+  ^ "\x66\x89\xC1\x66\xC1\xE9\x0C\x8E\xE9"  (* mov ecx,eax; shr ecx,12; mov gs,cx *)
+  ^ "\x66\xC1\xE9\x04\x8E\xE1"              (* shr ecx,4; mov fs,cx *)
+  ^ "\xEB\xEC"                              (* jmp loop *)
+
+let iopl_3 = 0x3000
+
+let boot_386 () =
+  let t = Dos_machine.create ~model:Cpu86.I80386 () in
+  Dos_machine.load_com t regs386_com;
+  t
+
+let () =
+  let saved = round_trip ~name:"386" ~boot:boot_386 ~n:1_001 ~m:2_000 in
+  let cpu = (restore_exn saved).Dos_state.cpu in
+  check "386: the restored machine is a 386" (Cpu86.model cpu = Cpu86.I80386);
+  check "386: EAX keeps its upper half" (Cpu86.reg32 cpu 0 lsr 16 > 0);
+  check "386: FS and GS come back apart" (Cpu86.seg cpu 4 > 0 && Cpu86.seg cpu 5 <> Cpu86.seg cpu 4);
+  check "386: IOPL comes back" (Cpu86.flags cpu land iopl_3 = iopl_3);
+  let default = (restore_exn (save_exn (Dos_machine.create ()))).Dos_state.cpu in
+  check "a default machine restores as a 286" (Cpu86.model default = Cpu86.I80286)
+
+(* The CPU refuses a saved state of the other kind before writing anything. *)
+let () =
+  let cpu model =
+    Cpu86.create ~model ~read:(fun _ -> 0) ~write:(fun _ _ -> ())
+      ~port_in:(fun _ -> 0) ~port_out:(fun _ _ -> ()) ()
+  in
+  let c386 = cpu Cpu86.I80386 and c286 = cpu Cpu86.I80286 in
+  Cpu86.set_reg32 c386 0 0x12345678;
+  Cpu86.set_seg c386 4 0x1111;
+  let s386 = Cpu86.save_state c386 and s286 = Cpu86.save_state c286 in
+  let refused c s =
+    match Cpu86.load_state c s with () -> false | exception Invalid_argument _ -> true
+  in
+  check "386 state into a 286 is refused" (refused c286 s386);
+  check "286 state into a 386 is refused" (refused c386 s286);
+  check "the refused load left the 386 as it was" (Cpu86.reg32 c386 0 = 0x12345678);
+  (match s386.Cpu86.saved_386 with
+   | Some x ->
+     check "seven upper halves are refused"
+       (refused c386 { s386 with saved_386 = Some { x with saved_regs_hi = Array.make 7 0 } })
+   | None -> check "a 386 saves its upper halves" false);
+  let c = cpu Cpu86.I80386 in
+  Cpu86.load_state c s386;
+  check "386 state loads into a 386" (Cpu86.reg32 c 0 = 0x12345678 && Cpu86.seg c 4 = 0x1111)
+
 (* Creates A.TXT, dups the handle, then writes one byte through each handle
    in turn, forever. After dup the two numbers share one record, so a
    snapshot that copied the record per number would split the position and
@@ -176,7 +230,9 @@ let () =
    FCB and reads one record, opens a handle, allocates two EMS pages and
    leaves both mapped with a byte written through the frame, latches PIT
    counter 0, then CLI and spins, so the next timer tick stays pending.
-   The host attaches the mouse at (123, 45) with the left button down.
+   The host attaches the mouse at (123, 45) with the left button down; the
+   press is logged at (120, 40), its 8x8 cell in mode 3. Setting mode 12h
+   then moves the cursor to the middle of 640x480 and keeps the log.
 
    Its round trip also compares the restored fields to the original's one by
    one, so a reader that drops or swaps a field fails by name even where the
@@ -258,7 +314,6 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
                       && List.map fst fa.parent_handles = List.map fst fb.parent_handles))
     a.exec_frames b.exec_frames;
   c "last child code" (a.last_child_code = b.last_child_code);
-  c "pending IRQ0" (a.pending_irq0 = b.pending_irq0);
   c "last tick" (a.last_tick = b.last_tick);
   c "EMS mapping" (a.ems_mapped = b.ems_mapped);
   c "EMS pages" (sorted_bindings a.ems_pages = sorted_bindings b.ems_pages);
@@ -286,7 +341,7 @@ let () =
   let pre what cond = check ("rich machine has " ^ what) cond in
   pre "one open EXEC frame" (List.length a.exec_frames = 1);
   pre "last child code 42h" (a.last_child_code = 0x42);
-  pre "a pending timer tick" a.pending_irq0;
+  pre "a pending timer tick" (Dos_pic.requested (Dos_ports.pic a.ports) Dos_pic.Timer);
   pre "mode 12h" (Dos_video.mode a.video = 0x12);
   pre "a planar byte" (Bytes.get (Dos_video.planes a.video).(0) 0 = '\x5a');
   pre "DAC entry 5" ((Dos_ports.palette a.ports).(5) = (10, 20, 30));
@@ -301,8 +356,9 @@ let () =
   pre "an FCB one record in" (List.map (fun (_, (_, p)) -> p) (sorted_bindings a.fcbs) = [ 128 ]);
   pre "two names left in the find queue" (List.length a.find_queue = 2);
   pre "handle 5 open" (Hashtbl.mem a.handles 5);
-  pre "the mouse at (123, 45), button 1"
-    (a.mouse.mouse_x = 123 && a.mouse.mouse_y = 45 && a.mouse.mouse_buttons = 1);
+  pre "the mouse at (320, 240) after mode 12h, button 1, press logged at (120, 40)"
+    (a.mouse.mouse_x = 320 && a.mouse.mouse_y = 240 && a.mouse.mouse_buttons = 1
+     && a.mouse.mouse_presses.(0).last_x = 120 && a.mouse.mouse_presses.(0).last_y = 40);
   let saved = save_exn a in
   let b = restore_exn saved in
   same_fields "rich" a b;
@@ -380,6 +436,26 @@ let () =
   check "EMS: 254 handles and the OS handle" (Hashtbl.length t.Dos_state.ems_pages = 255);
   ignore (restore_exn (save_exn t))
 
+(* The payload ends with the two mouse ranges, each a low and a high
+   word of eight bytes. A low end above the high end is refused at restore,
+   even with the checksum fixed. *)
+let () =
+  let t = Dos_machine.create () in
+  let saved = save_exn t in
+  let header_len = magic_len + 8 + 32 + 16 in
+  let b = Bytes.of_string saved in
+  let x_low_at = Bytes.length b - (4 * 8) in
+  check "the crafted bytes see the x range 0..639"
+    (Bytes.get_int64_be b x_low_at = 0L && Bytes.get_int64_be b (x_low_at + 8) = 639L);
+  Bytes.set_int64_be b x_low_at 640L;
+  let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
+  Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
+  match Dos_snapshot.restore (Bytes.to_string b) with
+  | Error (Dos_snapshot.Corrupt m) ->
+    check "a mouse range with its ends crossed is refused" (m = "mouse range low above high")
+  | Ok _ -> check "a mouse range with its ends crossed is refused at restore" false
+  | Error e -> check ("crossed mouse range: " ^ Dos_snapshot.error_to_string e) false
+
 (* Inconsistent EMS state: refused by save, and by restore when the bytes
    are crafted past save. *)
 let () =
@@ -408,21 +484,36 @@ let () =
   pages.(0) <- Bytes.make 3 '\000';
   refused_at_save "an EMS page that is not 16KB" t;
   pages.(0) <- page;
-  (* The payload ends with the frame mapping and the mouse: 66 bytes up to
-     its callback registration, then three ints for each of six button logs,
-     then two ranges of one byte each while unset. The mapping is a count,
-     then per frame page a shown flag byte and, when shown, the handle and
-     the page. Pages 2 and 3 are empty. Point page 1 at handle 9, which does
+  (* The payload ends with the frame mapping and the mouse: 105 bytes up to
+     its callback registration (the default cursors take a flag, two kinds
+     and two text masks; the motion counters are followed by five motion
+     settings and two carries), then three ints for each of six button
+     logs, then two ranges of two ints each. The mapping is a count, then
+     per frame page a shown flag byte and, when shown, the handle and the
+     page. Pages 2 and 3 are empty. Point page 1 at handle 9, which does
      not exist, and fix the checksum so only the consistency check can
      refuse. *)
-  check "the crafted bytes assume no mouse range"
-    (t.mouse.mouse_range_x = None && t.mouse.mouse_range_y = None);
+  check "the crafted bytes assume the default cursors"
+    (t.mouse.mouse_graphics_cursor = Dos_state.Default_arrow
+     && t.mouse.mouse_text_cursor = Dos_state.default_text_cursor);
   let header_len = magic_len + 8 + 32 + 16 in
   let button_logs = 2 * Dos_state.mouse_button_count in
-  let mouse_len = 1 + (3 * 8) + 1 + (5 * 8) + (button_logs * 3 * 8) + 2 in
+  let cursors_len = 8 + 8 + 8 + (2 * 8) in
+  let motion_len = 7 * 8 in
+  let mouse_len =
+    1 + (3 * 8) + cursors_len + (5 * 8) + motion_len + (button_logs * 3 * 8) + (2 * 2 * 8)
+  in
   let empty_len = 1 and shown_len = 1 + (2 * 8) in
   let at = String.length saved - mouse_len - (2 * empty_len) - shown_len + 1 in
   let b = Bytes.of_string saved in
+  (match mapped.(1) with
+   | Some (h, page) ->
+     let shown = Bytes.get_uint8 b (at - 1) = 1 in
+     let handle = Int64.to_int (Bytes.get_int64_be b at) in
+     let page' = Int64.to_int (Bytes.get_int64_be b (at + 8)) in
+     check (Printf.sprintf "the crafted offset holds frame page 1 (shown, %d, %d)" h page)
+       (shown && handle = h && page' = page)
+   | None -> check "the rich machine shows frame page 1" false);
   Bytes.set_int64_be b at 9L;
   let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
   Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;

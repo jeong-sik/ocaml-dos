@@ -742,59 +742,101 @@ let parse_fcb_service t =
   Cpu86.set_reg8 cpu 0 al;
   Cpu86.set_reg16 cpu 6 next
 
-let fcb_service t ah =
-  let cpu = t.cpu in
-  let fcb = seg_off t 3 2 in
-  match ah with
-  | 0x0F ->
-    let name = String.uppercase_ascii (fcb_name t fcb) in
-    (match Hashtbl.find_opt t.host_files name with
-     | Some data ->
-       Hashtbl.replace t.fcbs fcb (data, 0);
-       wr16 t (fcb + 0x0E) 128;
-       wr16 t (fcb + 0x10) (Bytes.length data land 0xffff);
-       wr16 t (fcb + 0x12) ((Bytes.length data lsr 16) land 0xffff);
-       for i = 0 to 3 do wr8 t (fcb + 0x20 + i) 0 done;
-       Cpu86.set_reg8 cpu 0 0
-     | None -> Cpu86.set_reg8 cpu 0 0xFF)
-  | 0x10 -> Hashtbl.remove t.fcbs fcb; Cpu86.set_reg8 cpu 0 0
-  | 0x14 ->
-    let recsize = max 1 (rd16 t (fcb + 0x0E)) in
-    (match Hashtbl.find_opt t.fcbs fcb with
-     | Some (data, pos) ->
-       let avail = Bytes.length data - pos in
-       if avail <= 0 then Cpu86.set_reg8 cpu 0 1
-       else begin
-         let take = min recsize avail in
-         blit_to_mem t data pos t.dta take;
-         Hashtbl.replace t.fcbs fcb (data, pos + take);
-         let recno = rd8 t (fcb + 0x20) + 1 in
-         if recno >= 128 then begin
-           wr16 t (fcb + 0x0C) (rd16 t (fcb + 0x0C) + 1);
-           wr8 t (fcb + 0x20) 0
-         end
-         else wr8 t (fcb + 0x20) recno;
-         Cpu86.set_reg8 cpu 0 (if take < recsize then 1 else 0)
-       end
-     | None -> Cpu86.set_reg8 cpu 0 0xFF)
-  | 0x21 ->
-    let recsize = max 1 (rd16 t (fcb + 0x0E)) in
-    let recno =
-      rd8 t (fcb + 0x21) lor (rd8 t (fcb + 0x22) lsl 8)
-      lor (rd8 t (fcb + 0x23) lsl 16)
+(* FCB 결과 바이트 — MS_CODE.ASM FCB_Ret_OK·FCB_Ret_Err *)
+let fcb_ok = 0
+let fcb_error = 0xFF
+
+(* FCBIO 의 읽기 결과 — FEOF 1, FTRIM 2. 레코드 일부만 읽으면 둘 다다. *)
+type fcb_read = Read_full | Read_eof | Read_partial
+
+let fcb_read_code = function Read_full -> 0 | Read_eof -> 1 | Read_partial -> 3
+
+(* 한 레코드를 DTA 로 옮긴다. 레코드 일부만 남았으면 나머지 칸을 0 으로
+   채운다 (FCBIO 의 Blank). *)
+let read_record t data ~off ~record_size =
+  let take = max 0 (min record_size (Bytes.length data - off)) in
+  if take = 0 then Read_eof
+  else begin
+    blit_to_mem t data off t.dta take;
+    for i = take to record_size - 1 do wr8 t (t.dta + i) 0 done;
+    if take < record_size then Read_partial else Read_full
+  end
+
+let fcb_at t = Dos_fcb.locate t (seg_off t 3 2)
+
+(* 0Fh. DOS 는 블록만 0 으로 지우고 다음 레코드는 건드리지 않는다. 이
+   기계는 순차 위치를 [fcbs] 에 따로 두므로, 둘이 어긋나지 않게 다음
+   레코드도 0 으로 지운다. *)
+let fcb_open t =
+  let fcb = fcb_at t in
+  match Hashtbl.find_opt t.host_files (String.uppercase_ascii (fcb_name t fcb)) with
+  | Some data ->
+    Hashtbl.replace t.fcbs fcb (data, 0);
+    wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
+    wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
+    wr16 t (fcb + Dos_fcb.file_size) (Bytes.length data land 0xffff);
+    wr16 t (fcb + Dos_fcb.file_size + 2) ((Bytes.length data lsr 16) land 0xffff);
+    Dos_fcb.set_current t fcb 0;
+    Cpu86.set_reg8 t.cpu 0 fcb_ok
+  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
+
+let fcb_close t =
+  Hashtbl.remove t.fcbs (fcb_at t);
+  Cpu86.set_reg8 t.cpu 0 fcb_ok
+
+(* 14h. 끝에 닿으면 위치를 옮기지 않는다. 일부만 읽어도 한 레코드 나아간다. *)
+let fcb_seq_read t =
+  let fcb = fcb_at t in
+  let record_size = Dos_fcb.record_size_of t fcb in
+  let record = Dos_fcb.current t fcb in
+  match Hashtbl.find_opt t.fcbs fcb with
+  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some (data, pos) ->
+    let result = read_record t data ~off:pos ~record_size in
+    let moved =
+      match result with
+      | Read_eof -> 0
+      | Read_full | Read_partial -> 1
     in
-    (match Hashtbl.find_opt t.fcbs fcb with
-     | Some (data, _) ->
-       let off = recno * recsize in
-       if off >= Bytes.length data then Cpu86.set_reg8 cpu 0 1
-       else begin
-         let take = min recsize (Bytes.length data - off) in
-         blit_to_mem t data off t.dta take;
-         Hashtbl.replace t.fcbs fcb (data, off + take);
-         Cpu86.set_reg8 cpu 0 (if take < recsize then 1 else 0)
-       end
-     | None -> Cpu86.set_reg8 cpu 0 0xFF)
-  | _ -> Cpu86.set_reg8 cpu 0 0
+    Hashtbl.replace t.fcbs fcb (data, pos + (moved * record_size));
+    Dos_fcb.set_current t fcb (record + moved);
+    Cpu86.set_reg8 t.cpu 0 (fcb_read_code result)
+
+(* 21h. 블록과 다음 레코드를 랜덤 레코드로 맞추고 나아가지 않는다 — 다음
+   14h 는 같은 레코드를 읽는다. *)
+let fcb_random_read t =
+  let fcb = fcb_at t in
+  let record_size = Dos_fcb.record_size_of t fcb in
+  let record = Dos_fcb.random t fcb ~record_size in
+  Dos_fcb.set_current t fcb record;
+  match Hashtbl.find_opt t.fcbs fcb with
+  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some (data, _) ->
+    let off = record * record_size in
+    Hashtbl.replace t.fcbs fcb (data, off);
+    Cpu86.set_reg8 t.cpu 0 (fcb_read_code (read_record t data ~off ~record_size))
+
+(* 23h. 레코드 크기 0 은 128 로 셈하되 고쳐 쓰지 않는다. *)
+let fcb_file_size t =
+  let fcb = fcb_at t in
+  match Hashtbl.find_opt t.host_files (String.uppercase_ascii (fcb_name t fcb)) with
+  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some data ->
+    let record_size =
+      match rd16 t (fcb + Dos_fcb.record_size) with
+      | 0 -> Dos_fcb.default_record_size
+      | n -> n
+    in
+    let records = Dos_fcb.records_for ~record_size (Bytes.length data) in
+    Dos_fcb.store_random t fcb records ~fourth:((records lsr 24) land 0xFF <> 0);
+    Cpu86.set_reg8 t.cpu 0 fcb_ok
+
+(* 24h. 레코드 크기를 GetRecSize 로 고치지 않고 그대로 비교한다. *)
+let fcb_set_random t =
+  let fcb = fcb_at t in
+  Dos_fcb.store_random t fcb (Dos_fcb.current t fcb)
+    ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit);
+  Cpu86.set_reg8 t.cpu 0 fcb_ok
 
 (* ---------- 콘솔 입력 ---------- *)
 
@@ -919,8 +961,15 @@ let resume_input t request =
 
 (* ---------- INT 21h ---------- *)
 
-(* 이 DOS 에 없는 기능은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로
-   멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
+(* MS-DOS 4.0 의 마지막 기능 번호(MS_TABLE.ASM MAXCOM, $Extended_Open).
+   그 위는 DISP.ASM BADCALL 이 AL=0 만 쓰고 IRET 한다. 다른 레지스터와
+   CF 는 그대로다 — 소스 주석: CF 를 세우면 프로그램이 깨질 수 있다.
+   AX=71A0h(긴 파일 이름 지원?)를 부르고 AX=7100h 를 보고 「없음」을 아는
+   프로그램이 이 값을 읽는다. *)
+let max_function = 0x6C
+
+(* 표 안([max_function] 이하)의 기능 중 이 DOS 가 아직 만들지 않은
+   것은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로 멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
    (#61). INT 21h 는 어느 길로 들어와도 2 바이트 [CD xx] 를 지나 이리
    온다(호출자의 INT, 또는 훅이 옛 벡터로 넘긴 ROM 스텁의 INT). IP 를
    그 INT 로 되돌려, 다시 돌려도 지나가지 않고 같은 자리에서 멈춘다. *)
@@ -1103,7 +1152,7 @@ let service_immediate t =
        | Some hd ->
          let chunk = Bytes.create n in
          for i = 0 to n - 1 do
-           Bytes.set chunk i (Char.chr (rd8 t (src + i)))
+           Bytes.set chunk i (Char.chr (bus_rd8 t (src + i)))
          done;
          let len = Bytes.length !(hd.data) in
          let grown =
@@ -1224,9 +1273,21 @@ let service_immediate t =
       ok t
     end
     else fail t 6
-  | 0x51 | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg  (* 51h 는 DOS 2 때의 내부 이름 *)
-  | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
-  | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
+  | 0x51 | 0x62 ->
+    (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
+       51h 는 DOS 2 때의 내부 이름 *)
+    Cpu86.set_reg16 cpu 3 t.psp_seg
+  | 0x68 | 0x6A -> ok t                     (* 파일 반영($Commit) — 메모리라 즉시 *)
+  | 0x0F -> fcb_open t
+  | 0x10 -> fcb_close t
+  | 0x14 -> fcb_seq_read t
+  | 0x21 -> fcb_random_read t
+  | 0x23 -> fcb_file_size t
+  | 0x24 -> fcb_set_random t
+  | 0x18 | 0x1D | 0x1E | 0x20 | 0x61 ->
+    (* MS_TABLE.ASM 의 빈 칸 CPMFunc: XOR AL,AL 뒤 LEAVEDOS *)
+    Cpu86.set_reg8 cpu 0 0
+  | ah when ah > max_function -> Cpu86.set_reg8 cpu 0 0
   | _ -> unsupported_function t ah
 
 let terminate t = child_exit t ~code:0 ~keep:None
