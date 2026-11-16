@@ -189,6 +189,8 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
   쓴 바이트는 닫을 때 파일이 된다, 29h 이름 나누기), findfirst/findnext,
+  디렉터리(39h 만들기·3Ah 지우기·3Bh 옮기기·47h 현재 위치 — FCB 는 현재
+  디렉터리의 파일을 가리킨다),
   메모리 할당(48h/49h/4Ah, 58h first·best·last fit),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기.
@@ -390,6 +392,12 @@ dune exec --root . bin/dosboot.exe -- \
   --steps 6000000 --utf8 \
   --keys 256b,2e63,1c0d,1970,1c0d,3920,1c0d,1970,1c0d,1c0d,4d00@5000000
 ```
+
+`--mount` 의 이름은 DOS 경로다. `--mount DATA/LEVEL1.DAT=...` 는 `DATA`
+디렉터리 안에 파일을 두고, 디렉터리는 함께 생긴다. 게스트는
+`C:\DATA\LEVEL1.DAT`, `DATA\LEVEL1.DAT`, `CD DATA` 뒤의 `LEVEL1.DAT`
+어느 쪽으로도 연다. 드라이브는 C: 하나다. 이름은 DOS 가 읽듯 대문자로
+바꾸고 8.3 으로 자른다.
 
 `--keys` 의 한 항목은 `(스캔 코드 lsl 8) lor ASCII` 를 16진수로 쓴 것이고,
 `@STEP` 은 그 스텝 전에는 넣지 않는다는 예약이다. 키를 미리 다 밀어
@@ -595,8 +603,6 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
   프로그램은 이 둘이 늘 일치한다.
 - 8087 코프로세서가 없다. 소리도 내지 않는다 — 스피커 포트의 상태만
   `speaker_on` 으로 보인다.
-- 디렉터리가 없다. `mkdir`/`chdir` 은 성공한 척하지 않고 "경로 없음" 으로
-  답한다.
 
 ## 구조
 
@@ -614,7 +620,8 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러, 시퀀서, CRTC |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 09h/10h/11h/12h/16h/1Ah/33h |
 | `Dos_mouse_space` | 마우스 가상 화면 — 비디오 모드마다 좌표 넓이와 한 칸의 크기(CuteMouse 표) |
-| `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
+| `Dos_dos` | INT 21h/20h — 파일, 디렉터리, 콘솔, 메모리, 날짜 |
+| `Dos_path` | 게스트가 넘긴 이름을 DOS 5 처럼 읽어 경로로 — 드라이브, `.`·`..`, 8.3 자르기 |
 | `Dos_xms` | XMS 3.0 드라이버 — 확장 메모리 블록, 잠금, 이동, INT 2Fh 답 |
 | `Dos_fcb_parse` | INT 21h AH=29h — 글자열을 FCB 의 드라이브·이름·확장자로 나눈다(MS-DOS 4.0 `MakeFcb`) |
 | `Dos_country` | 미국(국가 1) 437 의 대문자·정렬·파일 이름 글자·DBCS 표와 ROM 에 둘 바이트(MS-DOS 4.0 `DOSMES.ASM`) |

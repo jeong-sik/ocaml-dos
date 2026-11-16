@@ -169,7 +169,9 @@ let mount_dir m dir =
     (fun name ->
       let path = Filename.concat dir name in
       if Sys.file_exists path && not (Sys.is_directory path) then
-        Dos_machine.mount_file m (String.uppercase_ascii name) (Host_file.read path))
+        match Dos_machine.mount_file m name (Host_file.read path) with
+        | Ok () -> ()
+        | Error e -> prerr_endline ("skipped " ^ path ^ ": " ^ e))
     (Sys.readdir dir)
 
 let () =
@@ -211,8 +213,12 @@ let () =
       (fun spec ->
         match String.index_opt spec '=' with
         | Some i ->
-          Dos_machine.mount_file m (String.sub spec 0 i)
-            (Host_file.read (String.sub spec (i + 1) (String.length spec - i - 1)))
+          (match
+             Dos_machine.mount_file m (String.sub spec 0 i)
+               (Host_file.read (String.sub spec (i + 1) (String.length spec - i - 1)))
+           with
+           | Ok () -> ()
+           | Error e -> prerr_endline ("bad --mount " ^ e); exit 2)
         | None -> prerr_endline ("bad --mount (want NAME=PATH): " ^ spec))
       (List.rev !mounts);
     originals := Dos_machine.mounted_names m;

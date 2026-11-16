@@ -3,6 +3,11 @@
    file read into it lands in the planes and a file written from it takes
    the planes' bytes, not the RAM under the window. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let b n = String.make 1 (Char.chr (n land 0xff))
 let w n = b n ^ b (n lsr 8)
 let mov_ax v = "\xb8" ^ w v
@@ -92,7 +97,7 @@ let check name got want =
 
 let () =
   let m = Dos_machine.create () in
-  Dos_machine.mount_file m "PIC.BIN" picture;
+  mount m "PIC.BIN" picture;
   Dos_machine.load_com m (image ());
   Dos_machine.run m ~max_steps:200_000;
   check "the program exited" (Bool.to_int (Dos_machine.exited m)) 1;
