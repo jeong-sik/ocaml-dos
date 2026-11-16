@@ -15,6 +15,9 @@ let show = function
     Printf.sprintf "Mouse(%d,%d,%d,%b)" x y code released
   | Text_area { width; height } -> Printf.sprintf "Text_area %dx%d" width height
   | Cells { cols; rows } -> Printf.sprintf "Cells %dx%d" cols rows
+  | Graphics { id; reply = Loaded } -> Printf.sprintf "Graphics %d OK" id
+  | Device_attributes -> "Device_attributes"
+  | Graphics { id; reply = Failed e } -> Printf.sprintf "Graphics %d %S" id e
   | Quit -> "Quit"
 
 let shows evs = "[" ^ String.concat "; " (List.map show evs) ^ "]"
@@ -90,8 +93,27 @@ let test_mouse_and_reports () =
   events "release" "\027[<2;1;1m" [ Mouse { x = 0; y = 0; code = 2; released = true } ];
   events "text area" "\027[4;600;800t" [ Text_area { width = 800; height = 600 } ];
   events "cells" "\027[8;24;80t" [ Cells { cols = 80; rows = 24 } ];
+  events "device attributes" "\027[?62;22c" [ Device_attributes ];
+  events "c without ?" "\027[0c" [ Unmapped "CSI 0c" ];
   events "mixed" "a\027[Ab" [ Key 0x1E61; Key 0x4800; Key 0x3062 ];
   events "utf-8" "\xc3\xa9" [ Unmapped "\xc3\xa9" ]
+
+(* 그래픽 답은 Kitty graphics-protocol 문서 「Querying support」 의 꼴이다:
+   [ESC _Gi=31;OK ESC \\] *)
+let test_graphics_replies () =
+  events "loaded" "\027_Gi=3;OK\027\\" [ Graphics { id = 3; reply = Loaded } ];
+  events "failed" "\027_Gi=1;ENOENT:No such file\027\\"
+    [ Graphics { id = 1; reply = Failed "ENOENT:No such file" } ];
+  events "more keys" "\027_Gi=3,p=7;OK\027\\" [ Graphics { id = 3; reply = Loaded } ];
+  events "no id" "\027_Ga=q;OK\027\\" [];
+  events "no message" "\027_Gi=3\027\\" [];
+  events "between keys" "a\027_Gi=3;OK\027\\b"
+    [ Key 0x1E61; Graphics { id = 3; reply = Loaded }; Key 0x3062 ];
+  leaves "cut reply" "\027_Gi=3;O" [] "\027_Gi=3;O";
+  leaves "cut before G" "\027_" [] "\027_";
+  let alt_underscore, _ = parse "\027_" |> fun (_, t) -> parse (t ^ "x") in
+  if List.length alt_underscore <> 2 || List.nth alt_underscore 1 <> Key 0x2D78 then
+    fail "legacy alt+_ then x: got %s" (shows alt_underscore)
 
 let test_cut_sequences () =
   leaves "lone ESC" "\027" [] "\027";
@@ -164,12 +186,19 @@ let test_image () =
   let frame = String.length "\027_G" + String.length "\027\\" in
   check "payload" (String.length s - (2 * frame) - String.length "a=T,f=24,s=40,v=33,i=1,c=10,r=5,C=1,q=2,m=1;" - String.length "m=0;")
     (String.length (base64 rgb));
-  check_s "delete" (delete_image 3) "\027_Ga=d,d=I,i=3,q=2\027\\"
+  check_s "delete" (delete_image 3) "\027_Ga=d,d=I,i=3,q=2\027\\";
+  check_s "image file"
+    (image_file ~id:2 ~width:320 ~height:200 ~cols:40 ~rows:15 "/tmp/a")
+    "\027_Ga=T,f=24,t=t,s=320,v=200,i=2,c=40,r=15,C=1,q=1;L3RtcC9h\027\\";
+  check_s "probe" (probe_file ~id:3 "/tmp/a")
+    "\027_Ga=q,f=24,t=t,s=1,v=1,i=3;L3RtcC9h\027\\";
+  check_s "marker" temp_file_marker "tty-graphics-protocol"
 
 let () =
   test_keys ();
   test_function_keys ();
   test_mouse_and_reports ();
+  test_graphics_replies ();
   test_cut_sequences ();
   test_buttons ();
   test_geometry ();

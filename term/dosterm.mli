@@ -14,12 +14,21 @@ type mouse = {
   released : bool;  (** 끝 글자가 [m] 이다 *)
 }
 
+type graphics_reply =
+  | Loaded  (** 터미널이 그림 데이터를 읽었다([OK]) *)
+  | Failed of string  (** 터미널이 보낸 에러 메시지 *)
+
 type event =
   | Key of int  (** BIOS 워드 — (스캔 코드 lsl 8) lor ASCII *)
   | Unmapped of string  (** 이 기계가 넣을 워드가 없는 키. 받은 바이트 그대로 *)
   | Mouse of mouse
   | Text_area of { width : int; height : int }  (** [CSI 14 t] 의 답, 픽셀 *)
   | Cells of { cols : int; rows : int }  (** [CSI 18 t] 의 답 *)
+  | Graphics of { id : int; reply : graphics_reply }
+      (** [ESC _G i=id;메시지 ESC \] — id 를 붙여 보낸 그래픽 명령의 답 *)
+  | Device_attributes
+      (** DA1 답 [CSI ? … c]. 터미널은 받은 차례대로 답하므로, 이 답이 오면
+          그 앞에 보낸 것은 다 처리됐다. *)
   | Quit  (** F12 — 실행기를 끝낸다 *)
 
 val parse : string -> event list * string
@@ -62,3 +71,24 @@ val image :
 
 val delete_image : int -> string
 (** 그 id 의 그림과 자리를 지우고 데이터도 버린다. *)
+
+(** {1 임시 파일로 보내기}
+
+    같은 기계의 터미널에는 RGB 를 임시 파일에 쓰고 경로만 보낼 수 있다
+    ([t=t]). 터미널은 파일을 읽은 뒤 지운다. 터미널은 경로가 알려진 임시
+    폴더([/tmp] 등) 안에 있고 [temp_file_marker] 를 품을 때만 받는다
+    (Kitty graphics-protocol 문서, Ghostty [graphics_image.zig]
+    [isPathInTempDir]). *)
+
+val temp_file_marker : string
+(** [tty-graphics-protocol] — 임시 파일 경로가 품어야 하는 글자. *)
+
+val image_file :
+  id:int -> width:int -> height:int -> cols:int -> rows:int -> string -> string
+(** [image] 와 같은 자리·크기로, RGB 는 그 경로의 임시 파일에서 읽게 한다.
+    성공은 답하지 않고 실패만 [Graphics] 로 답한다(q=1). *)
+
+val probe_file : id:int -> string -> string
+(** 그 경로의 1x1 RGB 임시 파일을 읽어 보라고 묻는다(a=q). 터미널은 그림을
+    두지 않고 [Graphics] 로만 답한다. 답이 없으면 그래픽이나 임시 파일을
+    모르는 터미널이다. *)
