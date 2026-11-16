@@ -24,9 +24,16 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    console bytes are carried explicitly.
    7: the mouse carries each button's press and release log (INT 33h
    AX=05h/06h) and the AX=07h/08h ranges.
-   8: whether an MPU-401 is in the machine, and its mode and waiting
+   8: the mouse carries its cursor flag (an int, not a visible bool) and
+   the AX=09h graphics and AX=0Ah text cursor shapes.
+   9: the mouse ranges are always set (the driver fits them to the virtual
+   screen of the video mode), so each is two words with no flag.
+   10: after its motion counters the mouse carries the AX=0Fh mickey
+   ratios, the AX=1Ah speeds, the double-speed threshold and the eighths of
+   a mickey left over from the last move.
+   11: whether an MPU-401 is in the machine, and its mode and waiting
    answers, after the OPL2 timers. *)
-let format_version = 8
+let format_version = 11
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -60,6 +67,12 @@ let handle_number = C.range 0 (max_handles - 1)
 let ems_handle_key = C.range Dos_ems.first_handle Dos_ems.max_handle
 (* [ems_mapped] uses handle 0 for "nothing mapped". *)
 let ems_mapped_handle = C.range 0 Dos_ems.max_handle
+let cursor_flag = C.range min_int 0
+(* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
+let cursor_kind = C.range 0 1
+let mouse_ratio = C.range 1 0xFFFF  (* 0Fh·13h·1Ah 는 0 을 두지 않는다 *)
+let mouse_speed = C.range lowest_speed highest_speed
+let mouse_carry = C.range 0 (pixels_per_ratio - 1)
 let file_pos = C.count
 let vector = C.byte
 
@@ -304,8 +317,10 @@ let write_payload w t =
       put_list w ~what:"EMS page" (C.put_bytes w) (Array.to_list pages))
     (sorted_bindings ems_pages);
   put_pairs w ~what:"EMS mapping" ~a:ems_mapped_handle ~b:C.word (Array.to_list ems_mapped);
-  let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_visible;
-        mouse_dx; mouse_dy; mouse_handler_mask; mouse_handler_seg;
+  let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_cursor_flag;
+        mouse_graphics_cursor; mouse_text_cursor;
+        mouse_dx; mouse_dy; mouse_motion; mouse_carry_x; mouse_carry_y;
+        mouse_handler_mask; mouse_handler_seg;
         mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
         mouse_range_y } = mouse
   in
@@ -313,9 +328,34 @@ let write_payload w t =
   put "mouse x" C.any mouse_x;
   put "mouse y" C.any mouse_y;
   put "mouse buttons" C.any mouse_buttons;
-  C.put_bool w mouse_visible;
+  put "mouse cursor flag" cursor_flag mouse_cursor_flag;
+  (match mouse_graphics_cursor with
+   | Default_arrow -> put "graphics cursor" cursor_kind 0
+   | Custom_cursor { hot_x; hot_y; screen_mask; cursor_mask } ->
+     put "graphics cursor" cursor_kind 1;
+     put "cursor hot x" C.word hot_x;
+     put "cursor hot y" C.word hot_y;
+     C.put_int_array w ~what:"cursor screen mask" C.word screen_mask;
+     C.put_int_array w ~what:"cursor mask" C.word cursor_mask);
+  (match mouse_text_cursor with
+   | Software_text { screen_mask; cursor_mask } ->
+     put "text cursor" cursor_kind 0;
+     put "text screen mask" C.word screen_mask;
+     put "text cursor mask" C.word cursor_mask
+   | Hardware_text { first_line; last_line } ->
+     put "text cursor" cursor_kind 1;
+     put "text cursor first line" C.word first_line;
+     put "text cursor last line" C.word last_line);
   put "mouse dx" C.any mouse_dx;
   put "mouse dy" C.any mouse_dy;
+  let { mickeys_x; mickeys_y; speed_x; speed_y; double_speed } = mouse_motion in
+  put "mouse mickeys x" mouse_ratio mickeys_x;
+  put "mouse mickeys y" mouse_ratio mickeys_y;
+  put "mouse speed x" mouse_speed speed_x;
+  put "mouse speed y" mouse_speed speed_y;
+  put "mouse double speed" mouse_ratio double_speed;
+  put "mouse carry x" mouse_carry mouse_carry_x;
+  put "mouse carry y" mouse_carry mouse_carry_y;
   put "mouse handler mask" C.word mouse_handler_mask;
   put "mouse handler seg" C.word mouse_handler_seg;
   put "mouse handler off" C.word mouse_handler_off;
@@ -326,12 +366,9 @@ let write_payload w t =
          put "mouse button y" C.word last_y))
     [ mouse_presses; mouse_releases ];
   List.iter
-    (function
-      | None -> C.put_bool w false
-      | Some (lo, hi) ->
-        C.put_bool w true;
-        put "mouse range low" C.word lo;
-        put "mouse range high" C.word hi)
+    (fun (lo, hi) ->
+      put "mouse range low" C.word lo;
+      put "mouse range high" C.word hi)
     [ mouse_range_x; mouse_range_y ]
 
 let save t =
@@ -519,9 +556,37 @@ let read_payload r =
   m.mouse_x <- get "mouse x" C.any;
   m.mouse_y <- get "mouse y" C.any;
   m.mouse_buttons <- get "mouse buttons" C.any;
-  m.mouse_visible <- C.get_bool r;
+  m.mouse_cursor_flag <- get "mouse cursor flag" cursor_flag;
+  m.mouse_graphics_cursor <-
+    (match get "graphics cursor" cursor_kind with
+     | 0 -> Default_arrow
+     | _ ->
+       let hot_x = get "cursor hot x" C.word in
+       let hot_y = get "cursor hot y" C.word in
+       let mask what = get_int_array r ~what ~len:cursor_rows C.word in
+       let screen_mask = mask "cursor screen mask" in
+       let cursor_mask = mask "cursor mask" in
+       Custom_cursor { hot_x; hot_y; screen_mask; cursor_mask });
+  m.mouse_text_cursor <-
+    (match get "text cursor" cursor_kind with
+     | 0 ->
+       let screen_mask = get "text screen mask" C.word in
+       let cursor_mask = get "text cursor mask" C.word in
+       Software_text { screen_mask; cursor_mask }
+     | _ ->
+       let first_line = get "text cursor first line" C.word in
+       let last_line = get "text cursor last line" C.word in
+       Hardware_text { first_line; last_line });
   m.mouse_dx <- get "mouse dx" C.any;
   m.mouse_dy <- get "mouse dy" C.any;
+  let mickeys_x = get "mouse mickeys x" mouse_ratio in
+  let mickeys_y = get "mouse mickeys y" mouse_ratio in
+  let speed_x = get "mouse speed x" mouse_speed in
+  let speed_y = get "mouse speed y" mouse_speed in
+  let double_speed = get "mouse double speed" mouse_ratio in
+  m.mouse_motion <- { mickeys_x; mickeys_y; speed_x; speed_y; double_speed };
+  m.mouse_carry_x <- get "mouse carry x" mouse_carry;
+  m.mouse_carry_y <- get "mouse carry y" mouse_carry;
   m.mouse_handler_mask <- get "mouse handler mask" C.word;
   m.mouse_handler_seg <- get "mouse handler seg" C.word;
   m.mouse_handler_off <- get "mouse handler off" C.word;
@@ -532,13 +597,10 @@ let read_payload r =
          l.last_y <- get "mouse button y" C.word))
     [ m.mouse_presses; m.mouse_releases ];
   let get_range () =
-    if C.get_bool r then begin
-      let lo = get "mouse range low" C.word in
-      let hi = get "mouse range high" C.word in
-      if lo > hi then C.fail "mouse range low above high";
-      Some (lo, hi)
-    end
-    else None
+    let lo = get "mouse range low" C.word in
+    let hi = get "mouse range high" C.word in
+    if lo > hi then C.fail "mouse range low above high";
+    (lo, hi)
   in
   m.mouse_range_x <- get_range ();
   m.mouse_range_y <- get_range ();
