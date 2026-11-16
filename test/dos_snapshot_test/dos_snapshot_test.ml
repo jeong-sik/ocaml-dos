@@ -318,6 +318,7 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
   c "last tick" (a.last_tick = b.last_tick);
   c "EMS mapping" (a.ems_mapped = b.ems_mapped);
   c "EMS pages" (sorted_bindings a.ems_pages = sorted_bindings b.ems_pages);
+  c "EMS saved maps" (sorted_bindings a.ems_saved = sorted_bindings b.ems_saved);
   c "mouse x" (a.mouse.mouse_x = b.mouse.mouse_x);
   c "mouse y" (a.mouse.mouse_y = b.mouse.mouse_y);
   c "mouse buttons" (a.mouse.mouse_buttons = b.mouse.mouse_buttons);
@@ -346,9 +347,13 @@ let () =
   pre "a planar byte" (Bytes.get (Dos_video.planes a.video).(0) 0 = '\x5a');
   pre "DAC entry 5" ((Dos_ports.palette a.ports).(5) = (10, 20, 30));
   pre "two EMS pages mapped"
-    (match a.ems_mapped with [| (h, 0); (h', 1); (0, 0); (0, 0) |] -> h = h' && h > 0 | _ -> false);
+    (match a.ems_mapped with
+     | [| Some (h, 0); Some (h', 1); None; None |] -> h = h' && h > 0
+     | _ -> false);
   pre "the EMS byte in page 1"
-    (Hashtbl.fold (fun _ pages acc -> acc || Bytes.get pages.(1) 0 = '\x77') a.ems_pages false);
+    (Hashtbl.fold
+       (fun _ pages acc -> acc || (Array.length pages > 1 && Bytes.get pages.(1) 0 = '\x77'))
+       a.ems_pages false);
   pre "an FCB one record in" (List.map (fun (_, (_, p)) -> p) (sorted_bindings a.fcbs) = [ 128 ]);
   pre "two names left in the find queue" (List.length a.find_queue = 2);
   pre "handle 5 open" (Hashtbl.mem a.handles 5);
@@ -429,7 +434,7 @@ let () =
   check "EMS: the 255th allocation is 85h" (rd 1 = 0x85);
   check "EMS: allocation after a free succeeds" (rd 3 = 0);
   check "EMS: the freed number is reused" (rd 4 = 3 && rd 5 = 0);
-  check "EMS: 254 handles" (Hashtbl.length t.Dos_state.ems_pages = 254);
+  check "EMS: 254 handles and the OS handle" (Hashtbl.length t.Dos_state.ems_pages = 255);
   ignore (restore_exn (save_exn t))
 
 (* The payload ends with the two mouse ranges, each a low and a high
@@ -460,22 +465,35 @@ let () =
   let saved = save_exn t in
   let open Dos_state in
   let mapped = Array.copy t.ems_mapped in
-  t.ems_mapped.(2) <- (9, 0);
+  t.ems_mapped.(2) <- Some (9, 0);
   refused_at_save "an EMS frame mapping a handle that does not exist" t;
+  (match mapped.(0) with
+   | Some (h, _) -> t.ems_mapped.(2) <- Some (h, 99)
+   | None -> check "the rich machine shows an EMS page" false);
+  refused_at_save "an EMS frame mapping a page past its handle's pages" t;
   Array.blit mapped 0 t.ems_mapped 0 (Array.length mapped);
-  let h, _ = t.ems_mapped.(0) in
+  Hashtbl.replace t.ems_saved Dos_ems.os_handle [| None; Some (9, 0); None; None |];
+  refused_at_save "an EMS saved map naming a handle that does not exist" t;
+  Hashtbl.reset t.ems_saved;
+  let os_pages = Hashtbl.find t.ems_pages Dos_ems.os_handle in
+  Hashtbl.remove t.ems_pages Dos_ems.os_handle;
+  refused_at_save "EMS without its OS handle" t;
+  Hashtbl.replace t.ems_pages Dos_ems.os_handle os_pages;
+  let h = match t.ems_mapped.(0) with Some (h, _) -> h | None -> -1 in
   let pages = Hashtbl.find t.ems_pages h in
   let page = pages.(0) in
   pages.(0) <- Bytes.make 3 '\000';
   refused_at_save "an EMS page that is not 16KB" t;
   pages.(0) <- page;
-  (* The payload ends with the frame mapping (count, then four pairs) and
-     the mouse: 105 bytes up to its callback registration (the default
-     cursors take a flag, two kinds and two text masks; the motion counters
-     are followed by five motion settings and two carries), then three ints
-     for each of six button logs, then two ranges of two ints each. Point
-     frame page 2 at handle 9, which does not exist, and fix the checksum
-     so only the consistency check can refuse. *)
+  (* The payload ends with the frame mapping and the mouse: 105 bytes up to
+     its callback registration (the default cursors take a flag, two kinds
+     and two text masks; the motion counters are followed by five motion
+     settings and two carries), then three ints for each of six button
+     logs, then two ranges of two ints each. The mapping is a count, then
+     per frame page a shown flag byte and, when shown, the handle and the
+     page. Pages 2 and 3 are empty. Point page 1 at handle 9, which does
+     not exist, and fix the checksum so only the consistency check can
+     refuse. *)
   check "the crafted bytes assume the default cursors"
     (t.mouse.mouse_graphics_cursor = Dos_state.Default_arrow
      && t.mouse.mouse_text_cursor = Dos_state.default_text_cursor);
@@ -486,8 +504,17 @@ let () =
   let mouse_len =
     1 + (3 * 8) + cursors_len + (5 * 8) + motion_len + (button_logs * 3 * 8) + (2 * 2 * 8)
   in
-  let at = String.length saved - mouse_len - (4 * 16) + (2 * 16) in
+  let empty_len = 1 and shown_len = 1 + (2 * 8) in
+  let at = String.length saved - mouse_len - (2 * empty_len) - shown_len + 1 in
   let b = Bytes.of_string saved in
+  (match mapped.(1) with
+   | Some (h, page) ->
+     let shown = Bytes.get_uint8 b (at - 1) = 1 in
+     let handle = Int64.to_int (Bytes.get_int64_be b at) in
+     let page' = Int64.to_int (Bytes.get_int64_be b (at + 8)) in
+     check (Printf.sprintf "the crafted offset holds frame page 1 (shown, %d, %d)" h page)
+       (shown && handle = h && page' = page)
+   | None -> check "the rich machine shows frame page 1" false);
   Bytes.set_int64_be b at 9L;
   let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
   Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
