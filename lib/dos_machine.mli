@@ -19,15 +19,18 @@ val create : unit -> t
 
 (** {1 적재} *)
 
-val load_com : t -> string -> unit
+val load_com : ?name:string -> ?tail:string -> t -> string -> unit
 (** COM 이미지를 PSP 세그먼트 0x1000 의 0x100 에 싣는다. CS=DS=ES=SS=PSP,
     IP=0x100, SP=0xFFFE, 스택 맨 위는 0 — RET 으로 돌아오면 PSP 의
-    INT 20h 로 끝나는 실기 관례 그대로다. *)
+    INT 20h 로 끝나는 실기 관례 그대로다. [name] 은 C: 루트 디렉터리의
+    파일 이름이다. 주면 환경 블록 꼬리에 전체 경로를 쓴다
+    ({!Dos_dos.load_com}). [tail] 은 명령 이름 바로 뒤 글자들로 PSP:80h 의
+    명령줄 꼬리가 된다({!Dos_dos.load_com}). *)
 
-val load_exe : t -> string -> unit
+val load_exe : ?name:string -> ?tail:string -> t -> string -> unit
 (** MZ EXE 를 싣는다. 재배치 워드에 로드 세그먼트를 더하고 CS:IP/SS:SP
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
-    MZ 서명이 아니면 [Invalid_argument]. *)
+    MZ 서명이 아니면 [Invalid_argument]. [name]·[tail] 은 [load_com] 과 같다. *)
 
 val mount_file : t -> string -> string -> unit
 (** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)
@@ -177,6 +180,12 @@ val screen_digest : t -> int
     키를 물었다는 사실만으로는 모자란다: 게임 루프에 들어간 프로그램은
     키를 먹고 곧바로 다시 묻는다(ZZT 실측 631 명령). 그때 화면은 아직
     그리는 중이다. *)
+
+val frame_digest : t -> int
+(** [frame_rgb] 가 읽는 것 전부의 지문: 화면 메모리([screen_digest]), 모드,
+    CGA 색 선택, 속성 팔레트, DAC. 두 번 같으면 [frame_rgb] 도 같다 — 지문이
+    우연히 겹칠 때만 빼고. DAC 만 바꾸는 페이드는 [screen_digest] 에 잡히지
+    않으니, 화면을 다시 그릴지 정할 때는 이것을 쓴다. *)
 
 val pixel : t -> x:int -> y:int -> int
 (** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는

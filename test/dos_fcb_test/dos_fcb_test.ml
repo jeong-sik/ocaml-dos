@@ -17,7 +17,9 @@ let make_exe ~image ~ip ~cs ~ss ~sp relocs =
   let b = Buffer.create (32 + String.length image) in
   let w v = Buffer.add_char b (Char.chr (v land 0xff));
             Buffer.add_char b (Char.chr ((v lsr 8) land 0xff)) in
-  Buffer.add_string b "MZ"; w 0; w 1; w (List.length relocs); w 2;
+  let total = 32 + String.length image in
+  Buffer.add_string b "MZ"; w (total mod 512); w ((total + 511) / 512);
+  w (List.length relocs); w 2;
   w 0; w 0; w ss; w sp; w 0; w ip; w cs; w 0x1C; w 0;
   List.iter (fun (o, sg) -> w o; w sg) relocs;
   if relocs = [] then Buffer.add_string b "\x00\x00\x00\x00";
