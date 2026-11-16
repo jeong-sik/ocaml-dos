@@ -58,6 +58,18 @@ val attr_palette : t -> int array
 
 val set_attr_palette : t -> int -> int -> unit
 
+val text_blink : t -> bool
+(** 속성 컨트롤러 10h 의 bit 3. 서 있으면 텍스트 속성의 bit 7 이 깜박임이고
+    바탕은 여덟 색, 꺼져 있으면 바탕이 열여섯 색이다. 모드를 세우면 텍스트는
+    켜지고 그래픽은 꺼진다. *)
+
+val set_text_blink : t -> bool -> unit
+(** INT 10h AX=1003h. 10h 의 다른 비트는 그대로 둔다. *)
+
+val overscan : t -> int
+val set_overscan : t -> int -> unit
+(** 속성 컨트롤러 11h — 테두리 색의 DAC 자리(INT 10h AX=1001h·1008h). *)
+
 val screen_digest : t -> int
 (** 지금 모드가 그리는 메모리의 지문. 화면이 멈췄는지 보는 용도다 —
     픽셀을 다 만들어 비교하는 것보다 싸다. 충돌하면 "안 변했다" 고 잘못
