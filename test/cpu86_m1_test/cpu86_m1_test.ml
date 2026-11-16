@@ -284,6 +284,22 @@ let () =
   Cpu86.set_reg16 t 0 0xBEEF;
   steps t 2;
   check_list "워드 OUT 은 포트 두 개" (List.rev !seen) [ (0x40, 0xEF); (0x41, 0xBE) ];
+  (* 186 의 OUTSW/INSW 도 워드를 바이트 포트 두 개로 옮긴다. 포트 하나로
+     옮기면 OUTSW 는 상위 바이트를 잃고 INSW 는 상위 바이트에 0 을 쓴다. *)
+  let seen = ref [] in
+  let t =
+    let tt =
+      Cpu86.create ~model:Cpu86.I80186 ~read ~write ~port_in:(fun p -> p land 0xff)
+        ~port_out:(fun p v -> seen := (p, v) :: !seen) ()
+    in
+    String.iteri (fun i c -> Bytes.set mem i c) "\xba\x40\x00\x6f\x6d\xf4"; (* mov dx,40h; outsw; insw *)
+    Bytes.set mem 0x100 '\xef'; Bytes.set mem 0x101 '\xbe';
+    List.iter (fun s -> Cpu86.set_seg tt s 0) [ 0; 1; 3 ];
+    Cpu86.set_reg16 tt 6 0x100; Cpu86.set_reg16 tt 7 0x200; Cpu86.set_ip tt 0; tt
+  in
+  steps t 3;
+  check_list "OUTSW 는 포트 두 개" (List.rev !seen) [ (0x40, 0xEF); (0x41, 0xBE) ];
+  check "INSW 는 포트 두 개" (read 0x200 lor (read 0x201 lsl 8)) 0x4140;
   if !failed = 0 then print_endline "cpu86 M1: all passed"
   else begin
     Printf.eprintf "cpu86 M1: %d failures\n%!" !failed;

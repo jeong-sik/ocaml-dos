@@ -1,0 +1,3 @@
+(test
+ (name dosterm_test)
+ (libraries dosterm))
