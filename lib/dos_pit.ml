@@ -37,10 +37,23 @@ type run =
     (* 제어 워드 뒤 아직 셈을 시작하지 않았다. 값은 멈춘 카운트 레지스터. *)
   | Counting of { seg : segment; reload : reload option }
 
+(* 카운트 레지스터(CR)가 카운팅 요소(CE)로 실리는 때. 상태 바이트의 NULL
+   COUNT 는 실리기 전까지 1 이다(데이터시트 Figure 12: 제어 워드나 카운트를
+   쓰면 1, CR 이 CE 로 실리면 0). *)
+type cr_load =
+  | Loads_at of int  (* 이 틱부터 실려 있다 *)
+  | Waits            (* 제어 워드 뒤 카운트를, 또는 GATE 트리거를 기다린다 *)
+
 type t = {
+  mutable programmed : int;
+  (* 마지막 제어 워드의 bit 5-0 그대로. 상태 바이트가 이 값을 돌려준다
+     ("exactly as written") — 모드 6·7 은 2·3 으로 세지만 6·7 로 남는다.
+     아래 셋은 이 값을 읽어 둔 것이다. *)
   mutable mode : mode;
   mutable access : access;
   mutable encoding : encoding;
+  mutable cr_load : cr_load;
+  mutable status_latched : int option;  (* 읽기-되돌림이 잡은 상태 바이트 *)
   mutable lsb_written : int option;  (* 2바이트 쓰기의 첫 바이트 *)
   mutable msb_read_next : bool;      (* 2바이트 읽기의 순번 *)
   mutable latched : int option;      (* 래치 명령이 잡은 카운트 *)
@@ -50,10 +63,18 @@ type t = {
   mutable run : run;
 }
 
+(* 전원 직후: 하위·상위 바이트(bit 5-4 = 11), 모드 0, 바이너리. 데이터시트는
+   정하지 않는다("After power-up, the state of the 82C54 is undefined").
+   스냅숏이 받는 값이어야 해서 bit 5-4 는 0(래치 명령)이 아니다. *)
+let power_on_programmed = 0x30
+
 let create () = {
+  programmed = power_on_programmed;
   mode = Interrupt_on_terminal_count;
   access = Lsb_then_msb;
   encoding = Binary;
+  cr_load = Waits;
+  status_latched = None;
   lsb_written = None;
   msb_read_next = false;
   latched = None;
@@ -219,28 +240,35 @@ let load t ~tick ~gate value =
   settle t ~tick;
   let n = natural t.encoding value in
   t.count_register <- Some n;
+  (* 모드 0·2·3·4 는 GATE 와 상관없이 다음 펄스에 싣는다(Mode Definitions:
+     "will be loaded on the next CLK pulse", 모드 0 은 GATE 가 낮아도). *)
+  let next_pulse = Loads_at (tick + 1) in
   match t.mode, t.run with
   | (Interrupt_on_terminal_count | Software_strobe), (Stopped _ | Counting _) ->
     (* 다음 펄스에 실리고 셈이 새 카운트에서 이어진다 *)
+    t.cr_load <- next_pulse;
     t.run <- Counting { seg = fresh_segment ~tick ~gate n; reload = None }
   | (Hardware_one_shot | Hardware_strobe), (Stopped _ | Counting _) ->
     (* 무장만 한다. 지금 도는 원숏은 다음 트리거까지 그대로다. *)
-    ()
+    t.cr_load <- Waits
   | (Rate_generator | Square_wave), Stopped _ ->
+    t.cr_load <- next_pulse;
     t.run <- Counting { seg = fresh_segment ~tick ~gate n; reload = None }
   | (Rate_generator | Square_wave), Counting { seg = { since = None; _ }; _ } ->
     (* GATE 가 낮다 — 다음 상승이 이 카운트를 싣는다 *)
-    ()
-  | Rate_generator, Counting { seg = { since = Some _; _ } as seg; _ } ->
+    t.cr_load <- Waits
+  | Rate_generator, Counting { seg = { since = Some s; _ } as seg; _ } ->
     let k = pulses seg tick in
     let at = k - (k mod seg.n) + seg.n in
+    t.cr_load <- Loads_at (s + (at - seg.base));
     t.run <- Counting { seg; reload = Some { at; next_n = n; next_low_first = false } }
-  | Square_wave, Counting { seg = { since = Some _; _ } as seg; _ } ->
+  | Square_wave, Counting { seg = { since = Some s; _ } as seg; _ } ->
     let k = pulses seg tick in
     let high, j, len = square seg k in
+    let at = k - j + len in
+    t.cr_load <- Loads_at (s + (at - seg.base));
     (* 높은 반이 끝나면 낮은 반부터, 낮은 반이 끝나면 높은 반부터 *)
-    t.run <-
-      Counting { seg; reload = Some { at = k - j + len; next_n = n; next_low_first = high } }
+    t.run <- Counting { seg; reload = Some { at; next_n = n; next_low_first = high } }
 
 let write t ~tick ~gate v =
   let v = v land 0xff in
@@ -255,6 +283,12 @@ let write t ~tick ~gate v =
        load t ~tick ~gate (lsb lor (v lsl 8)))
 
 let read t ~tick =
+  match t.status_latched with
+  | Some status ->
+    (* 상태와 카운트를 함께 잡았으면 상태가 먼저다 *)
+    t.status_latched <- None;
+    status
+  | None ->
   let v = match t.latched with Some v -> v | None -> current_count t ~tick in
   match t.access with
   | Lsb_only -> t.latched <- None; v land 0xff
@@ -279,44 +313,65 @@ let mode_of_bits = function
   | 4 -> Software_strobe
   | _ -> Hardware_strobe
 
-let mode_code = function
-  | Interrupt_on_terminal_count -> 0
-  | Hardware_one_shot -> 1
-  | Rate_generator -> 2
-  | Square_wave -> 3
-  | Software_strobe -> 4
-  | Hardware_strobe -> 5
-
 (* 제어 워드 bit 5-4 가운데 0(래치)이 아닌 것. 마지막 갈래는 3 뿐이다. *)
 let access_of_bits = function
   | 1 -> Lsb_only
   | 2 -> Msb_only
   | _ -> Lsb_then_msb
 
-let access_code = function Lsb_only -> 1 | Msb_only -> 2 | Lsb_then_msb -> 3
+(* 읽기 전에 다시 래치하면 무시한다 — 처음 래치한 값을 읽는다 *)
+let latch_count t ~tick =
+  match t.latched with
+  | Some _ -> ()
+  | None -> t.latched <- Some (current_count t ~tick)
+
+let programmed_bits = 0x3F
+
+(* bit 5-0 → 접근·모드·BCD. bit 5-4 는 0 이 아니어야 한다(0 은 래치 명령). *)
+let set_programmed t bits =
+  t.programmed <- bits;
+  t.access <- access_of_bits ((bits lsr 4) land 3);
+  t.mode <- mode_of_bits ((bits lsr 1) land 7);
+  t.encoding <- (if bits land 1 = 0 then Binary else Bcd)
 
 let control t ~tick v =
   match (v lsr 4) land 3 with
-  | 0 ->
-    (* 읽기 전에 다시 래치하면 무시한다 — 처음 래치한 값을 읽는다 *)
-    (match t.latched with
-     | Some _ -> ()
-     | None -> t.latched <- Some (current_count t ~tick))
-  | rw ->
+  | 0 -> latch_count t ~tick
+  | _ ->
     let ce = current_count t ~tick in
-    t.access <- access_of_bits rw;
-    t.mode <- mode_of_bits ((v lsr 1) land 7);
-    t.encoding <- (if v land 1 = 0 then Binary else Bcd);
+    set_programmed t (v land programmed_bits);
     t.lsb_written <- None;
     t.msb_read_next <- false;
     t.latched <- None;
+    t.status_latched <- None;
     t.count_register <- None;
+    t.cr_load <- Waits;
     t.run <- Stopped ce
+
+let out_bit = 0x80
+let null_count_bit = 0x40
+
+let null_count t ~tick =
+  match t.cr_load with Waits -> true | Loads_at at -> tick < at
+
+let status_byte t ~tick =
+  (if out t ~tick then out_bit else 0)
+  lor (if null_count t ~tick then null_count_bit else 0)
+  lor t.programmed
+
+let read_back t ~tick ~count ~status =
+  if count then latch_count t ~tick;
+  if status then
+    match t.status_latched with
+    | Some _ -> ()  (* 읽기 전 두 번째 상태 래치는 무시한다 *)
+    | None -> t.status_latched <- Some (status_byte t ~tick)
 
 let trigger t ~tick =
   match t.count_register with
   | None -> ()
-  | Some n -> t.run <- Counting { seg = fresh_segment ~tick ~gate:true n; reload = None }
+  | Some n ->
+    t.cr_load <- Loads_at (tick + 1);
+    t.run <- Counting { seg = fresh_segment ~tick ~gate:true n; reload = None }
 
 let gate_edge t ~tick ~high =
   settle t ~tick;
@@ -341,8 +396,10 @@ let gate_edge t ~tick ~high =
     else (
       match t.run with
       | Stopped _ -> ()
-      | Counting { seg; _ } ->
-        (* 셈을 멈춘다. OUT 은 [out] 이 높게 낸다. *)
+      | Counting { seg; reload } ->
+        (* 셈을 멈춘다. OUT 은 [out] 이 높게 낸다. 주기 끝을 기다리던 새
+           카운트는 실리지 않았다 — GATE 상승([trigger])이 싣는다. *)
+        (match reload with Some _ -> t.cr_load <- Waits | None -> ());
         t.run <-
           Counting { seg = { seg with base = pulses seg tick; since = None }; reload = None })
 
@@ -350,8 +407,7 @@ let gate_edge t ~tick ~high =
 
 module C = Dos_snap_codec
 
-let mode_r = C.range 0 5
-let access_r = C.range 1 3
+let programmed_r = C.range 0 programmed_bits
 let natural_r = function
   | Binary -> C.range 1 binary_modulus
   | Bcd -> C.range 1 bcd_modulus
@@ -365,14 +421,17 @@ let get_option r f = if C.get_bool r then Some (f ()) else None
 (* The full pattern fails the build when a field is added, until the
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
-  let { mode; access; encoding; lsb_written; msb_read_next; latched;
+  let { programmed; mode = _; access = _; encoding (* [programmed] 에서 읽는다 *);
+        cr_load; status_latched; lsb_written; msb_read_next; latched;
         count_register; run } = t
   in
   let put what r v = C.put w ~what r v in
   let nat = natural_r encoding in
-  put "pit mode" mode_r (mode_code mode);
-  put "pit access" access_r (access_code access);
-  C.put_bool w (match encoding with Binary -> false | Bcd -> true);
+  put "pit control" programmed_r programmed;
+  (match cr_load with
+   | Waits -> C.put_bool w false
+   | Loads_at at -> C.put_bool w true; put "pit load tick" C.count at);
+  put_option w (put "pit status latch" C.byte) status_latched;
   put_option w (put "pit lsb" C.byte) lsb_written;
   C.put_bool w msb_read_next;
   put_option w (put "pit latch" C.word) latched;
@@ -394,9 +453,11 @@ let write_state w t =
 
 let read_state r t =
   let get what rng = C.get r ~what rng in
-  t.mode <- mode_of_bits (get "pit mode" mode_r);
-  t.access <- access_of_bits (get "pit access" access_r);
-  t.encoding <- (if C.get_bool r then Bcd else Binary);
+  let programmed = get "pit control" programmed_r in
+  if (programmed lsr 4) land 3 = 0 then C.fail "pit control word is a latch command";
+  set_programmed t programmed;
+  t.cr_load <- (if C.get_bool r then Loads_at (get "pit load tick" C.count) else Waits);
+  t.status_latched <- get_option r (fun () -> get "pit status latch" C.byte);
   let nat = natural_r t.encoding in
   t.lsb_written <- get_option r (fun () -> get "pit lsb" C.byte);
   t.msb_read_next <- C.get_bool r;

@@ -63,8 +63,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    23: the DMA controller (per channel: base and current address and count,
    page, mask, TC, mode; the byte pointer flip-flop) follows the PIC.
    24: the XMS driver's blocks (place, size, lock count, bytes) follow the
-   clock, before EMS. *)
-let format_version = 24
+   clock, before EMS.
+   25: a PIT counter writes its control word bits 5-0 as written (in place
+   of mode, access and BCD), the tick its count reaches the counting
+   element, and a status byte latched by the read-back command. *)
+let format_version = 25
 
 let digest_hex_len = 32
 let checksum_len = 16

@@ -452,10 +452,13 @@ let test_snapshot_refuses_bcd_overflow () =
   let w = Dos_snap_codec.writer () in
   Dos_pit.write_state w pit;
   let b = Bytes.of_string (Dos_snap_codec.contents w) in
-  (* 모드(8바이트), 접근(8바이트) 다음이 BCD 여부다 *)
-  let encoding_offset = 16 in
-  check "바이너리로 저장" (Char.code (Bytes.get b encoding_offset)) 0;
-  Bytes.set b encoding_offset '\001';
+  (* 맨 앞이 제어 워드 bit 5-0 (8바이트 빅엔디언)이고, 그 마지막 바이트의
+     bit 0 이 BCD 다 *)
+  let control_low_byte = 7 in
+  let bcd_bit = 0x01 in
+  let low = Char.code (Bytes.get b control_low_byte) in
+  check "바이너리로 저장" (low land bcd_bit) 0;
+  Bytes.set b control_low_byte (Char.chr (low lor bcd_bit));
   let refused =
     match Dos_pit.read_state (Dos_snap_codec.reader (Bytes.to_string b)) (Dos_pit.create ()) with
     | () -> false
