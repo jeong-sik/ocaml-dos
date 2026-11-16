@@ -32,8 +32,8 @@ val rgb_planar :
 (** EGA/VGA 16색. 평면 넷의 같은 비트가 색 번호를 만들고, [attr] 이
     그것을 DAC 자리로 옮긴다. *)
 
-val rgb_vga13 : Bytes.t -> (int * int * int) array -> string
-(** VGA 13h 화면(0xA0000 선형)을 320x200 RGB 로. *)
+val rgb_indexed : Bytes.t -> (int * int * int) array -> string
+(** 화면 순서로 늘어선 256색 번호를 RGB 로. 바이트 하나가 점 하나다. *)
 
 val rgb_solid : width:int -> height:int -> (int * int * int) array -> string
 (** 화면을 끈 동안의 그림: 모든 점이 DAC 0 번 색이다. *)

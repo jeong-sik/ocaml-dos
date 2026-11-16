@@ -14,7 +14,8 @@ open Dos_state
    나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
    조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
    12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type bios_service =
+  | Keyboard_irq | Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
 type host_vector =
   | Bios of bios_service
   | Dos_divide_overflow
@@ -25,6 +26,7 @@ type host_vector =
 
 let host_vector = function
   | 0x00 -> Some Dos_divide_overflow
+  | 0x09 -> Some (Bios Keyboard_irq)
   | 0x10 -> Some (Bios Video)
   | 0x11 -> Some (Bios Equipment)
   | 0x12 -> Some (Bios Memory_size)
@@ -58,17 +60,57 @@ let set_ivt t v off sg =
   wr16 t (v * 4) off;
   wr16 t ((v * 4) + 2) sg
 
+(* 하루의 틱 수(SeaBIOS src/std/bda.h TICKS_PER_DAY). *)
+let ticks_per_day = 0x1800B0
+
+let le16 v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xff))
+
 (* IRQ0 에서 도는 ROM 루틴: 0x46C 틱을 올리고 INT 1Ch 사용자 훅을 부른
-   뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다. *)
+   뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다.
+
+   틱이 하루치 이상이 되면 0 으로 돌리고 0x470 을 하나 올린다(SeaBIOS
+   src/clock.c clock_update). DOS 는 INT 1Ah AH=00h 가 돌려주는 이 값을
+   보고 날짜를 넘긴다. *)
 let bios_int8 =
   "\x1e\x50"                        (* push ds; push ax *)
   ^ "\x31\xc0\x8e\xd8"              (* xor ax,ax; mov ds,ax *)
   ^ "\xa1\x6c\x04\x40\xa3\x6c\x04"  (* mov ax,[046C]; inc ax; mov [046C],ax *)
   ^ "\x75\x04"                      (* jnz +4 — 자리올림 없으면 고워드 skip *)
   ^ "\xff\x06\x6e\x04"              (* inc word [046E] *)
-  ^ "\xcd\x1c"                      (* int 1Ch — 사용자 틱 훅 *)
+  ^ "\x81\x3e\x6e\x04" ^ le16 (ticks_per_day lsr 16)     (* cmp word [046E],hi *)
+  ^ "\x72\x16"                      (* jb hook — 하루가 안 됐다 *)
+  ^ "\x77\x08"                      (* ja midnight *)
+  ^ "\x81\x3e\x6c\x04" ^ le16 (ticks_per_day land 0xffff) (* cmp word [046C],lo *)
+  ^ "\x72\x0c"                      (* jb hook *)
+  ^ "\x31\xc0"                      (* midnight: xor ax,ax *)
+  ^ "\xa3\x6c\x04\xa3\x6e\x04"      (* mov [046C],ax; mov [046E],ax *)
+  ^ "\xfe\x06\x70\x04"              (* inc byte [0470] *)
+  ^ "\xcd\x1c"                      (* hook: int 1Ch — 사용자 틱 훅 *)
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
+
+(* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
+   3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
+let pmtimer_hz = 3579545
+let pmtimer_to_pit = 3
+let pit_tick_interval = 65536
+let ms_per_second = 1000
+let ceil_div a b = (a + b - 1) / b
+
+let ticks_of_time ~hour ~minute ~second =
+  let ms = (((hour * 60) + minute) * 60 + second) * ms_per_second in
+  let pm = ceil_div (ms * pmtimer_hz) pit_tick_interval in
+  ceil_div pm (ms_per_second * pmtimer_to_pit)
+
+(* 부팅 때 BIOS 가 RTC 를 읽어 틱을 채운다(SeaBIOS src/clock.c
+   clock_setup). 자정 넘김 표시는 지운다. now_fields 의 시는 0..23 이라
+   틱은 하루를 넘지 않는다(23:59:59 가 1573025). *)
+let set_ticks_from_clock t =
+  let _, _, _, hour, minute, second = now_fields t in
+  let ticks = ticks_of_time ~hour ~minute ~second in
+  wr16 t 0x46C (ticks land 0xFFFF);
+  wr16 t 0x46E (ticks lsr 16);
+  wr8 t 0x470 0
 
 (* CuteMouse setupvideo(ctmouse.asm): 범위를 지금 모드의 가상 화면 전체로,
    커서를 그 가운데로. 드라이버가 상주할 때, 00h·21h 리셋, INT 10h 모드
@@ -116,6 +158,7 @@ let install t =
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
   wr16 t 0x410 equipment_word;
   wr16 t 0x413 640;                 (* 기억용량 KB *)
+  set_ticks_from_clock t;
   wr8 t 0x417 0;                    (* 시프트 상태 *)
   wr8 t 0x418 0;
   wr16 t 0x41A ring_lo;
@@ -474,10 +517,31 @@ let keyboard t =
   | 0x05 ->
     (* 키 밀어넣기: CX=(스캔<<8)|ASCII. 꽉 찼으면 AL=1 *)
     let before = ring_tail t in
-    push_key t (Cpu86.reg16 cpu 1);
+    ring_push t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
   | _ -> ()
+
+(* ---------- INT 9 키보드 IRQ ---------- *)
+
+let keyboard_data_port = 0x60
+let bda_shift_flags = 0x417
+let left_shift_down = 0x02
+
+(* 실기 BIOS 의 INT 9 처럼 포트 0x60 을 읽어 시프트 상태나 링을 고치고
+   EOI 를 보낸다. 스캔 코드를 글자로 옮기는 표 대신 make 바이트가 지닌
+   워드를 넣는다 — 호스트가 누른 워드가 INT 16h 의 답이다. INT 9 를
+   가로챈 게스트가 먼저 0x60 을 읽고 여기로 넘겨도 같은 바이트를 읽는다
+   (Dos_kbc.read_data). *)
+let keyboard_irq t =
+  let code = Dos_ports.port_in t.ports keyboard_data_port in
+  let shift = rd8 t bda_shift_flags in
+  if code = Dos_kbc.left_shift_make then
+    wr8 t bda_shift_flags (shift lor left_shift_down)
+  else if code = Dos_kbc.left_shift_break then
+    wr8 t bda_shift_flags (shift land lnot left_shift_down)
+  else Option.iter (ring_push t) (Dos_kbc.data_word (Dos_ports.kbc t.ports));
+  Dos_pic.end_of_interrupt (Dos_ports.pic t.ports)
 
 (* ---------- INT 1Ah 시각 ---------- *)
 
@@ -738,6 +802,7 @@ let mouse t =
 
 let service t s =
   match s with
+  | Keyboard_irq -> keyboard_irq t; Completed
   | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
   | Keyboard -> keyboard t; Completed
   | Video -> video t; Completed
