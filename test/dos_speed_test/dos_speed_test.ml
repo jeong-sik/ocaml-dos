@@ -79,7 +79,7 @@ let test_speed_of_mhz () =
 let ports speed =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  Dos_ports.create ~speed ~mpu401:false ~mem ~video
+  Dos_ports.create ~speed ~mpu401:false ~mem ~video ~sound_blaster:false
 
 let pit_count t =
   let lo = Dos_ports.port_in t 0x40 in

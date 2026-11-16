@@ -1,6 +1,6 @@
 (* The 8259A, as far as a real-mode DOS game drives it. See dos_pic.mli. *)
 
-type line = Timer | Keyboard
+type line = Timer | Keyboard | Sound_blaster
 
 type t = {
   mutable imr : int;       (* port 0x21: a set bit masks that IRQ *)
@@ -12,9 +12,9 @@ type t = {
 let base_vector = 0x08
 
 (* Priority order: the first line is the highest. *)
-let lines = [ Timer; Keyboard ]
+let lines = [ Timer; Keyboard; Sound_blaster ]
 
-let number = function Timer -> 0 | Keyboard -> 1
+let number = function Timer -> 0 | Keyboard -> 1 | Sound_blaster -> 7
 let bit l = 1 lsl number l
 let vector l = base_vector + number l
 
@@ -22,6 +22,7 @@ let create () = { imr = 0; irr = 0; isr = 0; read_isr = false }
 
 let raise_irq t l = t.irr <- t.irr lor bit l
 let requested t l = t.irr land bit l <> 0
+let lower_irq t l = t.irr <- t.irr land lnot (bit l)
 
 (* A line is shadowed by any line in service at its own priority or above:
    the ISR bits from 0 up to its own. The machine asks before every

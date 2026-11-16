@@ -66,8 +66,12 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    clock, before EMS.
    25: a PIT counter writes its control word bits 5-0 as written (in place
    of mode, access and BCD), the tick its count reaches the counting
-   element, and a status byte latched by the read-back command. *)
-let format_version = 25
+   element, and a status byte latched by the read-back command.
+   26: whether a Sound Blaster is in the machine, and its DSP (reset,
+   answers, the command half written, the playing block, timers, the
+   IRQ line, rate, block length, speaker, test register), after the DMA
+   controller. *)
+let format_version = 26
 
 let digest_hex_len = 32
 let checksum_len = 16
