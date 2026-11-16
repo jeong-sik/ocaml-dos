@@ -30,8 +30,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    screen of the video mode), so each is two words with no flag.
    10: after its motion counters the mouse carries the AX=0Fh mickey
    ratios, the AX=1Ah speeds, the double-speed threshold and the eighths of
-   a mickey left over from the last move. *)
-let format_version = 10
+   a mickey left over from the last move.
+   11: the ports carry PIT channel 2 (mode, access, latch, count register
+   and the counting segment) right after the cycle counter. *)
+let format_version = 11
 
 let digest_hex_len = 32
 let checksum_len = 16
