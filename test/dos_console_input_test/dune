@@ -1,0 +1,3 @@
+(test
+ (name dos_console_input_test)
+ (libraries dosmachine))
