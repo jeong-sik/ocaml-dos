@@ -946,8 +946,15 @@ let resume_input t request =
 
 (* ---------- INT 21h ---------- *)
 
-(* 이 DOS 에 없는 기능은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로
-   멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
+(* MS-DOS 4.0 의 마지막 기능 번호(MS_TABLE.ASM MAXCOM, $Extended_Open).
+   그 위는 DISP.ASM BADCALL 이 AL=0 만 쓰고 IRET 한다. 다른 레지스터와
+   CF 는 그대로다 — 소스 주석: CF 를 세우면 프로그램이 깨질 수 있다.
+   AX=71A0h(긴 파일 이름 지원?)를 부르고 AX=7100h 를 보고 「없음」을 아는
+   프로그램이 이 값을 읽는다. *)
+let max_function = 0x6C
+
+(* 표 안([max_function] 이하)의 기능 중 이 DOS 가 아직 만들지 않은
+   것은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로 멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
    (#61). INT 21h 는 어느 길로 들어와도 2 바이트 [CD xx] 를 지나 이리
    온다(호출자의 INT, 또는 훅이 옛 벡터로 넘긴 ROM 스텁의 INT). IP 를
    그 INT 로 되돌려, 다시 돌려도 지나가지 않고 같은 자리에서 멈춘다. *)
@@ -1130,7 +1137,7 @@ let service_immediate t =
        | Some hd ->
          let chunk = Bytes.create n in
          for i = 0 to n - 1 do
-           Bytes.set chunk i (Char.chr (rd8 t (src + i)))
+           Bytes.set chunk i (Char.chr (bus_rd8 t (src + i)))
          done;
          let len = Bytes.length !(hd.data) in
          let grown =
@@ -1251,9 +1258,16 @@ let service_immediate t =
       ok t
     end
     else fail t 6
-  | 0x51 | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg  (* 51h 는 DOS 2 때의 내부 이름 *)
-  | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
+  | 0x51 | 0x62 ->
+    (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
+       51h 는 DOS 2 때의 내부 이름 *)
+    Cpu86.set_reg16 cpu 3 t.psp_seg
+  | 0x68 | 0x6A -> ok t                     (* 파일 반영($Commit) — 메모리라 즉시 *)
   | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
+  | 0x18 | 0x1D | 0x1E | 0x20 | 0x61 ->
+    (* MS_TABLE.ASM 의 빈 칸 CPMFunc: XOR AL,AL 뒤 LEAVEDOS *)
+    Cpu86.set_reg8 cpu 0 0
+  | ah when ah > max_function -> Cpu86.set_reg8 cpu 0 0
   | _ -> unsupported_function t ah
 
 let terminate t = child_exit t ~code:0 ~keep:None
