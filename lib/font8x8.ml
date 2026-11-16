@@ -1,6 +1,7 @@
 (* 8x8 비트맵 폰트 — IBM public domain VGA font 계보의 font8x8
    (Daniel Hepper <daniel@hepper.net>, Marcel Sondaar; Public Domain).
-   https://github.com/dhepper/font8x8 — ASCII 0x20-0x7E 렌더에 쓴다.
+   https://github.com/dhepper/font8x8 — ASCII 0x20-0x7E 다. 그 밖의 CP437
+   글자는 {!Font8x8_ext} 에 있다.
 
    원본 표는 한 행 바이트의 최하위 비트가 왼쪽 점이다(font8x8 README
    의 계약). IBM ROM 글꼴과 VGA 평면은 반대로 최상위 비트가 왼쪽이다.
@@ -104,7 +105,7 @@ let lsb_left = function
   | 124 -> [| 0x18; 0x18; 0x18; 0x00; 0x18; 0x18; 0x18; 0x00 |]
   | 125 -> [| 0x07; 0x0c; 0x0c; 0x38; 0x0c; 0x0c; 0x07; 0x00 |]
   | 126 -> [| 0x6e; 0x3b; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00 |]
-  | _ -> [| 0x00; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00 |]
+  | ch -> Font8x8_ext.lsb_left ch
 
 let reverse_bits b =
   let r = ref 0 in
