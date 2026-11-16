@@ -1,170 +1,241 @@
-(* LIM EMS 4.0 스텁 — INT 67h.
+(* LIM EMS 4.0 드라이버 — INT 67h.
 
    실기 386 에는 EMM386/QEMM 이 expanded memory 를 줬다. conventional 이
    모자라던 게임 런타임은 INT 21h AH=35h AL=67h 로 벡터를 읽어 그
    세그먼트 +0x0A 의 "EMMXXXX0"(DOS 디바이스 헤더의 이름 칸) 로 드라이버
    를 알아보고(삼국지3 런타임 실측) 페이지를 할당받아 프레임에 겹쳐
-   쓴다. 이 스텁은 그 계약의 쓰는 부분만 지킨다: 상태·프레임·할당·
-   매핑·해제·버전·매핑 가능 주소.
-
-   프레임은 0xD000-0xEFFF(물리 페이지 넷). 페이지 내용은 호스트 배열에
-   있고, 매핑은 프레임의 지금 내용을 옛 논리 페이지에 되저장한 뒤 새
-   논리 페이지를 프레임에 복사한다 — 게스트가 프레임에 직접 쓴 값은
-   다음 매핑까지 그 페이지에 묻어 간다. 소리 없는 실패는 없다: 못
-   지키는 요청은 LIM 오류 코드로 답한다. *)
+   쓴다. 이 모듈은 레지스터와 게스트 메모리의 배열을 읽고, expanded
+   memory 모델(Dos_ems_pages)을 부른 뒤 결과를 레지스터와 배열에 둔다.
+   출처는 LIM EMS 4.0 명세(1987, 300275-005)의 Function 번호로 적는다. *)
 
 open Dos_state
+module P = Dos_ems_pages
 
-let page_frame = 0xD000
-let page_size = 0x400                            (* 16KB = 0x400 단락 *)
-let frame_pages = 4
-let page_bytes = page_size * 16
 let emm_name = "EMMXXXX0"
 let emm_version = 0x40                           (* 4.0 *)
-let total_pages = 0x0800                         (* 32MB — 통보용. 카운트를
-                                                    BX 로 읽는 관례(아래 0x43)
-                                                    에서는 여유 계산이 필요
-                                                    없지만 넉넉히 둔다 *)
+let page_frame = P.page_frame
+let frame_pages = P.frame_pages
+let page_bytes = P.page_bytes
+let os_handle = P.os_handle
+let max_handle = P.max_handle
+let boot_handles = P.boot_handles
 
-(* LIM EMS 4.0 은 핸들을 255 개(0-254)까지 준다. 0 은 운영체제 몫이라
-   Function 4(AH=43h) 가 돌려주는 건 1-254 이고, 다 쓰였으면 AH=85h
-   ("all EMM handles are being used"). 해제(AH=45h)한 번호는 다시 쓰인다 —
-   여기서는 가장 낮은 빈 번호. 출처: LIM EMS 4.0 명세, Function 4
-   Allocate Pages 의 오류 코드 표. [ems_mapped] 의 (0, 0) 은 '안 겹침'
-   이다 — 0 번은 할당되지 않으므로 헷갈리지 않는다. *)
-let first_handle = 1
-let max_handle = 254
-let no_more_handles = 0x85
+(* ---------- 게스트 배열 ----------
 
-let free_handle t =
-  let rec go h =
-    if h > max_handle then None
-    else if Hashtbl.mem t.ems_pages h then go (h + 1)
-    else Some h
+   워드는 리틀 엔디언이고, 오프셋은 세그먼트 안에서 돈다.
+
+   4Eh·4Fh 가 주고받는 배열의 모양은 드라이버가 정한다(Function 15:
+   크기는 드라이버를 올린 뒤에 물어야 한다). 여기서는 물리 페이지마다
+   핸들과 논리 페이지 두 워드이고, 빈 자리는 FFFFh 둘이다. 부분 배열은
+   칸마다 그 앞에 물리 페이지 번호 워드를 붙이고, 맨 앞에 칸 수 워드를
+   둔다. 59h 의 "context save area size" 는 전체 배열의 크기다. *)
+
+let lin seg off = (seg lsl 4) + (off land 0xffff)
+let peek16 t seg off = rd8 t (lin seg off) lor (rd8 t (lin seg (off + 1)) lsl 8)
+let poke16 t seg off v = wr8 t (lin seg off) v; wr8 t (lin seg (off + 1)) (v lsr 8)
+
+let word_bytes = 2
+let entry_bytes = 2 * word_bytes
+let empty_word = 0xFFFF
+let map_bytes = frame_pages * entry_bytes
+let partial_entry_bytes = word_bytes + entry_bytes
+let partial_bytes n = word_bytes + (n * partial_entry_bytes)
+
+let poke_entry t seg off = function
+  | None -> poke16 t seg off empty_word; poke16 t seg (off + word_bytes) empty_word
+  | Some (h, l) -> poke16 t seg off h; poke16 t seg (off + word_bytes) l
+
+(* 지금 없는 핸들이나 페이지를 가리키는 칸은 A3h(배열이 깨졌다)다. *)
+let peek_entry t seg off =
+  let h = peek16 t seg off and l = peek16 t seg (off + word_bytes) in
+  if h = empty_word && l = empty_word then Ok None
+  else
+    match P.target t ~handle:h ~log:l with
+    | Ok (Some _ as shown) -> Ok shown
+    | Ok None | Error _ -> Error P.Corrupt_map
+
+(* [f 0] .. [f (n-1)] 을 차례로, 처음 실패에서 멈춘다. *)
+let collect n f =
+  let rec go i acc =
+    if i = n then Ok (List.rev acc)
+    else match f i with Error e -> Error e | Ok x -> go (i + 1) (x :: acc)
   in
-  go first_handle
+  go 0 []
 
-let frame_addr p = (page_frame * 16) + (p * page_size * 16)
+(* Function 15. 읽은 칸은 모두 검사한 뒤에 겹친다 — 깨진 배열은 아무것도
+   바꾸지 않는다. *)
+let get_map t seg off =
+  Array.iteri (fun p shown -> poke_entry t seg (off + (p * entry_bytes)) shown) t.ems_mapped
 
-let free_pages t =
-  let used =
-    Hashtbl.fold (fun _ pages acc -> acc + Array.length pages) t.ems_pages 0
-  in
-  max 0 (total_pages - used)
+let set_map t seg off =
+  collect frame_pages (fun p -> peek_entry t seg (off + (p * entry_bytes)))
+  |> Result.map (List.iteri (P.show t))
 
-(* 페이지 실체는 처음 건드릴 때 만든다 — "남은 전부"를 받아가도 실제로
-   겹치는 몇 장만 산다. *)
-let ensure_page pages i =
-  if Bytes.length pages.(i) = 0 then
-    pages.(i) <- Bytes.make (page_size * 16) '\000';
-  pages.(i)
+(* Function 16. 00h 의 입력은 칸 수 워드와 매핑 가능 세그먼트 워드들이다. *)
+let get_partial t ~list_seg ~list_off ~seg ~off =
+  let n = peek16 t list_seg list_off in
+  if n > frame_pages then Error P.Corrupt_map
+  else
+    let physical i =
+      match P.physical_of_segment (peek16 t list_seg (list_off + word_bytes + (i * word_bytes))) with
+      | Some p -> Ok p
+      | None -> Error P.Physical_out_of_range
+    in
+    collect n physical
+    |> Result.map (fun pages ->
+           poke16 t seg off n;
+           List.iteri
+             (fun i p ->
+               let at = off + word_bytes + (i * partial_entry_bytes) in
+               poke16 t seg at p;
+               poke_entry t seg (at + word_bytes) t.ems_mapped.(p))
+             pages)
+
+let set_partial t seg off =
+  let n = peek16 t seg off in
+  if n > frame_pages then Error P.Corrupt_map
+  else
+    let entry i =
+      let at = off + word_bytes + (i * partial_entry_bytes) in
+      let p = peek16 t seg at in
+      if p >= frame_pages then Error P.Corrupt_map
+      else Result.map (fun shown -> (p, shown)) (peek_entry t seg (at + word_bytes))
+    in
+    collect n entry |> Result.map (List.iter (fun (p, shown) -> P.show t p shown))
+
+(* Function 17. 명세대로 앞에서부터 겹치고 틀린 칸에서 멈춘다 — 그 앞
+   칸들은 겹친 채로 남는다(8Ah·8Bh 설명). *)
+let map_multiple t ~handle ~count ~seg ~off ~physical =
+  if count > frame_pages then Error P.Physical_out_of_range
+  else
+    let rec go i =
+      if i = count then Ok ()
+      else
+        let at = off + (i * entry_bytes) in
+        match physical (peek16 t seg (at + word_bytes)) with
+        | None -> Error P.Physical_out_of_range
+        | Some p ->
+          (match P.target t ~handle ~log:(peek16 t seg at) with
+           | Error e -> Error e
+           | Ok shown -> P.show t p shown; go (i + 1))
+    in
+    go 0
+
+let physical_of_number p = if p < frame_pages then Some p else None
+
+(* Function 26 00h: 날 페이지 크기(단락), 대체 레지스터 세트 수, 매핑 저장
+   배열 크기, DMA 레지스터 세트 수, DMA 방식. 대체·DMA 세트는 없다. *)
+let hardware_info = [ P.page_size; 0; map_bytes; 0; 0 ]
 
 let service t =
   let cpu = t.cpu in
   let ah = Cpu86.reg8 cpu 4 in
   let al = Cpu86.reg8 cpu 0 in
-  let ok () = Cpu86.set_reg8 cpu 4 0 in
-  let err code = Cpu86.set_reg8 cpu 4 code in
-  match ah with
-  | 0x40 ->
-    (* 상태 *)
-    ok ();
-    Cpu86.set_reg8 cpu 0 0
-  | 0x41 ->
-    ok ();
-    Cpu86.set_reg16 cpu 3 page_frame
-  | 0x42 ->
-    ok ();
-    Cpu86.set_reg16 cpu 3 total_pages;
-    Cpu86.set_reg16 cpu 2 (free_pages t)
-  | 0x43 ->
-    (* KOEI 런타임은 요청 페이지 수를 BX 에 싣는다(실측: 두 호출 모두
-       bx=1). DX 는 AH=42h 의 잔여값이 그대로 남아 LIM 표준(DX=카운트)
-       대로 읽으면 첫 호출이 잔여 전부를 삼켜 둘째 할당 검사(잔여<요청)
-       가 죽는다 — 이 게임이 돌아간 기계의 EMB 은 BX 를 읽었다는 뜻이다.
-       우리가 재현하는 기계도 그 관례를 따른다. 페이지 실체는 처음 겹칠
-       때 만든다. *)
-    let want = Cpu86.reg16 cpu 3 in
-    if want = 0 then err 0x89                    (* 0 페이지는 못 받는다 *)
-    else if want > free_pages t then err 0x87    (* 페이지 부족 *)
-    else begin
-      match free_handle t with
-      | None -> err no_more_handles
-      | Some h ->
-        Hashtbl.replace t.ems_pages h (Array.make want Bytes.empty);
-        Cpu86.set_reg16 cpu 2 h;
-        ok ()
-    end
-  | 0x44 ->
-    let phys = al and log = Cpu86.reg16 cpu 3 and h = Cpu86.reg16 cpu 2 in
-    if phys >= frame_pages then err 0x8B         (* 물리 페이지 범위 밖 *)
-    else begin
-      match Hashtbl.find_opt t.ems_pages h with
-      | None -> err 0x83                         (* 알 수 없는 핸들 *)
-      | Some pages ->
-        if log >= Array.length pages then err 0x8A
-        else if t.ems_mapped.(phys) = (h, log) then
-          (* 이미 그 자리에 있는 페이지다. 실기 EMS 에서 프레임은 페이지 그
-             자체라 아무 일도 없다 — 여기서 되저장본을 다시 겹치면 게스트가
-             그동안 프레임에 쓴 값이 사라진다. 삼국지3 는 이 호출
-             (AX=4403h BX=0)을 수시로 부른다. *)
-          ok ()
-        else begin
-          (* 프레임의 지금 내용을 옛 논리 페이지에 되저장하고 새 페이지를
-             겹친다. *)
-          (match t.ems_mapped.(phys) with
-           | oh, ol when oh > 0 ->
-             (match Hashtbl.find_opt t.ems_pages oh with
-              | Some opages when ol < Array.length opages ->
-                Bytes.blit t.mem (frame_addr phys) (ensure_page opages ol) 0
-                  (page_size * 16)
-              | _ -> ())
-           | _ -> ());
-          (* 같은 논리 페이지가 다른 물리 페이지에도 떠 있으면 그 창이
-             최신이다. 되저장본을 먼저 그 창으로 맞춘 뒤 가져온다. 두 창이
-             서로의 쓰기를 곧바로 보지는 못한다 — 프레임을 복사로 흉내 내는
-             한계다. *)
-          Array.iteri
-            (fun q shown ->
-              if q <> phys && shown = (h, log) then
-                Bytes.blit t.mem (frame_addr q) (ensure_page pages log) 0
-                  (page_size * 16))
-            t.ems_mapped;
-          Bytes.blit (ensure_page pages log) 0 t.mem (frame_addr phys)
-            (page_size * 16);
-          t.ems_mapped.(phys) <- (h, log);
-          ok ()
-        end
-    end
-  | 0x45 ->
-    let h = Cpu86.reg16 cpu 2 in
-    if Hashtbl.mem t.ems_pages h then begin
-      Hashtbl.remove t.ems_pages h;
-      for p = 0 to frame_pages - 1 do
-        match t.ems_mapped.(p) with
-        | mh, _ when mh = h -> t.ems_mapped.(p) <- (0, 0)
-        | _ -> ()
-      done;
-      ok ()
-    end
-    else err 0x83
-  | 0x46 ->
-    ok ();
-    Cpu86.set_reg8 cpu 0 emm_version
-  | 0x58 ->
-    (match al with
-     | 0x00 ->
-       (* 매핑 가능 주소 배열: (세그먼트, 물리 페이지) 쌍 넷. *)
-       let es = Cpu86.seg cpu 0 and di = Cpu86.reg16 cpu 7 in
-       for p = 0 to frame_pages - 1 do
-         wr16 t (((es lsl 4) + di + (p * 4)) land 0xfffff)
-           (page_frame + (p * page_size));
-         wr16 t (((es lsl 4) + di + (p * 4) + 2) land 0xfffff) p
-       done;
-       Cpu86.set_reg16 cpu 1 frame_pages;
-       ok ()
-     | 0x01 ->
-       Cpu86.set_reg16 cpu 1 frame_pages;
-       ok ()
-     | _ -> err 0x8F)
-  | _ -> err 0x84                                 (* 모르는 기능 *)
+  let bx = Cpu86.reg16 cpu 3 in
+  let cx = Cpu86.reg16 cpu 1 in
+  let dx = Cpu86.reg16 cpu 2 in
+  let es = Cpu86.seg cpu 0 and di = Cpu86.reg16 cpu 7 in
+  let ds = Cpu86.seg cpu 3 and si = Cpu86.reg16 cpu 6 in
+  let set_bx = Cpu86.set_reg16 cpu 3 and set_dx = Cpu86.set_reg16 cpu 2 in
+  let set_al = Cpu86.set_reg8 cpu 0 in
+  let result =
+    match ah with
+    | 0x40 -> set_al 0; Ok ()
+    | 0x41 -> set_bx page_frame; Ok ()
+    | 0x42 ->
+      (* Function 3: BX 가 남은 페이지, DX 가 전체 페이지다. *)
+      set_bx (P.free_pages t);
+      set_dx P.total_pages;
+      Ok ()
+    | 0x43 -> Result.map set_dx (P.allocate t ~count:bx ~zero_ok:false)
+    | 0x44 ->
+      if al >= frame_pages then Error P.Physical_out_of_range
+      else Result.map (P.show t al) (P.target t ~handle:dx ~log:bx)
+    | 0x45 -> P.release t dx
+    | 0x46 -> set_al emm_version; Ok ()
+    | 0x47 -> P.save_map t dx
+    | 0x48 -> P.restore_map t dx
+    | 0x4B -> set_bx (Hashtbl.length t.ems_pages); Ok ()
+    | 0x4C ->
+      (match Hashtbl.find_opt t.ems_pages dx with
+       | None -> Error P.Invalid_handle
+       | Some pages -> set_bx (Array.length pages); Ok ())
+    | 0x4D ->
+      let handles =
+        Hashtbl.fold (fun h pages acc -> (h, Array.length pages) :: acc) t.ems_pages []
+        |> List.sort compare
+      in
+      List.iteri
+        (fun i (h, n) ->
+          poke16 t es (di + (i * entry_bytes)) h;
+          poke16 t es (di + (i * entry_bytes) + word_bytes) n)
+        handles;
+      set_bx (List.length handles);
+      Ok ()
+    | 0x4E ->
+      (match al with
+       | 0x00 -> get_map t es di; Ok ()
+       | 0x01 -> set_map t ds si
+       | 0x02 -> get_map t es di; set_map t ds si
+       | 0x03 -> set_al map_bytes; Ok ()
+       | _ -> Error P.Invalid_subfunction)
+    | 0x4F ->
+      (match al with
+       | 0x00 -> get_partial t ~list_seg:ds ~list_off:si ~seg:es ~off:di
+       | 0x01 -> set_partial t ds si
+       | 0x02 ->
+         if bx > frame_pages then Error P.Physical_out_of_range
+         else (set_al (partial_bytes bx); Ok ())
+       | _ -> Error P.Invalid_subfunction)
+    | 0x50 ->
+      (match al with
+       | 0x00 ->
+         map_multiple t ~handle:dx ~count:cx ~seg:ds ~off:si ~physical:physical_of_number
+       | 0x01 ->
+         map_multiple t ~handle:dx ~count:cx ~seg:ds ~off:si ~physical:P.physical_of_segment
+       | _ -> Error P.Invalid_subfunction)
+    | 0x51 ->
+      (* 실패해도 BX 는 그 전 페이지 수다(Function 18 RESULTS). *)
+      (match Hashtbl.find_opt t.ems_pages dx with
+       | None -> Error P.Invalid_handle
+       | Some pages ->
+         let r = P.reallocate t dx ~count:bx in
+         set_bx (match r with Ok () -> bx | Error _ -> Array.length pages);
+         r)
+    | 0x57 ->
+      (match al with
+       | 0x00 -> Dos_ems_move.move_region t ~exchange:false ~seg:ds ~off:si
+       | 0x01 -> Dos_ems_move.move_region t ~exchange:true ~seg:ds ~off:si
+       | _ -> Error P.Invalid_subfunction)
+    | 0x58 ->
+      (match al with
+       | 0x00 ->
+         (* 매핑 가능 주소 배열: (세그먼트, 물리 페이지) 쌍 넷. *)
+         for p = 0 to frame_pages - 1 do
+           poke16 t es (di + (p * entry_bytes)) (page_frame + (p * P.page_size));
+           poke16 t es (di + (p * entry_bytes) + word_bytes) p
+         done;
+         Cpu86.set_reg16 cpu 1 frame_pages;
+         Ok ()
+       | 0x01 -> Cpu86.set_reg16 cpu 1 frame_pages; Ok ()
+       | _ -> Error P.Invalid_subfunction)
+    | 0x59 ->
+      (match al with
+       | 0x00 ->
+         List.iteri (fun i v -> poke16 t es (di + (i * word_bytes)) v) hardware_info;
+         Ok ()
+       | 0x01 ->
+         (* 날 페이지가 16KB 라 표준 페이지 수와 같다. *)
+         set_bx (P.free_pages t);
+         set_dx P.total_pages;
+         Ok ()
+       | _ -> Error P.Invalid_subfunction)
+    | 0x5A ->
+      (* Function 27: 00h 표준, 01h 날 페이지. 이 드라이버에서는 둘이 같고,
+         43h 와 달리 0 페이지도 받는다. *)
+      (match al with
+       | 0x00 | 0x01 -> Result.map set_dx (P.allocate t ~count:bx ~zero_ok:true)
+       | _ -> Error P.Invalid_subfunction)
+    | _ -> Error P.Undefined_function
+  in
+  Cpu86.set_reg8 cpu 4 (match result with Ok () -> 0 | Error s -> P.status_code s)
