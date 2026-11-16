@@ -20,6 +20,7 @@ let step t =
     let entry_tf = t.tf in
     (match t.model with
      | I80286 -> t.fetch_end <- (base_ip + t.fetch_limit) land 0xffff
+     | I80386 -> t.fetch_end <- min (base_ip + t.fetch_limit) segment_end
      | I8086 | I80186 -> ());
     let used_cycles =
       try begin
@@ -107,12 +108,14 @@ let step t =
         3
       (* --- push/pop. PUSH SP(0x54) 는 8086 이 감소된 SP 를 push 한다
          (286 부터 이전 값을 push — 실칩 SingleStepTests 관측). --- *)
-      | 0x54 when t.model = I80286 -> push16 t t.regs.(4); 10
       | 0x54 ->
-        t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
-        let a = physical t ~seg:t.segs.(2) ~off:t.regs.(4) in
-        t.write a (t.regs.(4) land 0xff);
-        t.write (a + 1) (t.regs.(4) lsr 8);
+        (match t.model with
+         | I80286 | I80386 -> push16 t t.regs.(4)
+         | I8086 | I80186 ->
+           t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
+           let a = physical t ~seg:t.segs.(2) ~off:t.regs.(4) in
+           t.write a (t.regs.(4) land 0xff);
+           t.write (a + 1) (t.regs.(4) lsr 8));
         10
       | b when b >= 0x50 && b <= 0x57 -> push16 t (reg16 t (opcode land 7)); 10
       | b when b >= 0x58 && b <= 0x5f -> set_reg16 t (opcode land 7) (pop16 t); 8
@@ -159,16 +162,20 @@ let step t =
       | 0x61 (* popa. pusha 가 AX CX DX BX SP BP SI DI 순으로 밀었으니
                  되꺼내는 순서는 그 역순이고, SP 자리는 버린다(186 계약 —
                  SP 는 8 워드 pop 으로 저절로 제자리). *) ->
-        atomic t (fun () ->
-            set_reg16 t 7 (pop16 t);   (* DI *)
-            set_reg16 t 6 (pop16 t);   (* SI *)
-            set_reg16 t 5 (pop16 t);   (* BP *)
-            ignore (pop16 t);          (* pusha 가 민 SP — 버린다 *)
-            set_reg16 t 3 (pop16 t);   (* BX *)
-            set_reg16 t 2 (pop16 t);   (* DX *)
-            set_reg16 t 1 (pop16 t);   (* CX *)
-            set_reg16 t 0 (pop16 t);   (* AX *)
-            25)
+        let popa () =
+          set_reg16 t 7 (pop16 t);   (* DI *)
+          set_reg16 t 6 (pop16 t);   (* SI *)
+          set_reg16 t 5 (pop16 t);   (* BP *)
+          ignore (pop16 t);          (* pusha 가 민 SP — 버린다 *)
+          set_reg16 t 3 (pop16 t);   (* BX *)
+          set_reg16 t 2 (pop16 t);   (* DX *)
+          set_reg16 t 1 (pop16 t);   (* CX *)
+          set_reg16 t 0 (pop16 t);   (* AX *)
+          25
+        in
+        (match t.model with
+         | I80386 -> restore_sp_on_fault t popa
+         | I8086 | I80186 | I80286 -> atomic t popa)
       | 0x69 | 0x6b (* imul r16, rm16, imm *) ->
         let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
         let a = op_read t 16 rm in
@@ -200,8 +207,7 @@ let step t =
             if nesting > 0 then begin
               for _ = 1 to nesting - 1 do
                 t.regs.(5) <- (t.regs.(5) - 2) land 0xffff;
-                let b = t.segs.(2) lsl 4 and o = t.regs.(5) in
-                push16 t (read16 t b o)
+                push16 t (read16 t sreg_ss t.regs.(5))
               done;
               push16 t frame
             end;
@@ -225,16 +231,20 @@ let step t =
       | 0x1e -> push16 t (seg t 3); 10
       | 0x07 -> set_seg t 0 (pop16 t); 8
       (* 286: 실모드 게임이 쓰는 두 바이트 명령은 CPU 판별용 SMSW 뿐이다.
-         보호 모드로 가는 나머지(LMSW·LGDT·CLTS …)는 아직 없다. *)
-      | 0x0f when t.model = I80286 ->
-        let op2 = fetch8 t in
-        if op2 = 0x01 then begin
-          let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
-          if regf = 4 then begin op_write t 16 rm msw_real_mode_286; 3 end
-          else unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
-        end
-        else unsupported t ctx (Printf.sprintf "0f %02x" op2)
-      | 0x0f -> set_seg t 1 (pop16 t); 8
+         보호 모드로 가는 나머지(LMSW·LGDT·CLTS …)는 아직 없다. 386 의
+         0x0F 확장은 RFC 0001 3 단계에서 더한다 — 그때까지는 Unsupported 다. *)
+      | 0x0f ->
+        (match t.model with
+         | I80286 ->
+           let op2 = fetch8 t in
+           if op2 = 0x01 then begin
+             let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
+             if regf = 4 then begin op_write t 16 rm msw_real_mode_286; 3 end
+             else unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
+           end
+           else unsupported t ctx (Printf.sprintf "0f %02x" op2)
+         | I80386 -> unsupported t ctx (Printf.sprintf "0f %02x (386)" (fetch8 t))
+         | I8086 | I80186 -> set_seg t 1 (pop16 t); 8)
       | 0x17 -> set_seg t 2 (pop16 t); 8
       | 0x1f -> set_seg t 3 (pop16 t); 8
       (* --- 그룹1: ALU rm,imm (0x83 은 imm8 부호확장) --- *)
@@ -298,20 +308,24 @@ let step t =
          배열 밖을 짚어 에뮬레이터가 죽는다. *)
       | 0x8c ->
         let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
-        undefined_on_286 t (regf >= 4);
-        op_write t 16 rm (seg t (regf land 3));
+        let sreg = sreg_field t regf ~load:false in
+        op_write t 16 rm (seg t sreg);
         2
       | 0x8e ->
         let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
-        undefined_on_286 t (regf = 1 (* CS *) || regf >= 4);
-        set_seg t (regf land 3) (op_read t 16 rm);
+        (* reg 필드를 먼저 따진다 — INT 6 이 피연산자 읽기의 INT 13 보다 앞선다. *)
+        let sreg = sreg_field t regf ~load:true in
+        set_seg t sreg (op_read t 16 rm);
         2
       | 0x8f ->
         let _, regf, rm, _ = decode_modrm t ~ovr:ctx.ovr in
         undefined_on_286 t (regf <> 0);
         (* 286 은 SP 를 올려 둔 뒤에 쓴다 — 쓰기가 세그먼트 끝을 넘어도 SP 는
            올라간 채로 INT 13 을 받는다(SingleStepTests/80286 8F). *)
-        op_write t 16 rm (pop16 t);
+        let pop_rm () = op_write t 16 rm (pop16 t) in
+        (match t.model with
+         | I80386 -> restore_sp_on_fault t pop_rm
+         | I8086 | I80186 | I80286 -> pop_rm ());
         8
       (* --- cbw / cwd --- *)
       | 0x98 ->
@@ -359,9 +373,8 @@ let step t =
         2
       (* --- accumulator 직접주소 mov (A0-A3) — TP 런타임 실측 요구. --- *)
       | 0xa0 | 0xa1 | 0xa2 | 0xa3 ->
-        let base =
-          (match ctx.ovr with Some g -> t.segs.(g) | None -> t.segs.(3)) lsl 4 in
-        let opd = Mem (base, fetch16 t) in
+        let sreg = match ctx.ovr with Some g -> g | None -> sreg_ds in
+        let opd = Mem (sreg, fetch16 t) in
         let width = if opcode land 1 = 0 then 8 else 16 in
         if opcode < 0xa2 then op_write t width (Reg 0) (op_read t width opd)
         else op_write t width opd (op_read t width (Reg 0));
@@ -527,11 +540,12 @@ let step t =
             피연산자가 SP 면 8086 은 이미 감소된 SP 를 민다 — 0x54 의
             PUSH SP 와 같은 규칙이다. *)
          | (6 | 7), 0xff ->
-           (match rm with
-            | Reg 4 when t.model <> I80286 ->
+           (match rm, t.model with
+            | Reg 4, (I8086 | I80186) ->
               t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
-              write16 t (t.segs.(2) lsl 4) t.regs.(4) t.regs.(4)
-            | _ -> push16 t (op_read t 16 rm))
+              write16 t sreg_ss t.regs.(4) t.regs.(4)
+            | Reg _, (I8086 | I80186 | I80286 | I80386)
+            | Mem _, (I8086 | I80186 | I80286 | I80386) -> push16 t (op_read t 16 rm))
          | _ -> unsupported t ctx "group FE/FF");
         15
       (* --- 186 string I/O. rep 접두어가 그대로 먹는다. --- *)
@@ -547,11 +561,23 @@ let step t =
          | Mem (b, o) ->
            let sx v = if v >= 0x8000 then v - 0x10000 else v in
            let idx = sx (reg16 t regf) in
-           if idx < sx (read16 t b o) || idx > sx (read16 t b (o + 2)) then
+           (* 386 은 두 경계를 다 읽고 견준다 — 상한이 세그먼트 끝을 넘으면
+              하한 밖이어도 INT 13 이다(SingleStepTests/80386 62). 286 은
+              하한 밖이면 상한을 읽지 않는다. *)
+           let out_of_bounds =
+             match t.model with
+             | I80386 ->
+               let lower = sx (read16 t b o) in
+               let upper = sx (read16 t b (o + 2)) in
+               idx < lower || idx > upper
+             | I8086 | I80186 | I80286 ->
+               idx < sx (read16 t b o) || idx > sx (read16 t b (o + 2))
+           in
+           if out_of_bounds then
              (* 186 은 다음 명령으로 돌아가는 트랩으로 둔다. 286 은 BOUND
                 자신을 가리키는 결함이다(SingleStepTests/80286 62). *)
              (match t.model with
-              | I80286 -> fault vector_bound
+              | I80286 | I80386 -> fault vector_bound
               | I8086 | I80186 -> do_int t ctx vector_bound)
          | Reg _ -> (undefined_on_286 t true; unsupported t ctx "bound on register"));
         13
@@ -570,7 +596,7 @@ let step t =
         (match rm with
          | Mem (b, o) ->
            (match t.model with
-            | I80286 -> ignore (read16 t b o)
+            | I80286 | I80386 -> ignore (read16 t b o)
             | I8086 | I80186 -> ignore (t.read (at t b o)))
          | Reg _ -> ());
         2

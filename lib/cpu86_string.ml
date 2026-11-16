@@ -12,11 +12,6 @@ type string_unit = Movs | Cmps | Stos | Lods | Scas | Ins | Outs
 (* string ops: DS:[SI] → ES:[DI], DF 가 방향. rep 은 CX 카운터 —
    cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. *)
 let string_op t ctx word (unit_kind : string_unit) =
-  let seg_si () =
-    let s = match ctx.ovr with Some s -> s | None -> 3 in
-    Mem (t.segs.(s) lsl 4, t.regs.(6))
-  in
-  let seg_di () = Mem (t.segs.(0) lsl 4, t.regs.(7)) in
   let width = if word then 16 else 8 in
   let d = (if word then 2 else 1) * (if t.df then -1 else 1) in
   let adv r = t.regs.(r) <- (t.regs.(r) + d) land 0xffff in
@@ -29,29 +24,35 @@ let string_op t ctx word (unit_kind : string_unit) =
      있다: 읽기는 1, 쓰기는 다음 반복 몫까지 2, CMPS 의 첫 읽기는 0
      이다(SingleStepTests/80286 A5 A7 AB AD AF 6D 6F 의 INT 13 사례
      전부). 레지스터를 되돌리지 않는 결함으로 던진다. 접근마다 예외
-     처리기를 세우지 않으려고 접근 전에 따진다. *)
-  let guard r ~cx_taken =
+     처리기를 세우지 않으려고 접근 전에 따진다.
+     386 은 그 반복을 처음부터 다시 한다: SI·DI·CX 가 반복 앞 값이다
+     (SingleStepTests/80386 A5 A7 AB AD AF 6D 6F). [restart] 가 되돌린다. *)
+  let guard r sreg ~cx_taken =
     if word && overruns t t.regs.(r) then begin
-      adv r;
-      (match ctx.rep with
-       | Some _ -> t.regs.(1) <- (t.regs.(1) - cx_taken) land 0xffff
-       | None -> ());
-      fault vector_segment_overrun
+      (match t.model with
+       | I80386 -> ()
+       | I8086 | I80186 | I80286 ->
+         adv r;
+         (match ctx.rep with
+          | Some _ -> t.regs.(1) <- (t.regs.(1) - cx_taken) land 0xffff
+          | None -> ()));
+      fault (overrun_vector t sreg)
     end
   in
+  let si_sreg = match ctx.ovr with Some s -> s | None -> sreg_ds in
   let read_si ~cx_taken =
-    guard 6 ~cx_taken;
-    let v = op_read t width (seg_si ()) in
+    guard 6 si_sreg ~cx_taken;
+    let v = op_read t width (Mem (si_sreg, t.regs.(6))) in
     adv 6; v
   in
   let read_di ~cx_taken =
-    guard 7 ~cx_taken;
-    let v = op_read t width (seg_di ()) in
+    guard 7 sreg_es ~cx_taken;
+    let v = op_read t width (Mem (sreg_es, t.regs.(7))) in
     adv 7; v
   in
   let write_di v =
-    guard 7 ~cx_taken:2;
-    op_write t width (seg_di ()) v;
+    guard 7 sreg_es ~cx_taken:2;
+    op_write t width (Mem (sreg_es, t.regs.(7))) v;
     adv 7
   in
   let run_once () =
@@ -63,7 +64,7 @@ let string_op t ctx word (unit_kind : string_unit) =
          읽는 순서를 그대로 둔다. *)
       let src, dst =
         match t.model with
-        | I80286 ->
+        | I80286 | I80386 ->
           let dst = read_di ~cx_taken:0 in
           (read_si ~cx_taken:1, dst)
         | I8086 | I80186 ->
@@ -85,6 +86,15 @@ let string_op t ctx word (unit_kind : string_unit) =
       let p = reg16 t 2 and v = read_si ~cx_taken:1 in
       if word then port_out16 t p v else t.port_out p v
   in
+  let restart f =
+    match t.model with
+    | I80386 ->
+      let si = t.regs.(6) and di = t.regs.(7) in
+      (try f () with
+       | Fault _ as e -> t.regs.(6) <- si; t.regs.(7) <- di; raise e)
+    | I8086 | I80186 | I80286 -> f ()
+  in
+  let run_once () = restart run_once in   (* 반복 하나 = 다시 할 수 있는 단위 *)
   match ctx.rep with
   | None -> run_once ()
   | Some want_zf ->

@@ -84,11 +84,11 @@ let alu_group t ctx op =
    OF 는 count=1 일 때만 정의된다. *)
 let shift_group t regf width rm_op count =
   (* 186 부터 횟수는 아래 5비트만 쓴다. 8086 은 자르지 않고 전부 돈다. *)
-  let count = match t.model with I8086 -> count | I80186 | I80286 -> count land 0x1f in
+  let count = match t.model with I8086 -> count | I80186 | I80286 | I80386 -> count land 0x1f in
   (* 286 은 횟수가 0 이어도 피연산자를 읽는다 — 오프셋 FFFF 의 워드면
      INT 13 이다(SingleStepTests/80286 C1·D3, 횟수 80h·E0h). *)
   (match t.model with
-   | I80286 -> if count = 0 then ignore (op_read t width rm_op)
+   | I80286 | I80386 -> if count = 0 then ignore (op_read t width rm_op)
    | I8086 | I80186 -> ());
   if count > 0 && t.model = I8086 && regf = 6 then begin
     (* SETMO/SETMOC — 8086·8088 의 문서 외 명령. 피연산자를 전부 1
@@ -132,6 +132,18 @@ let shift_group t regf width rm_op count =
         t.cf <- !v land msb <> 0;
         v := (!v lsl 1) land mask
     done;
+    (* 386 의 바이트 SHL·SAL·SHR 은 횟수가 8 의 배수(8·16·24)면 CF 가 횟수
+       8 일 때와 같다: SHL·SAL 은 원래 비트 0, SHR 은 비트 7 이다. 그 밖의
+       9 이상 횟수는 하나씩 민 셈과 같이 0 이다(SingleStepTests/80386 D2
+       /4·/5·/6 레지스터 형태 1,182 건 전부, C0 도 같다). *)
+    (match t.model with
+     | I80386 ->
+       if width = 8 && count land 7 = 0 then
+         (match regf with
+          | 4 | 6 -> t.cf <- original land 1 <> 0
+          | 5 -> t.cf <- original land msb <> 0
+          | _ -> ())
+     | I8086 | I80186 | I80286 -> ());
     op_write t width rm_op !v;
     if regf >= 4 then begin
       t.zf <- !v = 0;
@@ -153,6 +165,10 @@ let shift_group t regf width rm_op count =
         t.of_ <- b1 <> b2
     end
   end
+
+(* 386 바이트 IDIV 의 넘침 예외 조건(group3 의 idiv 참고). *)
+let idiv8_edge_bias = 0x80
+let idiv8_edge_remainder = 0x7f
 
 (* 그룹3: test/not/neg/mul/imul/div/idiv *)
 let group3 t ctx =
@@ -227,7 +243,29 @@ let group3 t ctx =
          let q = sdiv / sd and r = sdiv mod sd in
          let lo = if width = 8 then -0x80 else -0x8000 in
          let hi = if width = 8 then 0x7f else 0x7fff in
-         if q > hi || q < lo then divide_error t ctx
+         (* 286·386 의 바이트 IDIV 는 몫이 음수이고 |피젯수| >> 7 이
+            |젯수| + 80h 이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도
+            INT 0 이 아니다. AL=80h 이고 AH 는 그 아래 7 비트에 피젯수 부호를
+            붙인 나머지다. SingleStepTests/80286 F6.7 에서 넘치는 2,809 건
+            가운데 이 조건 4 건이 그렇고, 앞 두 조건만 맞고 나머지가 크거나
+            같은 3 건은 INT 0 이다. SingleStepTests/80386 F6.7 에서는 넘치는
+            94 건 가운데 6 건이 이 조건이고 모두 그렇다. 워드 IDIV 는 두
+            데이터에 이 조건이 없어 손대지 않는다. *)
+         let magnitude = abs sdiv in
+         let edge_quotient =
+           match t.model with
+           | I80286 | I80386 ->
+             width = 8 && (sdiv < 0) <> (sd < 0)
+             && magnitude lsr 7 = abs sd + idiv8_edge_bias
+             && magnitude land idiv8_edge_remainder < abs sd
+           | I8086 | I80186 -> false
+         in
+         if edge_quotient then begin
+           let r = magnitude land idiv8_edge_remainder in
+           set_reg8 t 0 idiv8_edge_bias;
+           set_reg8 t 4 ((if sdiv < 0 then - r else r) land 0xff)
+         end
+         else if q > hi || q < lo then divide_error t ctx
          else begin
            if width = 8 then begin
              set_reg8 t 0 (q land 0xff); set_reg8 t 4 (r land 0xff)
