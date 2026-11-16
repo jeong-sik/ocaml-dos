@@ -5,10 +5,13 @@
    keyboard reset drops the keys it had not sent, and a command the keyboard
    does not know draws a resend. *)
 
-(* In CPU cycles. A keyboard sends a byte as an 11-bit frame at 10-16 kHz,
-   about 1 ms; a person holds a tapped key about 100 ms. *)
-let byte_gap = Dos_clock.cpu_hz / 1000
-let key_hold = Dos_clock.cpu_hz / 10
+(* A keyboard sends a byte as an 11-bit frame at 10-16 kHz, about 1 ms; a
+   person holds a tapped key about 100 ms. [hz] is the CPU's cycles per
+   second, so both stretch with the CPU speed. *)
+let bytes_per_second = 1000
+let taps_per_second = 10
+let byte_gap ~hz = hz / bytes_per_second
+let key_hold ~hz = hz / taps_per_second
 
 let break_bit = 0x80
 
@@ -148,19 +151,19 @@ type t = {
 
 let never = max_int
 
-let after_gap t due =
-  match t.last_read with None -> due | Some r -> max due (r + byte_gap)
+let after_gap t ~hz due =
+  match t.last_read with None -> due | Some r -> max due (r + byte_gap ~hz)
 
 let keyboard_enabled t = t.command_byte land cb_keyboard_disabled = 0
 
-let update_ready t =
+let update_ready t ~hz =
   t.ready_at <-
     (if t.full then never
      else
        match t.controller_reply, t.replies, t.queue with
        | Some _, _, _ -> 0 (* the controller answers at once *)
-       | None, next :: _, _ -> after_gap t next.due
-       | None, [], next :: _ -> if keyboard_enabled t then after_gap t next.due else never
+       | None, next :: _, _ -> after_gap t ~hz next.due
+       | None, [], next :: _ -> if keyboard_enabled t then after_gap t ~hz next.due else never
        | None, [], [] -> never)
 
 let create () =
@@ -178,7 +181,8 @@ let rec insert b = function
 
 (* The key the word stands for, and the modifier held around it. A word
    no key gives keeps the old contract: its high byte is the make code. *)
-let press t ~now word =
+let press t ~hz ~now word =
+  let key_hold = key_hold ~hz in
   if t.scanning then begin
     let scan, held =
       match Dos_keymap.of_word word with
@@ -196,7 +200,7 @@ let press t ~now word =
           { code = make lor break_bit; word = None; due = now + key_hold } ]
     in
     t.queue <- List.fold_left (fun q b -> insert b q) t.queue bytes;
-    update_ready t
+    update_ready t ~hz
   end
 
 let ready_at t = t.ready_at
@@ -206,7 +210,7 @@ let take t code word =
   t.word <- word;
   t.full <- true
 
-let latch t ~now =
+let latch t ~hz ~now =
   now >= t.ready_at
   && begin
     let arrived =
@@ -216,15 +220,15 @@ let latch t ~now =
       | None, [], next :: rest -> t.queue <- rest; take t next.code next.word; true
       | None, [], [] -> false
     in
-    update_ready t;
+    update_ready t ~hz;
     arrived && t.command_byte land cb_keyboard_irq <> 0
   end
 
-let read_data t ~now =
+let read_data t ~hz ~now =
   if t.full then begin
     t.full <- false;
     t.last_read <- Some now;
-    update_ready t
+    update_ready t ~hz
   end;
   t.data
 
@@ -283,7 +287,7 @@ let keyboard_write t ~now v =
      | Acknowledge -> keyboard_answers t ~now [ reply_ack ]
      | Unknown -> keyboard_answers t ~now [ reply_resend ])
 
-let write_data t ~now v =
+let write_data t ~hz ~now v =
   let v = v land 0xff in
   (match t.controller_wants with
    | Some arg ->
@@ -298,9 +302,9 @@ let write_data t ~now v =
         kbd_write_data). *)
      t.command_byte <- t.command_byte land lnot cb_keyboard_disabled;
      keyboard_write t ~now v);
-  update_ready t
+  update_ready t ~hz
 
-let write_command t v =
+let write_command t ~hz v =
   (match controller_command (v land 0xff) with
    | Read_command_byte -> controller_answers t t.command_byte
    | Take arg -> t.controller_wants <- Some arg
@@ -313,7 +317,7 @@ let write_command t v =
    | Keyboard_disabled false -> t.command_byte <- t.command_byte land lnot cb_keyboard_disabled
    | Read_input_port -> controller_answers t input_port
    | Read_output_port -> controller_answers t t.output_port);
-  update_ready t
+  update_ready t ~hz
 
 let command_byte t = t.command_byte
 let leds t = t.leds
@@ -400,7 +404,7 @@ let write_state w
   C.put w ~what:"keyboard LEDs" (C.range 0 led_bits) leds;
   C.put w ~what:"scan code set" scan_sets scan_set
 
-let read_state r t =
+let read_state r t ~hz =
   t.queue <- get_bytes_out r "keyboard byte";
   t.replies <- get_bytes_out r "keyboard reply";
   t.controller_reply <-
@@ -417,4 +421,4 @@ let read_state r t =
   t.scanning <- C.get_bool r;
   t.leds <- C.get r ~what:"keyboard LEDs" (C.range 0 led_bits);
   t.scan_set <- C.get r ~what:"scan code set" scan_sets;
-  update_ready t
+  update_ready t ~hz
