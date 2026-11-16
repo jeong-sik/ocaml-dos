@@ -1,0 +1,3 @@
+(test
+ (name dos_vga_bda_test)
+ (libraries dosmachine))

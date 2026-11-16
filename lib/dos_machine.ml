@@ -19,8 +19,7 @@ let accept_service t ~return_to = function
   | Control_transferred -> ()
   | Awaiting_input request ->
     let flags = Cpu86.flags t.cpu in
-    t.input_continuations <-
-      { request; service_return = return_to;
+    set_input_continuations t @@ { request; service_return = return_to;
         return_control_flags = flags land service_control_mask;
         return_cs = Cpu86.seg t.cpu 1; return_ip = Cpu86.dump_ip t.cpu;
         return_ss = Cpu86.seg t.cpu 2; return_sp = Cpu86.reg16 t.cpu 4 }
@@ -47,7 +46,7 @@ let service_status_mask t v =
   let ah = Cpu86.reg8 t.cpu 4 in
   match Dos_bios.host_vector v with
   | Some (Bios Keyboard) -> if ah = 0x01 || ah = 0x11 then Cpu86.f_zero else 0
-  | Some (Bios Time_of_day) -> Cpu86.f_carry
+  | Some (Bios (Time_of_day | System)) -> Cpu86.f_carry
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
@@ -108,6 +107,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       ems_pages = Dos_ems.boot_handles ();
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
+      ems_names = Hashtbl.create 1;
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
@@ -131,6 +131,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
+  wr8 t (sda sda_wp_err) byte_max;              (* CONST2.ASM WPErr <-1> *)
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
       match Dos_bios.private_service_vector t raw with
@@ -153,13 +154,13 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
    때문이다. 여기선 루트 프로그램을 싣는 얼굴만 남긴다. *)
 
 let load_com ?name ?tail t image =
-  t.input_continuations <- [];
+  set_input_continuations t [];
   t.console_pending <- "";
   Dos_dos.load_com ?name ?tail t image
 
 let load_exe ?name ?tail t image =
   Dos_dos.load_exe ?name ?tail t image;
-  t.input_continuations <- [];
+  set_input_continuations t [];
   t.console_pending <- ""
 
 (* ---------- 파일 마운트 ---------- *)
@@ -220,7 +221,7 @@ let step_result t =
       in
       (match result with
        | Completed ->
-         t.input_continuations <- rest;
+         set_input_continuations t rest;
          Cpu86.set_flags t.cpu
            ((Cpu86.flags t.cpu land lnot service_control_mask) lor wait.return_control_flags);
          finish_service_return t wait.service_return;
@@ -231,10 +232,10 @@ let step_result t =
            ignore (deliver_ivt t 1);
          Service_completed (Cpu86.idle t.cpu)
        | Control_transferred ->
-         t.input_continuations <- rest;
+         set_input_continuations t rest;
          Service_completed (Cpu86.idle t.cpu)
        | Awaiting_input request ->
-         t.input_continuations <- { wait with request } :: rest;
+         set_input_continuations t @@ { wait with request } :: rest;
          Waiting_for_input (Cpu86.idle t.cpu))
     | _ ->
       let was_halted = Cpu86.halted t.cpu in
@@ -414,10 +415,7 @@ let frame_rgb t =
     Dos_render.rgb_cga4 t.mem ~mode:(Dos_video.mode t.video)
       ~color_select:(Dos_video.cga_color_select t.video)
   | Dos_video.Cga2 -> Dos_render.rgb_cga2 t.mem
-  | Dos_video.Planar ->
-    let w, h = Dos_video.dims t.video in
-    Dos_render.rgb_planar (Dos_video.planes t.video) ~w ~h
-      ~attr:(Dos_video.attr_palette t.video) ~pal
+  | Dos_video.Planar -> Dos_render.rgb_indexed (Dos_video.screen16 t.video) pal
   | Dos_video.Linear256 -> Dos_render.rgb_indexed (Dos_video.screen256 t.video) pal
 
 let frame_ppm t =

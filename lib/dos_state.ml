@@ -246,6 +246,10 @@ type t = {
   ems_saved : (int, (int * int) option array) Hashtbl.t;
         (** 핸들 → AH=47h 가 저장한 [ems_mapped]. AH=48h 가 꺼내 간다.
             있는 페이지만 가리킨다. *)
+  ems_names : (int, string) Hashtbl.t;
+        (** 핸들 → AH=53h 로 붙인 이름. 여덟 바이트이고, 첫 NUL 뒤는 모두
+            NUL 이다. 이름이 없는(모두 NUL) 핸들은 없고, 같은 이름은 둘
+            없다. *)
   mouse : mouse;
 }
 
@@ -268,6 +272,63 @@ let wr16 t a v = wr8 t a v; wr8 t (a + 1) (v lsr 8)
    is therefore a 20-bit physical address. *)
 let phys_mask = 0xfffff
 let physical seg off = ((seg lsl 4) + off) land phys_mask
+
+(* ---------- DOS 데이터 영역 ----------
+
+   MS-DOS 4.0 CONST2.ASM SWAP_START 의 앞 두 바이트: ErrorMode(INT 24h
+   처리 중), INDOS(DOS 안에 있는 깊이). PRINT 같은 TSR 은 ErrorMode 가
+   INDOS 바로 앞이라고 믿는다. INT 21h AH=34h 가 INDOS 주소를 준다.
+   게스트 메모리에 두어 스냅숏이 메모리째 싣는다. 자리는 IVT·BDA 와 첫
+   PSP(1000h) 사이의 빈 곳이다.
+
+   INDOS 는 [input_continuations] 에서 나온다. DISP.ASM 은 01h..0Ch 를
+   포함한 거의 모든 기능에서 INDOS 를 올리고, 끝나면 내린다. 이 기계의
+   서비스는 차단 읽기 말고는 게스트 코드를 끼우지 않고 끝나니, 게스트가
+   볼 수 있는 값은 기다리는 DOS 읽기의 수다. INT 24h 를 모델링하지 않아
+   ErrorMode 는 늘 0 이다.
+
+   그 뒤는 확장 에러(AH=59h)다: WPErr, EXTERR_LOCUS, EXTERR, EXTERR_ACTION,
+   EXTERR_CLASS, EXTERRPT. 0x0C..0x19(DTA, 현재 PSP 등)는 호스트 상태에
+   있어 비워 두고, Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
+let sda_seg = 0x0070
+let sda_error_mode = 0
+let sda_in_dos = 1
+let sda_wp_err = 2
+let sda_exterr_locus = 3
+let sda_exterr = 4
+let sda_exterr_action = 6
+let sda_exterr_class = 7
+let sda_exterr_pointer = 8
+let sda_user_in_ax = 0x1A
+let byte_max = 0xFF
+let sda off = physical sda_seg off
+
+(* DISP.ASM DSKROUT: AH 가 0 이거나 0Ch 보다 크고 59h 가 아닌 기능에 들어갈
+   때. 50h·51h·62h·33h·64h 는 그 앞에서 따로 끝나 여기에 오지 않는다. *)
+let get_extended_error = 0x59
+let last_console_call = 0x0C
+let max_function = 0x6C
+let early_calls = [ 0x33; 0x50; 0x51; 0x62; 0x64 ]
+
+let disk_route ah =
+  (ah = 0 || ah > last_console_call)
+  && ah <> get_extended_error && ah <= max_function && not (List.mem ah early_calls)
+
+let enter_call t =
+  let ax = Cpu86.reg16 t.cpu 0 in
+  if disk_route (ax lsr 8) then begin
+    wr8 t (sda sda_user_in_ax) (ax land 0xff);
+    wr8 t (sda (sda_user_in_ax + 1)) (ax lsr 8);
+    wr8 t (sda sda_exterr_locus) (Dos_error.locus_code Dos_error.Unknown_locus);
+    wr8 t (sda sda_error_mode) 0;
+    wr8 t (sda sda_wp_err) byte_max
+  end
+
+let set_input_continuations t waits =
+  t.input_continuations <- waits;
+  let in_dos = List.length (List.filter (fun w ->
+      match w.request with Dos_input _ -> true | Bios_key -> false) waits) in
+  wr8 t (physical sda_seg sda_in_dos) (min in_dos byte_max)
 
 let finish_service_return t = function
   | Direct_return -> ()
@@ -322,8 +383,20 @@ let set_cf t on =
 
 let ok t = set_cf t false
 
+(* MS_CODE.ASM SYS_RET_ERR: ETAB_LK 이 진짜 코드를 EXTERR 에 두고, 이
+   기능이 돌려줄 수 없는 코드면 바꾼다. ErrorMap·CAL_LK 이 표에서
+   class·action·locus 를 채운다. 기능 번호는 USER_IN_AX 의 AH 다. *)
 let fail t code =
-  Cpu86.set_reg16 t.cpu 0 code;
+  let fn = rd8 t (sda (sda_user_in_ax + 1)) in
+  wr8 t (sda sda_exterr) (code land 0xff);
+  wr8 t (sda (sda_exterr + 1)) (code lsr 8);
+  (match Dos_error.info code with
+   | None -> ()
+   | Some { Dos_error.error_class; action; locus } ->
+     wr8 t (sda sda_exterr_class) (Dos_error.class_code error_class);
+     wr8 t (sda sda_exterr_action) (Dos_error.action_code action);
+     Option.iter (fun l -> wr8 t (sda sda_exterr_locus) (Dos_error.locus_code l)) locus);
+  Cpu86.set_reg16 t.cpu 0 (Dos_error.returned_code ~fn code);
   set_cf t true
 
 (* ---------- 시계 ---------- *)
@@ -455,12 +528,28 @@ let scroll_window t ~up ~lines ~top ~left ~bottom ~right ~attr =
       done
     done
 
-(* 글자 하나 찍기 — INT 10h teletype 과 INT 21h 출력이 공유한다.
-   마지막 줄을 넘으면 화면을 한 줄 올린다. 넘침을 클램프로 막으면
-   글자가 마지막 칸에 계속 덮어써져 출력이 통째로 사라진다. *)
-let put_char t ch attr =
-  let col, row = get_cursor t in
-  let col = ref col and row = ref row in
+(* 글자를 찍는 두 길. AH=13h 는 텍스트 모드에서도 속성을 쓴다
+   ([Attribute]). teletype(AH=0Eh)과 DOS 출력은 텍스트 모드에서 글자만
+   바꾸고 칸의 속성을 그대로 둔다([Teletype]). 그래픽 모드에서는 둘 다
+   값을 색으로 쓴다(DOSBox int10_char.cpp: INT10_TeletypeOutput 은
+   텍스트 모드에서 속성을 쓰지 않고, INT10_WriteString 은 쓴다). *)
+type ink = Attribute of int | Teletype of int
+
+(* 텍스트 모드에서 칸의 속성을 두고 글자만 바꾼다. 그래픽 모드는 [color]
+   로 그린다. *)
+let write_char_only t ~col ~row ch ~color =
+  if graphics t then
+    write_glyph t ~col ~row ch ~fg:color ~bg:(glyph_background t ~fg:color ~back256:0)
+  else write_cell t row col ((read_cell t row col land 0xFF00) lor (ch land 0xff))
+
+(* 글자 하나 찍기. 마지막 줄을 넘으면 화면을 한 줄 올린다. 넘침을
+   클램프로 막으면 글자가 마지막 칸에 계속 덮어써져 출력이 통째로
+   사라진다. 새 줄은 그래픽 모드면 검정, 텍스트 모드면 이 글자를 찍기 전
+   커서 칸의 속성으로 채운다(DOSBox teletype_output_attr 이 AH=08h 로
+   읽어 쓰는 값). *)
+let output_char t ch ink =
+  let col0, row0 = get_cursor t in
+  let col = ref col0 and row = ref row0 in
   (match ch with
    | 0x0D -> col := 0
    | 0x0A -> incr row
@@ -468,19 +557,25 @@ let put_char t ch attr =
    | 0x09 -> col := min (cols t - 1) ((!col + 8) / 8 * 8)
    | 0x07 -> ()                       (* 벨 — 소리는 내지 않는다 *)
    | _ ->
-     if graphics t then
-       write_glyph t ~col:!col ~row:!row ch ~fg:attr
-         ~bg:(glyph_background t ~fg:attr ~back256:0)
-     else write_cell t !row !col ((attr lsl 8) lor (ch land 0xff));
+     (match ink with
+      | Teletype color -> write_char_only t ~col:!col ~row:!row ch ~color
+      | Attribute attr ->
+        if graphics t then
+          write_glyph t ~col:!col ~row:!row ch ~fg:attr
+            ~bg:(glyph_background t ~fg:attr ~back256:0)
+        else write_cell t !row !col ((attr lsl 8) lor (ch land 0xff)));
      incr col;
      if !col >= cols t then begin col := 0; incr row end);
   if !row >= rows t then begin
-    (* 그래픽 모드에서 새 행은 검정으로 채운다. *)
+    let fill = if graphics t then 0 else read_cell t row0 col0 lsr 8 in
     scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows t - 1)
-      ~right:(cols t - 1) ~attr:(if graphics t then 0 else attr);
+      ~right:(cols t - 1) ~attr:fill;
     row := rows t - 1
   end;
   set_cursor t !col !row
+
+let put_char t ch attr = output_char t ch (Attribute attr)
+let teletype t ch color = output_char t ch (Teletype color)
 
 let put_string t s attr = String.iter (fun c -> put_char t (Char.code c) attr) s
 
