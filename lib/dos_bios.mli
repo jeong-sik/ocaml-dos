@@ -10,6 +10,7 @@ type host_vector =
   | Dos_terminate
   | Dos_call
   | Dos_keep
+  | Multiplex
   | Ems
 
 val host_vector : int -> host_vector option
@@ -19,13 +20,23 @@ val host_vector : int -> host_vector option
     있다. 스텁은 "int 실벡터+0x80; iret" 이고, 그 사설 벡터를 호스트 훅이
     받는다. EMS(67h)는 디바이스 헤더 0 번지의 스텁이다. *)
 
+val rom_seg : int
+(** F000h, the segment of every ROM routine and stub. *)
+
+val xms_entry_off : int
+(** Where the XMS control function starts in the ROM segment; INT 2Fh
+    AX=4310h hands out F000:[xms_entry_off]. *)
+
+val xms_control_id : int
+(** 43h: the service id {!private_service_vector} returns for the XMS
+    control function's stub. It is not a vector: IVT[43h] keeps the
+    graphics font pointer. *)
+
 val install : Dos_state.t -> unit
 (** ROM·IVT·BDA 를 실기 부팅 상태로 채운다. *)
 
 val ivt_is_own_stub : Dos_state.t -> int -> bool
 (** 그 벡터가 아직 우리 스텁을 가리키는가 — 게스트가 가로챘으면 false. *)
-
-val rom_seg : int
 
 val ivt_is_iret_stub : Dos_state.t -> int -> bool
 (** 그 벡터가 ROM 의 IRET 스텁을 가리키는가 — 이 기계가 구현하지 않은 벡터의

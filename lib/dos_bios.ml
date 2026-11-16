@@ -22,6 +22,7 @@ type host_vector =
   | Dos_terminate
   | Dos_call
   | Dos_keep
+  | Multiplex   (* INT 2Fh: XMS 가 43h 로 답한다 *)
   | Ems
 
 let host_vector = function
@@ -36,6 +37,7 @@ let host_vector = function
   | 0x20 -> Some Dos_terminate
   | 0x21 -> Some Dos_call
   | 0x27 -> Some Dos_keep
+  | 0x2F -> Some Multiplex
   | 0x33 -> Some (Bios Mouse)
   | 0x67 -> Some Ems
   | _ -> None
@@ -78,6 +80,22 @@ let alt_font_off = 0xD000
 
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
+
+(* The XMS control function (Dos_xms), far-called at F000:[xms_entry_off]
+   after INT 2Fh AX=4310h. XMS 3.0 "IMPLEMENTATION NOTES" ask it to start
+   with a short jump over three NOPs: a hooking program patches a far
+   jump over those five bytes and chains to entry + 5. Its service id is
+   43h, the multiplex number XMS answers to. It names the stub in
+   [stubs] and picks the private vector; IVT[43h] is left alone (it is
+   the graphics font pointer). *)
+let xms_control_id = 0x43
+let xms_hook_bytes = 5
+
+let xms_control =
+  "\xeb\x03\x90\x90\x90"                (* jmp short +3; nop; nop; nop *)
+  ^ "\xcd" ^ String.make 1 (Char.chr (private_vector xms_control_id))
+                                     (* int 0C3h — the host serves it *)
+  ^ "\xcb"                            (* retf *)
 
 let set_ivt t v off sg =
   wr16 t (v * 4) off;
@@ -123,6 +141,12 @@ let bios_int8 =
   ^ "\xcd\x1c"                      (* hook: int 1Ch — 사용자 틱 훅 *)
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
+
+(* The XMS control function goes on the first paragraph after the INT 8
+   routine, so a longer routine moves it instead of being overwritten. *)
+let paragraph = 16
+let xms_entry_off =
+  (bios_int8_off + String.length bios_int8 + paragraph - 1) / paragraph * paragraph
 
 (* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
    3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
@@ -257,6 +281,10 @@ let install t =
   String.iteri
     (fun i c -> wr8 t ((rom_seg * 16) + case_map_off + i) (Char.code c))
     (Dos_country.case_map_code ~at:case_map_off);
+  Bytes.blit_string xms_control 0 t.mem
+    ((rom_seg * 16) + xms_entry_off)
+    (String.length xms_control);
+  t.stubs <- (xms_control_id, xms_entry_off + xms_hook_bytes) :: t.stubs;
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* POST 는 부팅 모드를 세우며 화면을 지운다: 공백, 속성 07h. 이게
      없으면 화면 메모리가 0(검정 위 검정)이라, 칸의 속성을 두는 teletype
@@ -304,7 +332,7 @@ let install t =
     | Some Ems ->
       set_ivt t v emm_entry_off rom_seg;
       t.stubs <- (v, emm_entry_off) :: t.stubs
-    | Some (Bios _ | Dos_divide_overflow | Dos_terminate | Dos_call | Dos_keep) ->
+    | Some (Bios _ | Dos_divide_overflow | Dos_terminate | Dos_call | Dos_keep | Multiplex) ->
       let a = (rom_seg * 16) + !off in
       wr8 t a 0xCD;
       wr8 t (a + 1) (private_vector v);

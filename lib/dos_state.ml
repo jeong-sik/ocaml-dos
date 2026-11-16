@@ -202,7 +202,7 @@ type input_continuation = {
 (* 이 기계가 받지 못한 INT 호출의 갈래. 기계 동작은 바꾸지 않고 관찰자에게만
    알린다 — 게임을 돌려 무엇이 빠졌는지 찾는 진단용이다. *)
 type unserved =
-  | No_function  (** 호스트 서비스(21h·10h·15h·16h·1Ah·33h)에 이 기능 갈래가 없다 *)
+  | No_function  (** 호스트 서비스(21h·10h·15h·16h·1Ah·2Fh·33h)에 이 기능 갈래가 없다 *)
   | Iret_stub    (** 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔다 *)
 
 type t = {
@@ -227,7 +227,6 @@ type t = {
   mutable input_continuations : input_continuation list;
   mutable console_pending : string;  (* cooked AH=3F line bytes not yet returned *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
-  mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
@@ -256,6 +255,7 @@ type t = {
         (** 핸들 → AH=53h 로 붙인 이름. 여덟 바이트이고, 첫 NUL 뒤는 모두
             NUL 이다. 이름이 없는(모두 NUL) 핸들은 없고, 같은 이름은 둘
             없다. *)
+  xms : Dos_xms.t;                            (** XMS 드라이버(INT 2Fh AH=43h) *)
   mouse : mouse;
   mutable on_unserved : unserved -> vector:int -> ax:int -> unit;
         (** 관찰자. 기계 상태가 아니어서 스냅숏에 싣지 않는다 *)
@@ -312,6 +312,20 @@ let sda_exterr_pointer = 8
 let sda_user_in_ax = 0x1A
 let byte_max = 0xFF
 let sda off = physical sda_seg off
+
+(* CONST2.ASM 에서 SWAP_START 앞: VERFLG, CharCo, chSwitch, AllocMethod,
+   fShare, DIFFNAM, MYNAME(16), CritPatch(10) 해서 32 바이트, 그 뒤 EVEN.
+   그 앞 크기를 몰라 EVEN 은 0 바이트로 친다. 게스트가 주소로 찾는 값이
+   아니어서 자리는 이 기계가 고른 것이다. [sda] 는 SWAP_START 기준이라
+   음수 오프셋도 받는다. *)
+let pre_swap_verify = -32
+let pre_swap_switch_char = -30
+let default_switch_char = Char.code '/'
+
+(* CONST2.ASM 초기값 중 0 이 아닌 것: WPErr <-1>, chSwitch <'/'> *)
+let init_dos_data t =
+  wr8 t (sda sda_wp_err) byte_max;
+  wr8 t (sda pre_swap_switch_char) default_switch_char
 
 (* DISP.ASM DSKROUT: AH 가 0 이거나 0Ch 보다 크고 59h 가 아닌 기능에 들어갈
    때. 50h·51h·62h·33h·64h 는 그 앞에서 따로 끝나 여기에 오지 않는다. *)

@@ -32,12 +32,27 @@ let accept_service t ~return_to = function
 
 (* [None]: IVT 가 0:0 인 벡터. 실기라면 0000:0000 으로 뛴다. *)
 let host_service t ~return_to v =
+  if v = Dos_bios.xms_control_id then begin
+    (* The XMS control function is a far-called stub, not a vector:
+       IVT[43h] stays the IRET stub. A move copies the way HIMEM's own
+       MOVSW does: through the CPU's bus, so the planar video window
+       takes it like guest stores. *)
+    Dos_xms.control t.xms t.cpu ~read:(Cpu86.bus_read t.cpu)
+      ~write:(Cpu86.bus_write t.cpu);
+    Completed
+  end
+  else
   match Dos_bios.host_vector v with
   | Some Dos_divide_overflow -> Dos_dos.divide_overflow t; Control_transferred
   | Some Dos_terminate -> Dos_dos.terminate t; Control_transferred
   | Some Dos_call -> Dos_dos.service t ~return_to
   | Some Dos_keep -> Dos_dos.int27 t; Control_transferred
   | Some Ems -> Dos_ems.service t; Completed
+  | Some Multiplex ->
+    (match Dos_xms.multiplex t.cpu ~entry:(Dos_bios.rom_seg, Dos_bios.xms_entry_off) with
+     | Dos_xms.Answered -> ()
+     | Dos_xms.Not_xms -> report_unserved t No_function ~vector:v);
+    Completed
   | Some (Bios s) -> Dos_bios.service t s
   | None -> Completed
 
@@ -50,7 +65,7 @@ let service_status_mask t v =
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
-  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
+  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
 let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false) () =
@@ -98,7 +113,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; kbd_requests = 0; last_tick = 0;
+      kbd_wait = false; kbd_requests = 0;
       ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
@@ -108,6 +123,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
       ems_names = Hashtbl.create 1;
+      xms = Dos_xms.create ();
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
@@ -132,7 +148,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
   Dos_bios.install t;
-  wr8 t (sda sda_wp_err) byte_max;              (* CONST2.ASM WPErr <-1> *)
+  init_dos_data t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
       match Dos_bios.private_service_vector t raw with
@@ -193,13 +209,11 @@ let step_result t =
   if t.exited then Exited
   else begin
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
-    let interval = Dos_ports.cycles_per_tick t.ports in
     let cyc = Cpu86.cycles t.cpu in
     let pic = Dos_ports.pic t.ports in
-    if cyc - t.last_tick >= interval then begin
-      t.last_tick <- cyc;
-      Dos_pic.raise_irq pic Dos_pic.Timer
-    end;
+    (* 채널 0 의 OUT 이 오르면 IRQ0 을 요청한다. 그 사이 여러 번 올랐어도
+       IRR 은 한 비트다. *)
+    if Dos_ports.irq0_due t.ports then Dos_pic.raise_irq pic Dos_pic.Timer;
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;
@@ -400,8 +414,9 @@ let input_requests t = t.kbd_requests
 (* ---------- 화면 ---------- *)
 
 let frame_dims t = Dos_video.dims t.video
-let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t)
-let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
+let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
+let screen_text_utf8 t =
+  Dos_render.text_utf8 t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
 
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
@@ -412,7 +427,7 @@ let frame_rgb t =
   else
   match Dos_video.kind t.video with
   | Dos_video.Text ->
-    Dos_render.rgb_text t.mem ~cols:(cols t)
+    Dos_render.rgb_text t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
       ~attr:(Dos_video.attr_palette t.video) ~pal
       ~blink:(Dos_video.text_blink t.video)
   | Dos_video.Cga4 ->

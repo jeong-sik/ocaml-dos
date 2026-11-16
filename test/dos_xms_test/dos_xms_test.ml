@@ -81,11 +81,13 @@ let test_multiplex () =
   let entry = (0xF000, 0x0160) in
   Cpu86.set_reg16 r.cpu ax 0x4300;
   Cpu86.set_reg16 r.cpu bx 0x1234;
-  Dos_xms.multiplex r.cpu ~entry;
+  check_int "4300h answered"
+    (Bool.to_int (Dos_xms.multiplex r.cpu ~entry = Dos_xms.Answered)) 1;
   check_int "4300h: AL=80h, AH kept" (reg r ax) 0x4380;
   check_int "4300h: BX kept" (reg r bx) 0x1234;
   Cpu86.set_reg16 r.cpu ax 0x4310;
-  Dos_xms.multiplex r.cpu ~entry;
+  check_int "4310h answered"
+    (Bool.to_int (Dos_xms.multiplex r.cpu ~entry = Dos_xms.Answered)) 1;
   check_int "4310h: ES" (Cpu86.seg r.cpu es) 0xF000;
   check_int "4310h: BX" (reg r bx) 0x0160;
   check_int "4310h: AX kept" (reg r ax) 0x4310;
@@ -94,7 +96,8 @@ let test_multiplex () =
   List.iter
     (fun v ->
       Cpu86.set_reg16 r.cpu ax v;
-      Dos_xms.multiplex r.cpu ~entry;
+      check_int (Printf.sprintf "%04Xh: not XMS" v)
+        (Bool.to_int (Dos_xms.multiplex r.cpu ~entry = Dos_xms.Not_xms)) 1;
       check_int (Printf.sprintf "%04Xh: AX kept" v) (reg r ax) v;
       check_int (Printf.sprintf "%04Xh: BX kept" v) (reg r bx) 0x2222;
       check_int (Printf.sprintf "%04Xh: ES kept" v) (Cpu86.seg r.cpu es) 0x1111)
