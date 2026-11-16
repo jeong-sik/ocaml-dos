@@ -59,9 +59,9 @@ let rom_font_off = 0xFA6E
    (FFh)를 가린다. *)
 let model_byte_off = 0xFFFE
 let at_model_byte = 0xFC
-(* INT 21h AH=38h 표가 가리키는 대문자 루틴(Dos_country). 스텁 자리
-   (0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
-let case_map_off = 0x0400
+(* 나라별 표(Dos_country): 대문자 루틴과 INT 21h AH=38h·63h·65h 가
+   가리키는 표들. 스텁 자리(0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
+let country_off = 0x0400
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
@@ -80,6 +80,8 @@ let alt_font_off = 0xD000
 
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
+
+let country, country_rom = Dos_country.image ~segment:rom_seg ~at:country_off
 
 (* The XMS control function (Dos_xms), far-called at F000:[xms_entry_off]
    after INT 2Fh AX=4310h. XMS 3.0 "IMPLEMENTATION NOTES" ask it to start
@@ -279,8 +281,8 @@ let install t =
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
   wr8 t ((rom_seg * 16) + model_byte_off) at_model_byte;
   String.iteri
-    (fun i c -> wr8 t ((rom_seg * 16) + case_map_off + i) (Char.code c))
-    (Dos_country.case_map_code ~at:case_map_off);
+    (fun i c -> wr8 t ((rom_seg * 16) + country_off + i) (Char.code c))
+    country_rom;
   Bytes.blit_string xms_control 0 t.mem
     ((rom_seg * 16) + xms_entry_off)
     (String.length xms_control);
@@ -1157,5 +1159,3 @@ let service t s =
   | Time_of_day -> clock t; Completed
   | System -> system t; Completed
   | Mouse -> mouse t; Completed
-
-let case_map_entry = (rom_seg, case_map_off)

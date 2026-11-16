@@ -49,9 +49,8 @@ val read_key : Dos_state.t -> Dos_state.service_result
 val service : Dos_state.t -> bios_service -> Dos_state.service_result
 (** BIOS 서비스 하나를 실행한다. *)
 
-val case_map_entry : int * int
-(** INT 21h AH=38h 표의 대문자 루틴 (세그먼트, 오프셋). [install] 이 ROM 에
-    {!Dos_country.case_map_code} 를 싣는다. *)
+val country : Dos_country.layout
+(** 나라별 표의 자리. [install] 이 ROM 에 {!Dos_country.image} 를 싣는다. *)
 
 val set_ticks_from_clock : Dos_state.t -> unit
 (** BIOS 틱(0x46C)을 지금 시각의 시·분·초로 채우고 자정 넘김(0x470)을
