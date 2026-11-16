@@ -13,9 +13,12 @@ val text_utf8 : Bytes.t -> cols:int -> string
 (** 같은 화면을 CP437 그대로 UTF-8 로. 테두리·하트·화살표가 살아 있어
     기계 판정에 쓴다. *)
 
-val rgb_text : Bytes.t -> cols:int -> string
+val rgb_text :
+  Bytes.t -> cols:int -> attr:int array -> pal:(int * int * int) array ->
+  blink:bool -> string
 (** 텍스트 화면을 RGB 로. 8x8 글리프를 세로로 두 배 늘려 25 줄이 400
-    줄이 된다. 너비는 [cols] * 8. *)
+    줄이 된다. 너비는 [cols] * 8. 색 번호는 [attr] 를 지나 DAC 자리가
+    된다. [blink] 이면 바탕은 여덟 색이고, 아니면 열여섯 색이다. *)
 
 val rgb_cga4 : Bytes.t -> mode:int -> color_select:int -> string
 (** CGA 320x200 4색(모드 4·5). 네 색은 포트 0x3D9 가 고른다. *)
@@ -23,11 +26,10 @@ val rgb_cga4 : Bytes.t -> mode:int -> color_select:int -> string
 val rgb_cga2 : Bytes.t -> string
 (** CGA 640x200 2색(모드 6). *)
 
-val rgb_planar :
-  Bytes.t array -> w:int -> h:int -> attr:int array ->
-  pal:(int * int * int) array -> string
-(** EGA/VGA 16색. 평면 넷의 같은 비트가 색 번호를 만들고, [attr] 이
-    그것을 DAC 자리로 옮긴다. *)
+val rgb_indexed : Bytes.t -> (int * int * int) array -> string
+(** 화면 순서로 늘어선 DAC 자리를 RGB 로. 바이트 하나가 점 하나다.
+    16색({!Dos_video.screen16})과 256색({!Dos_video.screen256})이 같이
+    쓴다. *)
 
-val rgb_vga13 : Bytes.t -> (int * int * int) array -> string
-(** VGA 13h 화면(0xA0000 선형)을 320x200 RGB 로. *)
+val rgb_solid : width:int -> height:int -> (int * int * int) array -> string
+(** 화면을 끈 동안의 그림: 모든 점이 DAC 0 번 색이다. *)

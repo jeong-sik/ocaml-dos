@@ -28,8 +28,42 @@
     SMSW(0F 01 /4)만 있다 — 0xFFF0 을 돌려준다. 1990년대 DOS 게임은 286
     이상을 요구하고 이 자리로 확인한다. 나눗셈 오류(DIV·IDIV·AAM 0)는
     286 에서 결함이다 — INT 0 이 돌아갈 자리가 다음 명령이 아니라 그
-    나눗셈 자신이다. *)
-type model = I8086 | I80186 | I80286
+    나눗셈 자신이다.
+
+    [I80386] 은 286 의 실모드에 세 가지를 더한다: 범용 레지스터의 위 16
+    비트({!reg32}), FS·GS(세그먼트 4·5, 접두 64h·65h, MOV sreg), 실모드에서도
+    POPF·IRET 로 쓸 수 있는 FLAGS bit12-14(IOPL·NT). bit15 는 0 이다. 게임은
+    bit12-14 가 남는지로 386 을 가른다. 명령 길이는 15 바이트까지다. 결함도
+    286 과 다르다: 받지 않는 명령의 LOCK 은 INT 6, SS 로 세그먼트 끝을 넘으면
+    INT 12, 결함 난 문자열 명령은 그 반복을 처음부터 다시 한다.
+
+    66h 는 80386.csv 의 66 열이 고른 155 opcode 의 피연산자를 32 비트로
+    바꾼다. 실칩이 설명서를 글자 그대로 읽은 것과
+    다른 자리가 셋 있다. 세그먼트 레지스터의 32 비트 PUSH·POP 은 SP 를 4
+    움직이고 워드 하나만 오간다. POPAD 는 ESP 의 위 16 비트를 스택의 ESP
+    자리에서 가져온다. PUSHAD 는 EDI 부터 쓰고 세그먼트 끝을 넘는 첫 자리에서
+    INT 12 다. EIP 가 FFFFh 를 넘는 RET·점프는 CS 한계 밖이라 INT 13 이다.
+
+    67h 는 주소를 32 비트로 센다: modrm 의 SIB·disp32, A0h-A3h 의 moffs32,
+    문자열 명령의 ESI·EDI·ECX, LOOP·JECXZ 의 ECX, XLAT 의 EBX 다. 실모드
+    세그먼트 한계는 FFFFh 그대로라, 접근의 끝 바이트가 그 위면 SS 는 INT 12,
+    나머지는 INT 13 이다. 설명서가 말하지 않는 규칙이 하나 있다: SIB 에
+    인덱스가 없으면 배율이 베이스에 곱해진다. POP r/m 의 [esp+...] 는 pop 한
+    뒤의 ESP 로 센다.
+
+    0x0F 확장(RFC 0001 3 단계)은 실모드 데이터에 있는 형태가 다 있다: Jcc
+    rel16·rel32, SETcc, MOVZX·MOVSX, FS·GS 의 PUSH·POP, BT·BTS·BTR·BTC,
+    SHLD·SHRD, IMUL r,r/m, BSF·BSR, LSS·LFS·LGS, CLTS 다. 66h 는 SETcc 와 CLTS
+    를 뺀 모두를 32 비트로 바꾼다. Jcc rel16 은 IP 를 16 비트에서 감고, rel32
+    는 FFFFh 를 넘으면 INT 13 이다.
+    설명서가 정하지 않은 자리에서 실칩은 이렇게 한다. 16 비트 SHLD·SHRD 의
+    횟수가 17-31 이면 결과는 원본을 (횟수-16) 만큼 돌린 값이다. 횟수가 0 이어도
+    메모리 피연산자를 읽는다. BSF·BSR 의 원본이 0 이면 대상은 그대로다.
+    LOCK 은 메모리를 바꾸는 BTS·BTR·BTC 에만 붙고, 나머지는 INT 6 이다.
+    80386.csv 의 lck 열은 BTR(0F B3)을 0 으로 적었지만 실칩은 LOCK BTR 을
+    실행한다.
+    근거는 SingleStepTests/80386 실모드다. *)
+type model = I8086 | I80186 | I80286 | I80386
 
 exception Unsupported of string
 (** 아직 구현되지 않은 명령을 만났다. 메시지는 명령 위치와 opcode.
@@ -72,12 +106,22 @@ val set_reg16 : t -> int -> int -> unit
 val reg8 : t -> int -> int
 val set_reg8 : t -> int -> int -> unit
 
+val reg32 : t -> int -> int
+(** [I80386] 의 32 비트 레지스터 0..7 = EAX ECX EDX EBX ESP EBP ESI EDI. 16·8
+    비트 쓰기는 위 16 비트를 그대로 둔다. 다른 모델에서는 [Invalid_argument]. *)
+
+val set_reg32 : t -> int -> int -> unit
+(** 아래 32 비트만 쓴다. 다른 모델에서는 [Invalid_argument]. *)
+
 val seg : t -> int -> int
-(** 세그먼트 레지스터 0..3 = ES CS SS DS. *)
+(** 세그먼트 레지스터 0..3 = ES CS SS DS, [I80386] 은 4·5 = FS GS 까지. 그
+    밖의 번호는 [Invalid_argument]. *)
 
 val set_seg : t -> int -> int -> unit
 
 val dump_ip : t -> int
+(** [I80386] 은 FFFF 의 마지막 바이트를 지난 뒤 10000h 를 돌려준다. EIP 가
+    32 비트라서다. 다음 페치는 CS 한계 밖이라 INT 13 이다. *)
 
 val bus_read : t -> int -> int
 (** The [read] callback this core was built with: what an instruction
@@ -89,9 +133,11 @@ val bus_write : t -> int -> int -> unit
 
 val set_ip : t -> int -> unit
 
-val physical : seg:int -> off:int -> int
-(** [~seg:s ~off:o] 물리 주소 = ((s lsl 4) + o) land 0xFFFFF. 1MB wrap
-    은 8086 의 주소 버스가 20비트인 것의 재현 — A20 게이트는 M1. *)
+val physical : t -> seg:int -> off:int -> int
+(** [~seg:s ~off:o] 이 CPU 가 버스에 내는 주소 = (s lsl 4) + o 를 주소선
+    수로 자른 값. 8086·186 은 20비트라 1MB 에서 감기고, 286 은 24비트라
+    10FFEFh 까지 간다. 286 보드에서 1MB 에서 감는 것은 A20 게이트의 일이라
+    메모리를 붙이는 쪽이 정한다. *)
 
 val flags : t -> int
 (** FLAGS word (bit0 CF, bit2 PF, bit4 AF, bit6 ZF, bit7 SF, bit8 TF,
@@ -127,12 +173,23 @@ val f_interrupt : int
 val f_direction : int
 val f_overflow : int
 
+val model : t -> model
+(** The model [create] was given. *)
+
 (** {1 Saved state}
 
     What a machine snapshot needs from the CPU: the registers, the flags word,
     HLT and the cycle count the machine's clock derives from. The model and
     the memory, port and interrupt callbacks belong to whoever creates the
     CPU and are not part of it. *)
+
+(** What an 80386 holds beyond the 286 registers. IOPL and NT (FLAGS bits
+    12-14) travel in [saved_flags]. *)
+type saved_386 = {
+  saved_regs_hi : int array;  (** 8 × upper 16 bits, AX CX DX BX SP BP SI DI *)
+  saved_fs : int;
+  saved_gs : int;
+}
 
 type saved = {
   saved_regs : int array;  (** 8 × 16-bit, AX CX DX BX SP BP SI DI *)
@@ -141,10 +198,12 @@ type saved = {
   saved_flags : int;  (** as {!flags} returns it *)
   saved_halted : bool;
   saved_cycles : int;
+  saved_386 : saved_386 option;  (** [Some] exactly when the model is [I80386] *)
 }
 
 val save_state : t -> saved
 
 val load_state : t -> saved -> unit
-(** Values are masked as the setters mask them. [Invalid_argument] unless
-    there are 8 registers and 4 segments. *)
+(** Values are masked as the setters mask them. [Invalid_argument], with the
+    CPU left as it was, unless there are 8 registers and 4 segments and
+    [saved_386] is [Some] (with 8 upper halves) exactly for an [I80386]. *)
