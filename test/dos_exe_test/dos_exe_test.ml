@@ -18,9 +18,10 @@ let make_exe ~image ~ip ~cs ~ss ~sp relocs =
   let w v = Buffer.add_char b (Char.chr (v land 0xff));
             Buffer.add_char b (Char.chr ((v lsr 8) land 0xff)) in
   Buffer.add_string b "MZ";
+  (* 페이지 수는 헤더까지 센다 — 로더는 [페이지 × 512] 를 모듈 끝으로 본다 *)
   let total = 32 + String.length image in
-  w ((total - 32) mod 512); if ((total - 32) mod 512) = 0 then (); (* last page *)
-  w (((total - 32) + 511) / 512);  (* pages: 근사 — 로더는 안 읽음 *)
+  w (total mod 512);              (* 마지막 페이지 바이트 *)
+  w ((total + 511) / 512);        (* 페이지 수 *)
   w (List.length relocs);
   w 2;            (* header paras: 32 바이트 *)
   w 0; w 0;       (* minalloc/maxalloc *)
@@ -143,6 +144,72 @@ let () =
      | Invalid_argument message -> message = "MZ header too short"
      | _ -> false)
     true;
+
+  (* #73: 적재 모듈은 헤더의 페이지 수가 정한다(MS-DOS 4.0 EXEC.ASM
+     exec_save_start). 파일 뒤에 붙은 데이터는 싣지 않고, 메모리 배치도
+     모듈 크기로 센다. 마지막 페이지 바이트(02h)는 보지 않으므로 같은
+     페이지 안의 뒤 데이터는 실린다. *)
+  let exit7 = "\xb8\x07\x4c\xcd\x21" in                (* mov ax,4C07h; int 21h *)
+  let small = make_exe ~image:exit7 ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [] in
+  let module_bytes = 512 - 32 in                        (* 1 페이지 − 헤더 *)
+  let trailer = String.make (700 * 1024) '\xaa' in
+  let m = Dos_machine.create () in
+  Dos_machine.load_exe m (small ^ trailer);
+  check "trailer: psp below memtop by the module, not the file"
+    (Dos_machine.psp_seg_of m) (0x9FF0 - (module_bytes / 16));
+  let base = (Dos_machine.psp_seg_of m + 0x10) * 16 in
+  check "trailer: the rest of the last page loads"
+    (Dos_machine.mem_read m (base + String.length exit7)) 0xaa;
+  check "trailer: the last module byte loads"
+    (Dos_machine.mem_read m (base + module_bytes - 1)) 0xaa;
+  check "trailer: nothing past the pages loads"
+    (Dos_machine.mem_read m (base + module_bytes)) 0;
+  Dos_machine.run m ~max_steps:1000;
+  check "trailer: program runs" (Dos_machine.exit_code m) 7;
+
+  (* "ZM" 도 EXE 서명이다(EXEC.ASM exe_valid_old_signature) *)
+  let zm = Bytes.of_string small in
+  Bytes.set zm 0 'Z'; Bytes.set zm 1 'M';
+  let m = Dos_machine.create () in
+  Dos_machine.load_exe m (Bytes.to_string zm);
+  Dos_machine.run m ~max_steps:1000;
+  check "ZM signature runs" (Dos_machine.exit_code m) 7;
+
+  (* 파일이 페이지 끝보다 511 바이트 짧으면 있는 만큼 싣고, 512 바이트
+     짧으면 형식 오류다(EXEC.ASM exec_read_ok). 배치는 모자란 파일이
+     아니라 페이지 수로 센다. *)
+  let with_pages exe pages =
+    let b = Bytes.of_string exe in
+    Bytes.set b 4 (Char.chr (pages land 0xff));
+    Bytes.set b 5 (Char.chr (pages lsr 8));
+    Bytes.to_string b
+  in
+  let pad n = exit7 ^ String.make (n - String.length exit7) '\x00' in
+  let short511 =
+    with_pages (make_exe ~image:(pad (513 - 32)) ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE []) 2
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_exe m short511;
+  check "511 short: placed by the pages"
+    (Dos_machine.psp_seg_of m) (0x9FF0 - ((1024 - 32) / 16));
+  Dos_machine.run m ~max_steps:1000;
+  check "511 short: program runs" (Dos_machine.exit_code m) 7;
+  let raises name image want =
+    checkb name
+      (try Dos_machine.load_exe (Dos_machine.create ()) image; false
+       with Invalid_argument message -> message = want)
+      true
+  in
+  raises "512 short: named error"
+    (with_pages (make_exe ~image:(pad (512 - 32)) ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE []) 2)
+    "MZ file is a page or more shorter than its header says";
+  raises "pages ending in the header: named error" (with_pages small 0)
+    "MZ pages end inside the header";
+  let many_relocs = Bytes.of_string small in
+  Bytes.set many_relocs 6 '\x40';                        (* 64 항목 = 256 바이트 *)
+  raises "relocations past the file: named error" (Bytes.to_string many_relocs)
+    "MZ relocation table runs past the file";
+  raises "no MZ signature: named error" "\xb8\x07\x4c\xcd\x21" "not an MZ image";
 
   if !failed = 0 then print_endline "dos M2b: all passed"
   else begin

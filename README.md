@@ -31,16 +31,46 @@
 
 남은 4,827 은 나눗셈이 0 나눗셈이나 몫 넘침으로 트랩할 때 인터럽트
 프레임에 밀리는 플래그다. 나눗셈이 성공하는 경로는 전부 일치한다.
-`test/sst8086-baseline.txt` 가 이 수를 붙잡고 있어서, 넘으면 테스트가
+`test/cpu86_vtest/sst8086-baseline.txt` 가 이 수를 붙잡고 있어서, 넘으면 테스트가
 깨진다.
 
 ```sh
 # 데이터셋을 /tmp/sst8086/v1 에 풀어 두고
 ALL=$(ls /tmp/sst8086/v1/*.json.gz | xargs -n1 basename | sed 's/\.json\.gz$//' | paste -sd, -)
-SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
+SST_FILES="$ALL" dune exec --root . test/cpu86_vtest/cpu86_vtest.exe
 ```
 
 데이터셋이 없으면 이 스위트는 건너뛴다(CI 가 그렇다).
+
+`I80286` 은 Harris N80C286-12 에서 뽑은
+[SingleStepTests/80286](https://github.com/SingleStepTests/80286) 실모드
+327 파일, 147만 8천 케이스로 잰다. 형식은 JSON 이 아니라
+[MOO](https://github.com/dbalsom/moo) 라 `test/sst/moo.ml` 이 읽는다. fail 은
+2 이고 사유는 `test/sst/sst80286-baseline.txt` 에 있다: IVT 바이트가 빠진
+테스트 하나, SP=BP=FFFF 인 ENTER 하나다.
+
+```sh
+# 데이터셋을 /tmp/sst80286/v1_real_mode 에 받아 두고(약 310MB)
+ALL=$(ls /tmp/sst80286/v1_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.MOO\.gz$//' | paste -sd, -)
+SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst286.exe
+```
+
+`I80386` 은 Intel 386EX 에서 뽑은
+[SingleStepTests/80386](https://github.com/SingleStepTests/80386) 실모드로
+잰다. 0Fh 확장은 아직 없어 0Fh 로 시작하지 않는 780 파일, 149만 8,600
+케이스를 돌린다. 66h·67h 가 없는 325 파일, 66h 194 파일, 67h 261 파일이다.
+fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문자열이
+칩이 이미 가져온 자기 코드를 덮는 경우라, 프리페치 큐가 없는 이 모델로는
+맞출 수 없다(#159). 포트 22h·23h 는 CPU 가 아니라
+386EX 칩 안 주변장치 레지스터(REMAPCFG)라, 러너가 시험 기계에서 읽힌 값
+7Fh·42h 를 돌려준다. 다른 포트는 FFh 다. 데이터셋 옆 `revocation_list.txt`
+가 적은 테스트는 건너뛴다.
+
+```sh
+# 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)
+ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67)*0F' | sed 's/\.MOO\.gz$//' | paste -sd, -)
+SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
+```
 
 ### 어느 칩을 흉내내는가
 
@@ -54,16 +84,85 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
 | 0xC8/0xC9 | retf imm16 / retf | enter / leave |
 | 그룹2 reg=6 | SETMO/SETMOC | shl |
 
-기본값은 `I80186` — 1990년대 게임은 286 이상에서 돌았고 Borland
-컴파일러가 186 명령을 낸다. 실칩 검증 스위트만 `I8086` 으로 돈다.
+`I80286` 은 실모드에서 `I80186` 과 같은 명령을 돌리고, 프로그램이 CPU 를
+가르는 자리만 다르다.
 
-8087 코프로세서는 없다. ESC(0xD8-0xDF)는 피연산자만 읽고 지나가며,
+| | I8086·I80186 | I80286 |
+|---|---|---|
+| FLAGS bit12-15 를 읽으면 | 1 | 0 |
+| PUSH SP 가 미는 값 | 줄어든 SP | 줄기 전 SP |
+| 0x0F | POP CS | 두 바이트 명령의 머리 — SMSW(0F 01 /4)만 있고 0xFFF0 을 준다 |
+| 주소선 | 20개, FFFF:FFFF 는 0FFEFh | 24개, FFFF:FFFF 는 10FFEFh(1MB 에서 감는 일은 기계의 A20 몫) |
+| AAA·AAS | AL 과 AH 를 따로 고친다 | AX 에 106h 를 더하고 뺀다 |
+| DAS | AL-6 의 빌림은 CF 에 남지 않는다 | 남는다 |
+| 오프셋 FFFF 의 워드 | 오프셋 0 으로 감는다 | INT 13 |
+| 10 바이트를 넘는 명령(접두 포함) | 그대로 돈다 | INT 13 |
+| LEA·LES·LDS·BOUND·CALL/JMP FAR 의 레지스터 피연산자, MOV CS, 8C·8E 의 reg 4-7, 8F·C6·C7 의 reg≠0 | 별칭으로 돌거나 Unsupported | INT 6 |
+| BOUND 범위 밖 | INT 5 가 다음 명령으로 돌아간다 | BOUND 자신으로 돌아간다 |
+
+기계(`Dos_machine`)는 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
+요구하고 위 자리로 확인한다. 루카스아츠의 Monkey Island 2 와 Day of the
+Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으로 돈다.
+
+286 의 결함은 명령을 일어나지 않은 것으로 돌린다. IP 는 첫 접두
+바이트로, 레지스터는 명령 시작 때 값으로 돌아간다. 실칩이 먼저 고쳐 둔
+레지스터는 그대로 둔다. POP r/m 은 쓰기에서 넘쳐도 SP 를 올린 채고, 문자열
+명령은 넘친 접근의 포인터를 이미 옮겼다. REP 의 CX 도 그 반복에서 읽기면
+1, 쓰기면 2 줄어 있다.
+
+`I80386` 은 286 의 실모드 위에 이것이 다르다.
+
+| | I80286 | I80386 |
+|---|---|---|
+| 범용 레지스터 | 16 비트 | 32 비트(`reg32`), 16·8 비트 쓰기는 위 절반을 둔다 |
+| FS·GS | 없다(64h·65h 는 Unsupported) | 접두 64h·65h, MOV sreg 4·5 |
+| FLAGS bit12-14 | 0 | POPF·IRET 로 쓴 값이 남는다(bit15 는 0) |
+| LOCK | 버스 신호로만 쓴다 | 받지 않는 명령이나 레지스터 피연산자면 INT 6 |
+| SS 로 오프셋 FFFF 의 워드 | INT 13 | INT 12 |
+| FFFF 의 마지막 바이트 뒤 | IP 가 0 으로 감는다 | EIP 10000h, 다음 페치가 INT 13 |
+| 결함 난 문자열 명령 | 포인터·CX 를 옮겨 둔다 | 그 반복 앞 값으로 둔다 |
+| 결함 난 POP r/m·POPA | SP 를 올린 채 / 모두 되돌린다 | SP 만 되돌린다(POPA 가 꺼낸 값은 남는다) |
+| BOUND 하한 밖 | 상한을 읽지 않는다 | 상한도 읽는다(FFFF 면 INT 13) |
+| 바이트 SHL·SHR 를 16·24 번 | CF=0 | 8 번일 때의 CF |
+| 명령 길이 | 10 바이트 | 15 바이트 |
+| 66h·67h | opcode 자리(Unsupported) | 피연산자·주소 크기 접두 |
+
+66h 는 [80386.csv](https://github.com/SingleStepTests/80386/blob/main/80386.csv)
+의 `66` 열이 고른 한 바이트 opcode 155 개를 32 비트 피연산자로 돌린다.
+67h 는 주소를 32 비트로 센다(SIB·disp32, 문자열의 ESI·EDI·ECX). 실모드
+한계는 FFFFh 그대로라, 끝 바이트가 그 위인 접근은 INT 13 이고 SS 면 INT 12
+다. 설명서를 글자 그대로 읽은 것과 데이터가 다른 자리는 이렇다.
+
+| 명령 | 실칩 |
+|---|---|
+| 66h PUSH/POP sreg | SP 는 4 움직이고 워드 하나만 오간다 |
+| 66h POPAD | ESP 위 16 비트를 스택의 ESP 자리에서 가져온다 |
+| 66h PUSHAD | EDI 부터 위로 쓰고, 세그먼트 끝을 넘는 첫 자리에서 INT 12 다 |
+| 66h RET | FFFFh 위 EIP 는 INT 13 이다 |
+| 67h SIB 인덱스 없음(4) | 배율이 베이스에 곱해진다 |
+
+기계는 아직 `I80286` 으로 돈다. 0Fh 확장(RFC 0001 3 단계)과 스냅숏·
+`dosboot --cpu 386`(4 단계)이 있어야 386 을 요구하는 게임이 돈다.
+
+바이트 IDIV 는 286·386 모두 몫이 음수이고 |피젯수| >> 7 이 |젯수| + 80h
+이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도 INT 0 이 아니다.
+AL=80h 이고 AH 는 그 7 비트에 피젯수 부호를 붙인 값이다. 두 스위트의 이
+조건 10 건이 모두 그렇다.
+
+나눗셈 오류(DIV·IDIV·AAM 0)도 286 에서 결함이라 INT 0 이 그 나눗셈
+자신으로 돌아간다. 그래서 INT 0 은 DOS 가 받는다. MS-DOS 2.0 의 DIVOV
+(`CTRLC.ASM`)처럼 콘솔에 "Divide overflow" 를 쓰고 프로그램을 종료 코드
+0 으로 끝낸다. DOS 는 이 종료의 사유를 Ctrl-C 로 남기지만(AH=4Dh 의
+AH=1), 이 기계는 사유를 따로 두지 않아 0 으로 답한다.
+
+8087 코프로세서는 없다. ESC(0xD8-0xDF)는 피연산자만 읽고(286 은 워드로)
+지나가며,
 INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프트웨어
 부동소수 경로를 고른다.
 
 ## 기계가 주는 것
 
-- **BIOS**: INT 10h(모드·커서·스크롤·문자·DAC·폰트·문자열), 11h 장비,
+- **BIOS**: INT 10h(모드·커서·스크롤·문자·CGA 팔레트·DAC·폰트·문자열), 11h 장비,
   12h 메모리, 16h 키보드, 1Ah 시각, 33h 마우스. ROM F000:FA6E 에 IBM
   BIOS 표준 자리의 8x8 글꼴(0x20-0x7E)이 실려 있다 — 그래픽 모드에서
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
@@ -73,7 +172,10 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup), FCB, findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
-  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다), 날짜·시각, 벡터
+  같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기.
+  MZ 는 헤더의 페이지 수만큼 싣고 뒤에 붙은 데이터는 싣지 않는다. 자식은
+  환경 블록을 따로 받고 그 끝에 프로그램 이름이 붙는다),
+  날짜·시각, 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
 - **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), PIC 마스크,
   VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
@@ -139,7 +241,7 @@ dune runtest --force
 실게임 통합 검증은 게임 파일이 있을 때만 돈다.
 
 ```sh
-ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_test.exe
+ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_test/zzt_run_test.exe
 ```
 
 ## 게임 돌리기
@@ -156,6 +258,10 @@ dune exec --root . bin/dosboot.exe -- \
 넣으면 앞선 메뉴의 "아무 키나" 루프가 전부 먹어 치우기 때문에, 게임이
 특정 상태가 된 다음에 들어가야 하는 키는 `@` 로 묶는다. 글자만 칠
 때는 `--type`.
+
+명령줄 인자는 `--args TEXT` 로 준다. `GAME TEXT` 를 친 것처럼 PSP:80h 꼬리가
+` TEXT` 가 된다(COMMAND.COM 처럼 이름 뒤 공백부터). 환경 블록 끝의 프로그램
+이름은 `C:\` 에 파일 이름을 붙인 것이다.
 
 진단은 `--trace N`(N 스텝마다 CS:IP), `--int-trace`(INT 명령),
 `--dump ADDR,LEN`(메모리), `--save NAME=PATH`(게스트가 쓴 파일 꺼내기).
@@ -199,6 +305,9 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 
 ## 지금 못 하는 것
 
+- INT 21h 은 위 **DOS** 항목의 기능과 51h(62h 와 같다)만 한다. 그 밖의
+  기능을 부르면 `Cpu86.Unsupported` 로 멈추고 IP 는 그 INT 에 남는다.
+  레지스터를 그대로 둔 채 돌아가면 호출자가 성공으로 읽기 때문이다.
 - 나눗셈이 트랩할 때 인터럽트 프레임에 밀리는 플래그 4,827 건이 실칩과
   다르다. 실칩의 나눗셈 미세동작(자리 옮김-빼기 루프)을 그대로 옮겨야
   좁혀진다.
@@ -211,7 +320,6 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
   `speaker_on` 으로 보인다.
 - 디렉터리가 없다. `mkdir`/`chdir` 은 성공한 척하지 않고 "경로 없음" 으로
   답한다.
-- 스냅샷과 복원이 없다. 리플레이나 분기 실행이 필요해지면 그때 만든다.
 
 ## 구조
 

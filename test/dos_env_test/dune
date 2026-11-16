@@ -1,0 +1,3 @@
+(test
+ (name dos_env_test)
+ (libraries dosmachine))
