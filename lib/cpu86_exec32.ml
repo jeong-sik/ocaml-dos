@@ -40,8 +40,7 @@ let inc_dec t v op =
   t.cf <- saved_cf;
   r
 
-(* far 포인터 m16:32 와 BOUND 의 두 경계가 차지하는 바이트. *)
-let far_pointer32_bytes = 6
+(* BOUND 의 32 비트 두 경계가 차지하는 바이트. *)
 let bounds32_bytes = 8
 
 let far_pointer t ctx rm what =
@@ -266,4 +265,5 @@ let dispatch t ctx =
   | 0xeb -> jump_rel t (sx8 (fetch8 t)); 7
   | 0xf7 -> group3_32 t ctx
   | 0xff -> group_ff t ctx
+  | 0x0f -> Cpu86_exec0f.(dispatch t ctx Dword)
   | _ -> unsupported t ctx (Printf.sprintf "opcode %02x (66h)" opcode)

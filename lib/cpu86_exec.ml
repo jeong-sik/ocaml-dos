@@ -242,7 +242,7 @@ let step t =
              else unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
            end
            else unsupported t ctx (Printf.sprintf "0f %02x" op2)
-         | I80386 -> Cpu86_exec0f.dispatch t ctx
+         | I80386 -> Cpu86_exec0f.(dispatch t ctx Word)
          | I8086 | I80186 -> set_seg t 1 (pop16 t); 8)
       | 0x17 -> set_seg t 2 (pop16 t); 8
       | 0x1f -> set_seg t 3 (pop16 t); 8
