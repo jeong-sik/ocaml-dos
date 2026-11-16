@@ -1,0 +1,3 @@
+(test
+ (name dos_opl_test)
+ (libraries dosmachine))
