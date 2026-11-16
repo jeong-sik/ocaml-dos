@@ -78,6 +78,12 @@ let blit img ~width ~x ~y (r, g, b) =
   Bytes.set img (i + 1) (Char.chr g);
   Bytes.set img (i + 2) (Char.chr b)
 
+(* 시퀀서가 화면을 끄면 그림 전체가 DAC 0 번 색이다. *)
+let rgb_solid ~width ~height pal =
+  let r, g, b = rgb_of_dac pal 0 in
+  String.init (width * height * 3) (fun i ->
+      Char.chr (match i mod 3 with 0 -> r | 1 -> g | _ -> b))
+
 (* 텍스트 속성 바이트: 아래 니블이 글자색, 위 니블이 바탕색이다. 깜박임이
    켜져 있으면 위 니블의 맨 위 비트는 색이 아니라 깜박임이다. *)
 let attr_nibble = 0x0f

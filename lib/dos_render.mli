@@ -30,3 +30,6 @@ val rgb_indexed : Bytes.t -> (int * int * int) array -> string
 (** 화면 순서로 늘어선 DAC 자리를 RGB 로. 바이트 하나가 점 하나다.
     16색({!Dos_video.screen16})과 256색({!Dos_video.screen256})이 같이
     쓴다. *)
+
+val rgb_solid : width:int -> height:int -> (int * int * int) array -> string
+(** 화면을 끈 동안의 그림: 모든 점이 DAC 0 번 색이다. *)
