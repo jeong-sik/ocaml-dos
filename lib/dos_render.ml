@@ -47,22 +47,22 @@ let cp437 = [|
   "\194\176"; "\226\136\153"; "\194\183"; "\226\136\154"; "\226\129\191"; "\194\178"; "\226\150\160"; "\194\160"
 |]
 
-let text_grid mem ~cols ~render =
+let text_grid mem ~cols ~cell ~render =
   let b = Buffer.create (cols * rows * 2) in
   for r = 0 to rows - 1 do
     for c = 0 to cols - 1 do
-      let ch = Char.code (Bytes.get mem (vram_base + (((r * cols) + c) * 2))) in
+      let ch = Char.code (Bytes.get mem (cell ~row:r ~col:c)) in
       Buffer.add_string b (render ch)
     done;
     Buffer.add_char b '\n'
   done;
   Buffer.contents b
 
-let text_ascii mem ~cols =
-  text_grid mem ~cols ~render:(fun ch ->
+let text_ascii mem ~cols ~cell =
+  text_grid mem ~cols ~cell ~render:(fun ch ->
       if ch >= 32 && ch < 127 then String.make 1 (Char.chr ch) else " ")
 
-let text_utf8 mem ~cols = text_grid mem ~cols ~render:(fun ch -> cp437.(ch))
+let text_utf8 mem ~cols ~cell = text_grid mem ~cols ~cell ~render:(fun ch -> cp437.(ch))
 
 (* 6비트 DAC 값을 8비트로. 팔레트 배열은 바깥에서도 만질 수 있으니
    범위를 벗어난 값은 자른다 — 그림을 그리다 기계를 죽일 일은 아니다. *)
@@ -94,15 +94,15 @@ let attr_bg_without_blink = 0x07
    왼쪽이다. 색 번호는 그래픽 모드처럼 속성 팔레트를 지나 DAC 에서 색을
    얻는다. 깜박이는 글자는 늘 켜진 쪽으로 그린다 — 그림 한 장에는 시각이
    없다. *)
-let rgb_text mem ~cols ~attr ~pal ~blink =
+let rgb_text mem ~cols ~cell ~attr ~pal ~blink =
   let width = cols * 8 in
   let height = rows * glyph_h * glyph_scale in
   let img = Bytes.make (width * height * 3) '\000' in
   for r = 0 to rows - 1 do
     for c = 0 to cols - 1 do
-      let cell = vram_base + (((r * cols) + c) * 2) in
-      let ch = Char.code (Bytes.get mem cell) in
-      let a = Char.code (Bytes.get mem (cell + 1)) in
+      let at = cell ~row:r ~col:c in
+      let ch = Char.code (Bytes.get mem at) in
+      let a = Char.code (Bytes.get mem (at + 1)) in
       let bg_mask = if blink then attr_bg_without_blink else attr_nibble in
       let fg = rgb_of_dac pal attr.(a land attr_nibble) in
       let bg = rgb_of_dac pal attr.((a lsr 4) land bg_mask) in

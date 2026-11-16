@@ -50,8 +50,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    machine's pending-tick flag.
    18: the CRTC registers move from the ports to the video adapter, and
    mode 13h's screen lives in the four planes instead of RAM at 0xA0000.
-   19: EMS handle names (INT 67h AH=53h). *)
-let format_version = 19
+   19: EMS handle names (INT 67h AH=53h).
+   20: text modes load their CRTC table and the text screen follows the
+   CRTC start address and offset. A format 19 machine in a text mode holds
+   zero CRTC registers, which would now draw every row from row 0. *)
+let format_version = 20
 
 let digest_hex_len = 32
 let checksum_len = 16
