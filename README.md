@@ -54,8 +54,24 @@ SST_FILES="$ALL" dune exec --root . test/cpu86_vtest.exe
 | 0xC8/0xC9 | retf imm16 / retf | enter / leave |
 | 그룹2 reg=6 | SETMO/SETMOC | shl |
 
-기본값은 `I80186` — 1990년대 게임은 286 이상에서 돌았고 Borland
-컴파일러가 186 명령을 낸다. 실칩 검증 스위트만 `I8086` 으로 돈다.
+`I80286` 은 실모드에서 `I80186` 과 같은 명령을 돌리고, 프로그램이 CPU 를
+가르는 자리만 다르다.
+
+| | I8086·I80186 | I80286 |
+|---|---|---|
+| FLAGS bit12-15 를 읽으면 | 1 | 0 |
+| PUSH SP 가 미는 값 | 줄어든 SP | 줄기 전 SP |
+| 0x0F | POP CS | 두 바이트 명령의 머리 — SMSW(0F 01 /4)만 있고 0xFFF0 을 준다 |
+
+기계(`Dos_machine`)는 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
+요구하고 위 자리로 확인한다. 루카스아츠의 Monkey Island 2 와 Day of the
+Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으로 돈다.
+
+나눗셈 오류(DIV·IDIV·AAM 0)는 286 에서 결함이라 INT 0 이 그 나눗셈
+자신으로 돌아간다. 그래서 INT 0 은 DOS 가 받는다. MS-DOS 2.0 의 DIVOV
+(`CTRLC.ASM`)처럼 콘솔에 "Divide overflow" 를 쓰고 프로그램을 종료 코드
+0 으로 끝낸다. DOS 는 이 종료의 사유를 Ctrl-C 로 남기지만(AH=4Dh 의
+AH=1), 이 기계는 사유를 따로 두지 않아 0 으로 답한다.
 
 8087 코프로세서는 없다. ESC(0xD8-0xDF)는 피연산자만 읽고 지나가며,
 INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프트웨어

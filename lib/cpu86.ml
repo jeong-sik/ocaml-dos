@@ -11,8 +11,17 @@ exception Unsupported of string
 (* 어느 세대의 실리콘을 흉내내는가. 8086 과 80186 은 같은 opcode 자리에
    서로 다른 명령을 놓았다 — 0x60-0x6F, 0xC0/0xC1, 0xC8/0xC9, 그룹2 의
    reg=6 이 그렇다. 어느 쪽이 맞는지는 코어가 정할 수 없고 흉내낼 칩이
-   정한다. 실칩 스위트는 [I8086], DOS 게임은 [I80186] 로 돈다. *)
-type model = I8086 | I80186
+   정한다. 실칩 스위트는 [I8086] 로 돈다.
+
+   80286 은 실모드에서 186 과 같은 명령을 돌린다. 프로그램이 둘을 가르는
+   자리만 다르다: FLAGS 의 bit12-15 는 읽으면 0 이고, PUSH SP 는 줄기 전
+   SP 를 밀고, 0x0F 는 POP CS 가 아니라 두 바이트 명령(SMSW 등)의 머리다.
+   1990년대 DOS 게임이 이것으로 "286 이상" 을 확인한다. 나눗셈 오류가
+   나눗셈 자신으로 돌아가는 것도 286 부터다. *)
+type model = I8086 | I80186 | I80286
+
+(* 286 실모드의 MSW: 예약 비트 4-15 는 1, PE·MP·EM·TS 는 0. *)
+let msw_real_mode_286 = 0xFFF0
 
 let f_carry = 0x001
 let f_parity = 0x004
@@ -89,12 +98,15 @@ let set_seg t n v = t.segs.(n) <- v land 0xffff
 let dump_ip t = t.ip
 let set_ip t v = t.ip <- v land 0xffff
 
+(* FLAGS 워드의 bit1 은 항상 1 이다. bits12-15 는 8086·186 에서 읽으면
+   항상 1(실칩 SingleStepTests 실측 — 계산 비트만 돌려주면 상위 니블이
+   0 으로 나와 전 add 그룹이 fail), 286 실모드에서는 항상 0 이다(IOPL·NT
+   를 실모드에서 세울 수 없다). *)
+let fixed_flags = function I8086 | I80186 -> 0xF002 | I80286 -> 0x0002
+
 let flags t =
-  (* 8086 의 FLAGS 워드: bit1 은 항상 1, bits12-15 은 읽으면 항상 1
-     (실칩 SingleStepTests 실측 — 계산 비트만 돌려주면 상위 니블이 0
-     로 나와 전 add 그룹이 fail). *)
   let b cond bit = if cond then bit else 0 in
-  0xF002
+  fixed_flags t.model
   lor b t.cf f_carry lor b t.pf f_parity lor b t.af f_aux
   lor b t.zf f_zero lor b t.sf f_sign lor b t.tf f_trap
   lor b t.intf f_interrupt lor b t.df f_direction
@@ -359,7 +371,7 @@ let step t =
          OF 는 count=1 일 때만 정의된다. *)
       let shift_group regf width rm_op count =
         (* 186 부터 횟수는 아래 5비트만 쓴다. 8086 은 자르지 않고 전부 돈다. *)
-        let count = match t.model with I8086 -> count | I80186 -> count land 0x1f in
+        let count = match t.model with I8086 -> count | I80186 | I80286 -> count land 0x1f in
         if count > 0 && t.model = I8086 && regf = 6 then begin
           (* SETMO/SETMOC — 8086·8088 의 문서 외 명령. 피연산자를 전부 1
              로 만들고 논리 연산처럼 플래그를 세운다. 186 부터 이 자리는
@@ -428,6 +440,12 @@ let step t =
         match t.int_hook with
         | Some f -> f n
         | None -> bad (Printf.sprintf "int %02x (no hook)" n)
+      in
+      (* 8086·186 의 나눗셈 오류는 다음 명령으로 돌아가는 트랩이고, 286 부터는
+         나눗셈 자신(접두 바이트 포함)으로 돌아가는 결함이다. *)
+      let divide_error () =
+        if t.model = I80286 then t.ip <- base_ip;
+        do_int 0
       in
       (* string ops: DS:[SI] → ES:[DI], DF 가 방향. rep 은 CX 카운터 —
          cmps/scas 는 repz/repnz 의 ZF 판정으로 조기 종료한다. *)
@@ -627,6 +645,7 @@ let step t =
         3
       (* --- push/pop. PUSH SP(0x54) 는 8086 이 감소된 SP 를 push 한다
          (286 부터 이전 값을 push — 실칩 SingleStepTests 관측). --- *)
+      | 0x54 when t.model = I80286 -> push16 t t.regs.(4); 10
       | 0x54 ->
         t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
         let a = physical ~seg:t.segs.(2) ~off:t.regs.(4) in
@@ -739,6 +758,16 @@ let step t =
       | 0x16 -> push16 t (seg t 2); 10
       | 0x1e -> push16 t (seg t 3); 10
       | 0x07 -> set_seg t 0 (pop16 t); 8
+      (* 286: 실모드 게임이 쓰는 두 바이트 명령은 CPU 판별용 SMSW 뿐이다.
+         보호 모드로 가는 나머지(LMSW·LGDT·CLTS …)는 아직 없다. *)
+      | 0x0f when t.model = I80286 ->
+        let op2 = fetch8 t in
+        if op2 = 0x01 then begin
+          let _, regf, rm, _ = decode_modrm t ~ovr:!ovr in
+          if regf = 4 then begin op_write t 16 rm msw_real_mode_286; 3 end
+          else bad (Printf.sprintf "0f 01 /%d" regf)
+        end
+        else bad (Printf.sprintf "0f %02x" op2)
       | 0x0f -> set_seg t 1 (pop16 t); 8
       | 0x17 -> set_seg t 2 (pop16 t); 8
       | 0x1f -> set_seg t 3 (pop16 t); 8
@@ -831,7 +860,7 @@ let step t =
         set_seg t 1 s;
         t.ip <- off;
         13
-      | 0x9c -> push16 t ((flags t) lor 0xf002); 10
+      | 0x9c -> push16 t (flags t); 10
       | 0x9d -> set_flags t (pop16 t); 8
       | 0x9e ->
         let ah = reg8 t 4 in
@@ -931,7 +960,7 @@ let step t =
           ignore al;
           t.zf <- true; t.sf <- false; t.pf <- true;
           t.cf <- false; t.of_ <- false; t.af <- false;
-          do_int 0
+          divide_error ()
         end
         else begin
           set_reg8 t 4 (al / base);
@@ -1067,7 +1096,7 @@ let step t =
          | 6 | 7 (* div/idiv — 0 나누기·몫 오버플로는 인터럽트 0 *) ->
            let sx v = if v land msb <> 0 then v - (mask + 1) else v in
            let divisor = op_read t width rm in
-           if divisor = 0 then do_int 0
+           if divisor = 0 then divide_error ()
            else begin
              let dividend =
                if width = 8 then reg16 t 0
@@ -1075,7 +1104,7 @@ let step t =
              in
              if regf = 6 then begin
                let q = dividend / divisor and r = dividend mod divisor in
-               if q > mask then do_int 0
+               if q > mask then divide_error ()
                else begin
                  if width = 8 then begin
                    set_reg8 t 0 q; set_reg8 t 4 r
@@ -1096,7 +1125,7 @@ let step t =
                let q = sdiv / sd and r = sdiv mod sd in
                let lo = if width = 8 then -0x80 else -0x8000 in
                let hi = if width = 8 then 0x7f else 0x7fff in
-               if q > hi || q < lo then do_int 0
+               if q > hi || q < lo then divide_error ()
                else begin
                  if width = 8 then begin
                    set_reg8 t 0 (q land 0xff); set_reg8 t 4 (r land 0xff)
@@ -1152,7 +1181,7 @@ let step t =
             PUSH SP 와 같은 규칙이다. *)
          | (6 | 7), 0xff ->
            (match rm with
-            | Reg 4 ->
+            | Reg 4 when t.model <> I80286 ->
               t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
               let b = t.segs.(2) lsl 4 and o = t.regs.(4) in
               t.write (at b o) (t.regs.(4) land 0xff);
