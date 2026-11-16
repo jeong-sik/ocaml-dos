@@ -80,9 +80,11 @@ val set_seg : t -> int -> int -> unit
 val dump_ip : t -> int
 val set_ip : t -> int -> unit
 
-val physical : seg:int -> off:int -> int
-(** [~seg:s ~off:o] 물리 주소 = ((s lsl 4) + o) land 0xFFFFF. 1MB wrap
-    은 8086 의 주소 버스가 20비트인 것의 재현 — A20 게이트는 M1. *)
+val physical : t -> seg:int -> off:int -> int
+(** [~seg:s ~off:o] 이 CPU 가 버스에 내는 주소 = (s lsl 4) + o 를 주소선
+    수로 자른 값. 8086·186 은 20비트라 1MB 에서 감기고, 286 은 24비트라
+    10FFEFh 까지 간다. 286 보드에서 1MB 에서 감는 것은 A20 게이트의 일이라
+    메모리를 붙이는 쪽이 정한다. *)
 
 val flags : t -> int
 (** FLAGS word (bit0 CF, bit2 PF, bit4 AF, bit6 ZF, bit7 SF, bit8 TF,

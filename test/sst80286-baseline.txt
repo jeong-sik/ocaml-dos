@@ -1,0 +1,14 @@
+# SingleStepTests/80286 cases the I80286 model still fails, per file.
+# The runner fails when a file goes over its count and asks to lower it
+# when a file comes in under.
+#
+# C6: one test leaves IVT bytes 35h and 37h out of its initial RAM; the
+#     chip read C3h there and jumped to C3E0:C3C0.
+C6 1
+# C8: ENTER E401h,D6h with SP=BP=FFFF pushes FF00h for each display word
+#     on the chip; the model pushes FFFFh. The rule is not derived yet.
+C8 1
+# F6.7: IDIV byte with an overflowing quotient, in four cases, leaves
+#     AL=80h and AH=old AL instead of taking INT 0. The rule is not
+#     derived yet.
+F6.7 4
