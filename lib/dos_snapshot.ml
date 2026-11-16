@@ -31,9 +31,15 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    10: after its motion counters the mouse carries the AX=0Fh mickey
    ratios, the AX=1Ah speeds, the double-speed threshold and the eighths of
    a mickey left over from the last move.
-   11: each OPL2 timer carries its next overflow (or stopped) and a flag
+   11: the ports carry PIT channel 2 (mode, access, latch, count register
+   and the counting segment) right after the cycle counter.
+   12: the payload opens with the CPU model, and an 80386 carries the upper
+   halves of its eight registers and FS, GS after the cycle count.
+   13: whether an MPU-401 is in the machine, and its mode and waiting
+   answers, after the OPL2 timers.
+   14: each OPL2 timer carries its next overflow (or stopped) and a flag
    that is clear, raised or masked, in place of a one-shot expiry stamp. *)
-let format_version = 11
+let format_version = 14
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -251,6 +257,21 @@ let put_frame w f handles =
   put_pairs w ~what:"parent block" ~a:C.word ~b:C.word parent_blocks;
   put_pairs w ~what:"parent handle" ~a:handle_number ~b:C.count handles
 
+(* The CPU model as one byte, the first of the payload: [read_payload] builds
+   the machine from it before reading anything else. *)
+let model_code = function
+  | Cpu86.I8086 -> 0
+  | Cpu86.I80186 -> 1
+  | Cpu86.I80286 -> 2
+  | Cpu86.I80386 -> 3
+
+let model_of_code = function
+  | 0 -> Some Cpu86.I8086
+  | 1 -> Some Cpu86.I80186
+  | 2 -> Some Cpu86.I80286
+  | 3 -> Some Cpu86.I80386
+  | _ -> None
+
 (* Every [Dos_state.t] field is named: a field added to the machine fails the
    build here until the snapshot carries it or says why not. [read_payload]
    reads in exactly this order with the same ranges. *)
@@ -267,8 +288,9 @@ let write_payload w t =
         mouse } = t
   in
   let put what r v = C.put w ~what r v in
+  put "cpu model" C.byte (model_code (Cpu86.model cpu));
   let { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted;
-        saved_cycles } = Cpu86.save_state cpu
+        saved_cycles; saved_386 } = Cpu86.save_state cpu
   in
   C.put_int_array w ~what:"registers" reg saved_regs;
   C.put_int_array w ~what:"segments" reg saved_segs;
@@ -276,6 +298,12 @@ let write_payload w t =
   put "flags" reg saved_flags;
   C.put_bool w saved_halted;
   put "cycles" C.count saved_cycles;
+  (match saved_386 with
+   | Some { Cpu86.saved_regs_hi; saved_fs; saved_gs } ->
+     C.put_int_array w ~what:"upper halves" reg saved_regs_hi;
+     put "fs" reg saved_fs;
+     put "gs" reg saved_gs
+   | None -> ());
   C.put_bytes w mem;
   Dos_video.write_state w video;
   Dos_ports.write_state w ports;
@@ -444,7 +472,12 @@ let get_input_request r =
 let read_payload r =
   (* A fresh machine brings the closures (memory, ports, the interrupt hook)
      and the containers; everything else is overwritten from the bytes. *)
-  let t = Dos_machine.create () in
+  let model =
+    match model_of_code (C.get r ~what:"cpu model" C.byte) with
+    | Some model -> model
+    | None -> C.fail "invalid cpu model"
+  in
+  let t = Dos_machine.create ~model () in
   let get what rng = C.get r ~what rng in
   let saved_regs = get_int_array r ~what:"registers" ~len:8 reg in
   let saved_segs = get_int_array r ~what:"segments" ~len:4 reg in
@@ -452,8 +485,18 @@ let read_payload r =
   let saved_flags = get "flags" reg in
   let saved_halted = C.get_bool r in
   let saved_cycles = get "cycles" C.count in
+  let saved_386 =
+    match model with
+    | Cpu86.I80386 ->
+      let saved_regs_hi = get_int_array r ~what:"upper halves" ~len:8 reg in
+      let saved_fs = get "fs" reg in
+      let saved_gs = get "gs" reg in
+      Some { Cpu86.saved_regs_hi; saved_fs; saved_gs }
+    | Cpu86.I8086 | Cpu86.I80186 | Cpu86.I80286 -> None
+  in
   Cpu86.load_state t.cpu
-    { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles };
+    { Cpu86.saved_regs; saved_segs; saved_ip; saved_flags; saved_halted; saved_cycles;
+      saved_386 };
   C.fill_bytes r t.mem;
   Dos_video.read_state r t.video;
   Dos_ports.read_state r t.ports;

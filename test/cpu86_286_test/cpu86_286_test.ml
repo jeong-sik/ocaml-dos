@@ -250,8 +250,11 @@ let test_386 () =
   check "386: mov ax keeps EAX's upper half" (Cpu86.reg32 t 0) 0x12349abc;
   run t 1;
   check "386: mov ah keeps it too" (Cpu86.reg32 t 0) 0x123400bc;
-  check "386: no snapshot form"
-    (Bool.to_int (match Cpu86.save_state t with _ -> false | exception Invalid_argument _ -> true)) 1;
+  check "386: the saved state carries EAX's upper half"
+    (match (Cpu86.save_state t).Cpu86.saved_386 with
+     | Some { Cpu86.saved_regs_hi; _ } -> saved_regs_hi.(0)
+     | None -> -1)
+    0x1234;
   let nothing _ = () and si_ffff t = Cpu86.set_reg16 t 6 0xFFFF in
   (* LOCK: lockable with memory runs, MOV or a register operand is INT 6 *)
   let _, got = fault_of m386 "\xf0\x00\x04" nothing in
