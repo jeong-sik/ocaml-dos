@@ -32,6 +32,12 @@ val gate_edge : t -> tick:int -> high:bool -> unit
 val out : t -> tick:int -> bool
 (** OUT 핀. *)
 
+val next_rise : t -> tick:int -> int option
+(** [tick] 뒤로 OUT 이 낮음에서 높음으로 바뀌는 첫 틱. 다음 사건(제어 워드,
+    카운트 쓰기, GATE 변화)이 없다고 볼 때의 값이다. 그런 상승이 없으면
+    [None] 이다 — 멈춘 카운터, GATE 가 낮은 셈, 끝난 원숏이 그렇다. 채널 0 의
+    OUT 상승이 IRQ0 이다. *)
+
 (** {1 Snapshot} *)
 
 val write_state : Dos_snap_codec.writer -> t -> unit
