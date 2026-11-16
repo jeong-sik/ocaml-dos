@@ -193,7 +193,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   MZ 는 헤더의 페이지 수만큼 싣고 뒤에 붙은 데이터는 싣지 않는다. 자식은
   환경 블록을 따로 받고 그 끝에 프로그램 이름이 붙는다),
   날짜·시각, InDOS 주소(34h), 확장 에러(59h), 국가 정보(38h, 미국 437만),
-  벡터
+  verify 플래그(2Eh/54h), 스위치 문자(37h), 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
 - **XMS 3.0**: INT 2Fh AX=4300h·4310h 로 찾는 HIMEM 자리. 100000h 부터
   15MB 를 KB 단위 first fit 으로 나눠 주고, 핸들 32개, 잠금, 크기 바꾸기,
@@ -558,7 +558,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | 모듈 | 맡은 것 |
 |---|---|
 | `Cpu86` | 8086/186 코어. 메모리와 포트는 콜백으로 바깥에 있다 |
-| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX) |
+| `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch) |
 | `Dos_error` | INT 21h 에러 코드의 class·action·locus 와 기능마다 돌려줄 수 있는 코드 (MS-DOS 4.0 `MS_TABLE.ASM`) |
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, 스피커. PIC·DMA·키보드 포트는 아래 셋에 넘긴다 |
 | `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
