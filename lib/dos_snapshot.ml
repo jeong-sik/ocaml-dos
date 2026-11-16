@@ -47,8 +47,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    17: the interrupt controller (mask, requests, in service, OCW3 read
    choice) and the keyboard controller (queued bytes, port 0x60, its full
    flag, the last read) replace the PIC mask, the last scan code and the
-   machine's pending-tick flag. *)
-let format_version = 17
+   machine's pending-tick flag.
+   18: the CRTC registers move from the ports to the video adapter, and
+   mode 13h's screen lives in the four planes instead of RAM at 0xA0000. *)
+let format_version = 18
 
 let digest_hex_len = 32
 let checksum_len = 16

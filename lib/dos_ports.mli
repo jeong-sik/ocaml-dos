@@ -38,8 +38,9 @@ val create : speed:speed -> mpu401:bool -> mem:Bytes.t -> video:Dos_video.t -> t
 (** [speed] 는 CPU 속도다. [mpu401] 이면 330h·331h 를 MPU-401 에 넘긴다(MIDI
     바이트는 버린다). [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
     와 같은 값으로 유지하는 데 쓴다. 커서의 진실 원천은 하나여야 한다.
-    비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성)는 [video] 로
-    넘긴다. *)
+    비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성·CRTC)는 [video] 로
+    넘긴다. CRTC 커서 레지스터(0x0A/0x0B/0x0E/0x0F)를 쓰면 어댑터가 받은
+    뒤 BDA 를 맞춘다. *)
 
 val set_now : t -> int -> unit
 (** 현재 CPU 누적 사이클. 기계가 매 스텝 알려준다. *)

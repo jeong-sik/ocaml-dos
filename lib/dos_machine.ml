@@ -413,7 +413,7 @@ let frame_rgb t =
     let w, h = Dos_video.dims t.video in
     Dos_render.rgb_planar (Dos_video.planes t.video) ~w ~h
       ~attr:(Dos_video.attr_palette t.video) ~pal
-  | Dos_video.Linear256 -> Dos_render.rgb_vga13 t.mem pal
+  | Dos_video.Linear256 -> Dos_render.rgb_indexed (Dos_video.screen256 t.video) pal
 
 let frame_ppm t =
   let w, h = frame_dims t in
@@ -438,7 +438,7 @@ let frame_digest t =
   let h = mix h (Dos_video.cga_color_select t.video) in
   let h = Array.fold_left mix h (Dos_video.attr_palette t.video) in
   Array.fold_left (fun h (r, g, b) -> mix (mix (mix h r) g) b) h (Dos_ports.palette t.ports)
-let pixel t ~x ~y = Dos_video.get_pixel t.video ~x ~y
+let pixel t ~x ~y = Dos_video.screen_pixel t.video ~x ~y
 
 let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_year <- year;
