@@ -49,8 +49,9 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    flag, the last read) replace the PIC mask, the last scan code and the
    machine's pending-tick flag.
    18: the CRTC registers move from the ports to the video adapter, and
-   mode 13h's screen lives in the four planes instead of RAM at 0xA0000. *)
-let format_version = 18
+   mode 13h's screen lives in the four planes instead of RAM at 0xA0000.
+   19: EMS handle names (INT 67h AH=53h). *)
+let format_version = 19
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -148,6 +149,8 @@ let check_consistency t =
       Error "an EMS frame page maps a page that does not exist"
     else if not (Hashtbl.fold (fun h m acc -> acc && saved_ok h m) t.ems_saved true) then
       Error "an EMS saved page map names a handle or page that does not exist"
+    else if not (Dos_ems.names_ok t) then
+      Error "an EMS handle name is not one INT 67h AH=53h could have given"
     else if not (List.for_all input_ok t.input_continuations) then
       Error "an input continuation has inconsistent state"
     else if not (List.for_all (fun frame -> return_ok frame.parent_service_return) t.exec_frames) then
@@ -310,7 +313,7 @@ let write_payload w t =
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved;
+        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved; ems_names;
         mouse;
         on_unserved = _ (* a host observer, not machine state *) } = t
   in
@@ -375,6 +378,11 @@ let write_payload w t =
       put "EMS saved map" ems_handle_key k;
       put_list w ~what:"EMS saved mapping" (put_shown w) (Array.to_list m))
     (sorted_bindings ems_saved);
+  put_list w ~what:"EMS name"
+    (fun (k, name) ->
+      put "EMS name" ems_handle_key k;
+      C.put_string w name)
+    (sorted_bindings ems_names);
   put_list w ~what:"EMS mapping" (put_shown w) (Array.to_list ems_mapped);
   let { mouse_present; mouse_x; mouse_y; mouse_buttons; mouse_cursor_flag;
         mouse_graphics_cursor; mouse_text_cursor;
@@ -637,6 +645,10 @@ let read_payload r =
     (get_list r ~what:"EMS saved map" (fun () ->
          let k = get "EMS saved map" ems_handle_key in
          (k, get_frame r ~what:"EMS saved mapping")));
+  fill_table t.ems_names
+    (get_list r ~what:"EMS name" (fun () ->
+         let k = get "EMS name" ems_handle_key in
+         (k, C.get_string r)));
   let mapped = get_frame r ~what:"EMS mapping" in
   Array.blit mapped 0 t.ems_mapped 0 (Array.length mapped);
   let m = t.mouse in

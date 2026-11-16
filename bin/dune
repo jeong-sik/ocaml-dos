@@ -3,7 +3,7 @@
  (public_name ocaml-dos.dosboot)
  (modules dosboot)
  (package ocaml-dos)
- (libraries cpu86core dosmachine))
+ (libraries cpu86core dosmachine dosharness))
 
 (executable
  (name dosplay)
