@@ -25,8 +25,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    7: the mouse carries each button's press and release log (INT 33h
    AX=05h/06h) and the AX=07h/08h ranges.
    8: the mouse carries its cursor flag (an int, not a visible bool) and
-   the AX=09h graphics and AX=0Ah text cursor shapes. *)
-let format_version = 8
+   the AX=09h graphics and AX=0Ah text cursor shapes.
+   9: the mouse ranges are always set (the driver fits them to the virtual
+   screen of the video mode), so each is two words with no flag. *)
+let format_version = 9
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -347,12 +349,9 @@ let write_payload w t =
          put "mouse button y" C.word last_y))
     [ mouse_presses; mouse_releases ];
   List.iter
-    (function
-      | None -> C.put_bool w false
-      | Some (lo, hi) ->
-        C.put_bool w true;
-        put "mouse range low" C.word lo;
-        put "mouse range high" C.word hi)
+    (fun (lo, hi) ->
+      put "mouse range low" C.word lo;
+      put "mouse range high" C.word hi)
     [ mouse_range_x; mouse_range_y ]
 
 let save t =
@@ -573,13 +572,10 @@ let read_payload r =
          l.last_y <- get "mouse button y" C.word))
     [ m.mouse_presses; m.mouse_releases ];
   let get_range () =
-    if C.get_bool r then begin
-      let lo = get "mouse range low" C.word in
-      let hi = get "mouse range high" C.word in
-      if lo > hi then C.fail "mouse range low above high";
-      Some (lo, hi)
-    end
-    else None
+    let lo = get "mouse range low" C.word in
+    let hi = get "mouse range high" C.word in
+    if lo > hi then C.fail "mouse range low above high";
+    (lo, hi)
   in
   m.mouse_range_x <- get_range ();
   m.mouse_range_y <- get_range ();
