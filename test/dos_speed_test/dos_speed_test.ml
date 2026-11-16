@@ -32,6 +32,26 @@ let fast_factor = 10
 let pc_factor = 4
 let default_divisor = 0x10000
 
+(* 채널 0 은 POST 가 틱 0 에 실은 모드 3·65536 으로 켜진다. 셈은 다음
+   틱부터라, 첫 OUT 상승(IRQ0)은 65537 틱이고 그 뒤로 65536 틱마다다.
+   모드 3 은 반주기마다 한 틱에 둘씩 준다. *)
+let first_irq0_tick = default_divisor + 1
+let mode3_count_after ticks = (default_divisor - (2 * (ticks - 1))) land 0xffff
+
+(* [ports] 를 [from] 사이클부터 PIT 한 틱([factor] 사이클)씩 옮기며 IRQ0 이
+   온 사이클을 [n] 개까지 모은다. 네 주기 안에 못 모으면 모은 것만 준다. *)
+let irq0_cycles ports ~factor ~from ~n =
+  let limit = from + (4 * default_divisor * factor) in
+  let rec go now acc count =
+    if count = n || now > limit then List.rev acc
+    else begin
+      Dos_ports.set_now ports now;
+      if Dos_ports.irq0_due ports then go (now + factor) (now :: acc) (count + 1)
+      else go (now + factor) acc count
+    end
+  in
+  go from [] 0
+
 (* ---------- MHz → 속도 ---------- *)
 
 let test_speed_of_mhz () =
@@ -71,13 +91,11 @@ let vsync_bit t = Dos_ports.port_in t 0x3DA land 0x08 <> 0
 
 let test_ports () =
   let p = ports pc and f = ports fast in
-  check_int "PC IRQ0 interval" (Dos_ports.cycles_per_tick p) (default_divisor * pc_factor);
-  check_int "fast IRQ0 interval" (Dos_ports.cycles_per_tick f) (default_divisor * fast_factor);
   (* 1000 사이클 뒤: PC 는 PIT 250 틱, 빠른 기계는 100 틱이 지났다. *)
   Dos_ports.set_now p 1000;
   Dos_ports.set_now f 1000;
-  check_int "PC PIT count" (pit_count p) (default_divisor - 250);
-  check_int "fast PIT count" (pit_count f) (default_divisor - 100);
+  check_int "PC PIT count" (pit_count p) (mode3_count_after 250);
+  check_int "fast PIT count" (pit_count f) (mode3_count_after 100);
   (* 리프레시 비트는 PIT 채널 1 의 18 틱마다 뒤집힌다: PC 에서 72 사이클,
      10 배 기계에서 180 사이클. *)
   Dos_ports.set_now p 100;
@@ -93,7 +111,16 @@ let test_ports () =
   check "PC vsync on at 62600 cycles" (vsync_bit p);
   check "fast vsync not yet on at 62600 cycles" (not (vsync_bit f));
   Dos_ports.set_now f 156_500;
-  check "fast vsync on at 156500 cycles" (vsync_bit f)
+  check "fast vsync on at 156500 cycles" (vsync_bit f);
+  (* 첫 IRQ0 은 65537 틱: PC 는 262148 사이클, 10 배 기계는 655370 사이클 *)
+  List.iter
+    (fun (name, ports, factor) ->
+      let at = first_irq0_tick * factor in
+      Dos_ports.set_now ports (at - 1);
+      check (name ^ " IRQ0 not yet one cycle early") (not (Dos_ports.irq0_due ports));
+      Dos_ports.set_now ports at;
+      check (name ^ " IRQ0 at 65537 PIT ticks") (Dos_ports.irq0_due ports))
+    [ ("PC", p, pc_factor); ("fast", f, fast_factor) ]
 
 (* OPL 타이머는 레지스터 값에서 256 까지 센다. 값 00h 는 칸 256 개다.
    타이머 1 은 80µs 칸: PC 는 382×256 = 97792 사이클, 10 배 기계는
@@ -194,9 +221,15 @@ let test_snapshot m =
     | Ok r ->
       check_int "restored machine keeps its clock" (Dos_ports.cpu_hz r.Dos_state.ports)
         (Dos_ports.speed_hz fast);
-      check_int "restored machine keeps its IRQ0 interval"
-        (Dos_ports.cycles_per_tick r.Dos_state.ports)
-        (default_divisor * fast_factor))
+      (* 셋째와 둘째의 차이를 본다 — 첫째는 저장 전에 지난 상승일 수 있다 *)
+      match
+        irq0_cycles r.Dos_state.ports ~factor:fast_factor
+          ~from:(Cpu86.cycles r.Dos_state.cpu) ~n:3
+      with
+      | [ _; second; third ] ->
+        check_int "restored machine keeps its IRQ0 interval" (third - second)
+          (default_divisor * fast_factor)
+      | got -> check_int "restored machine raises IRQ0 three times" (List.length got) 3)
 
 let () =
   test_speed_of_mhz ();
