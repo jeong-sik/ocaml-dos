@@ -26,6 +26,11 @@ val set_now : t -> int -> unit
 val port_in : t -> int -> int
 val port_out : t -> int -> int -> unit
 
+val cpu_cycles_per_pit_tick : int
+(** PIT 한 틱에 흐르는 CPU 사이클(4). PIT 는 1.193182MHz 이므로 이 기계의
+    CPU 는 4.77MHz 로 돈다. 실시간에 맞춰 돌리는 쪽이 사이클을 초로 바꿀 때
+    쓴다. *)
+
 val cycles_per_tick : t -> int
 (** PIT 채널 0 의 분주비가 정하는 IRQ0 간격(CPU 사이클). 기본 분주비
     65536 = 18.2Hz. 게임이 음악·부드러운 이동을 위해 이 값을 바꾼다. *)
