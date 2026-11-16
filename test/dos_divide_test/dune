@@ -1,0 +1,3 @@
+(test
+ (name dos_divide_test)
+ (libraries dosmachine))
