@@ -18,7 +18,8 @@ let check_b name got want =
 let make () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  Dos_ports.create ~speed:Dos_ports.pc_speed ~mpu401:false ~mem ~video
+  Dos_ports.create ~speed:Dos_ports.pc_speed ~mpu401:false ~mem ~video ~sound_blaster:false
+    ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
 
 let cycles_per_pit_tick = Dos_ports.speed_hz Dos_ports.pc_speed / Dos_ports.pit_hz
 

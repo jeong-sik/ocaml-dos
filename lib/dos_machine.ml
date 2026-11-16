@@ -68,10 +68,17 @@ let service_status_mask t v =
   | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
-let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false) () =
+let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false)
+    ?(sound_blaster = false) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video in
+  (* CMOS 시계는 기계의 시각을 읽는다. 기계는 포트 뒤에 만들어지므로
+     시계는 아래에서 잇는다. *)
+  let wall_clock =
+    ref (fun () -> invalid_arg "Dos_machine: CMOS clock read before the machine exists")
+  in
+  let cmos = Dos_cmos.create ~clock:(fun () -> !wall_clock ()) in
+  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
@@ -147,6 +154,11 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   in
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
+  wall_clock :=
+    (fun () ->
+      let year, month, day, hour, minute, second = Dos_state.now_fields t in
+      { Dos_cmos.year; month; day; weekday = Dos_state.day_of_week (year, month, day);
+        hour; minute; second });
   Dos_bios.install t;
   init_dos_data t;
   Cpu86.set_int_hook cpu (fun vec ->
@@ -241,6 +253,15 @@ let step_result t =
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;
+    (* DSP 는 바이트·리셋·타이머 때가 오면 DMA 채널 1 에서 가져가고, 블록
+       끝이면 IRQ 7 을 올린다. DMA 는 1MB 배열을 그대로 읽는다 — 비디오
+       평면 창(A0000h)을 DMA 로 읽는 프로그램은 다루지 않는다. *)
+    (match Dos_ports.sound_blaster t.ports with
+     | Some sb when cyc >= Dos_sb.due_at sb ->
+       if Dos_sb.advance sb ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc
+            ~dma:(Dos_ports.dma t.ports) ~mem:t.mem then
+         Dos_pic.raise_irq pic Dos_pic.Sound_blaster
+     | Some _ | None -> ());
     (* 요청은 IF 가 켜지고, 마스크가 풀리고, 같거나 높은 줄이 EOI 를 받을
        때까지 IRR 에 남는다 — 버리면 임계구역이 긴 프로그램에서 시계가
        느려지고 키가 사라진다. 벡터가 0:0 이면 아무것도 넣지 않고, 그 줄은
