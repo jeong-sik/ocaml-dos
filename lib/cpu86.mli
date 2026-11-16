@@ -123,6 +123,14 @@ val dump_ip : t -> int
 (** [I80386] 은 FFFF 의 마지막 바이트를 지난 뒤 10000h 를 돌려준다. EIP 가
     32 비트라서다. 다음 페치는 CS 한계 밖이라 INT 13 이다. *)
 
+val bus_read : t -> int -> int
+(** The [read] callback this core was built with: what an instruction
+    sees at that physical address. A host service that copies memory the
+    way the guest's own string instructions would goes through it. *)
+
+val bus_write : t -> int -> int -> unit
+(** The [write] callback this core was built with. *)
+
 val set_ip : t -> int -> unit
 
 val physical : t -> seg:int -> off:int -> int

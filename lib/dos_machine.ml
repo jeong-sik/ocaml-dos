@@ -31,24 +31,28 @@ let accept_service t ~return_to = function
        guest hook, where the interrupt entry already cleared IF. *)
     Cpu86.set_flags t.cpu ((flags lor Cpu86.f_interrupt) land lnot Cpu86.f_trap)
 
+(* [None]: IVT 가 0:0 인 벡터. 실기라면 0000:0000 으로 뛴다. *)
 let host_service t ~return_to v =
-  match v with
-  | 0x00 -> Dos_dos.divide_overflow t; Control_transferred
-  | 0x20 -> Dos_dos.terminate t; Control_transferred
-  | 0x21 -> Dos_dos.service t ~return_to
-  | 0x27 -> Dos_dos.int27 t; Control_transferred
-  | 0x67 -> Dos_ems.service t; Completed
-  | 0x10 | 0x11 | 0x12 | 0x16 | 0x1A | 0x33 -> Dos_bios.service t v
-  | _ -> Completed
+  match Dos_bios.host_vector v with
+  | Some Dos_divide_overflow -> Dos_dos.divide_overflow t; Control_transferred
+  | Some Dos_terminate -> Dos_dos.terminate t; Control_transferred
+  | Some Dos_call -> Dos_dos.service t ~return_to
+  | Some Dos_keep -> Dos_dos.int27 t; Control_transferred
+  | Some Ems -> Dos_ems.service t; Completed
+  | Some (Bios s) -> Dos_bios.service t s
+  | None -> Completed
 
+(* 게스트 훅을 지나 서비스를 불렀을 때 호출자의 FLAGS 로 돌려줄 비트. *)
 let service_status_mask t v =
   let ah = Cpu86.reg8 t.cpu 4 in
-  let fn = if v = 0x21 && ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
-  match v, fn with
-  | 0x16, (0x01 | 0x11) -> Cpu86.f_zero
-  | 0x21, 0x06 -> Cpu86.f_zero
-  | 0x21, _ -> Cpu86.f_carry
-  | _ -> 0
+  match Dos_bios.host_vector v with
+  | Some (Bios Keyboard) -> if ah = 0x01 || ah = 0x11 then Cpu86.f_zero else 0
+  | Some (Bios Time_of_day) -> Cpu86.f_carry
+  | Some Dos_call ->
+    let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
+    if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
+  | Some (Bios (Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
+  | None -> 0
 
 let create ?(model = Cpu86.I80286) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
@@ -108,12 +112,18 @@ let create ?(model = Cpu86.I80286) () =
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
            키보드 모드로 강제한다(전투 배치 같은 마우스 UI 잠김). *)
         mouse_present = true; mouse_x = 0; mouse_y = 0;
-        mouse_buttons = 0; mouse_visible = false;
+        mouse_buttons = 0;
+        mouse_cursor_flag = Dos_state.cursor_flag_after_reset;
+        mouse_graphics_cursor = Dos_state.Default_arrow;
+        mouse_text_cursor = Dos_state.default_text_cursor;
         mouse_dx = 0; mouse_dy = 0;
+        mouse_motion = Dos_state.default_motion; mouse_carry_x = 0; mouse_carry_y = 0;
         mouse_handler_mask = 0; mouse_handler_seg = 0; mouse_handler_off = 0;
         mouse_presses = Dos_state.new_button_logs ();
         mouse_releases = Dos_state.new_button_logs ();
-        mouse_range_x = None; mouse_range_y = None;
+        (* 범위와 자리는 [Dos_bios.install] 이 BDA 를 채운 뒤 부팅 모드의
+           가상 화면에 맞춰 다시 쓴다 *)
+        mouse_range_x = (0, 0); mouse_range_y = (0, 0);
       };
     }
   in
@@ -381,7 +391,10 @@ let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
   match Dos_video.kind t.video with
-  | Dos_video.Text -> Dos_render.rgb_text t.mem ~cols:(cols t)
+  | Dos_video.Text ->
+    Dos_render.rgb_text t.mem ~cols:(cols t)
+      ~attr:(Dos_video.attr_palette t.video) ~pal
+      ~blink:(Dos_video.text_blink t.video)
   | Dos_video.Cga4 ->
     Dos_render.rgb_cga4 t.mem ~mode:(Dos_video.mode t.video)
       ~color_select:(Dos_video.cga_color_select t.video)
@@ -435,10 +448,22 @@ let set_mouse t ~x ~y ~buttons =
   let x = Dos_state.clamp_to m.mouse_range_x x
   and y = Dos_state.clamp_to m.mouse_range_y y in
   let moved = x <> m.mouse_x || y <> m.mouse_y in
-  m.mouse_dx <- m.mouse_dx + (x - m.mouse_x);
-  m.mouse_dy <- m.mouse_dy + (y - m.mouse_y);
+  let motion = m.mouse_motion in
+  let mdx, carry_x =
+    Dos_state.mickeys_of_pixels ~per_8:motion.mickeys_x ~carry:m.mouse_carry_x (x - m.mouse_x)
+  and mdy, carry_y =
+    Dos_state.mickeys_of_pixels ~per_8:motion.mickeys_y ~carry:m.mouse_carry_y (y - m.mouse_y)
+  in
+  m.mouse_dx <- m.mouse_dx + mdx;
+  m.mouse_dy <- m.mouse_dy + mdy;
+  m.mouse_carry_x <- carry_x;
+  m.mouse_carry_y <- carry_y;
   m.mouse_x <- x;
   m.mouse_y <- y;
+  (* 게임에 알리는 좌표는 칸 단위다 — 버튼 기록과 핸들러 인자도 03h 와 같다
+     (CuteMouse 는 칸으로 내린 자리 granpos 를 기록하고 건넨다) *)
+  let space = Dos_mouse_space.current t.mem in
+  let cell_x = Dos_mouse_space.cell_x space x and cell_y = Dos_mouse_space.cell_y space y in
   let old_buttons = m.mouse_buttons in
   m.mouse_buttons <- buttons;
   for i = 0 to Dos_state.mouse_button_count - 1 do
@@ -452,8 +477,8 @@ let set_mouse t ~x ~y ~buttons =
     Option.iter
       (fun (l : Dos_state.button_log) ->
         l.times <- l.times + 1;
-        l.last_x <- m.mouse_x;
-        l.last_y <- m.mouse_y)
+        l.last_x <- cell_x;
+        l.last_y <- cell_y)
       log
   done;
   (* AX=0x0C 등록에 닿은 이벤트를 핸들러에 far call 로 건넨다. 비트 번호는
@@ -475,8 +500,8 @@ let set_mouse t ~x ~y ~buttons =
     let cpu = t.cpu in
     Cpu86.set_reg16 cpu 0 events;
     Cpu86.set_reg16 cpu 3 m.mouse_buttons;
-    Cpu86.set_reg16 cpu 1 x;
-    Cpu86.set_reg16 cpu 2 y;
+    Cpu86.set_reg16 cpu 1 cell_x;
+    Cpu86.set_reg16 cpu 2 cell_y;
     Cpu86.set_reg16 cpu 6 m.mouse_dx;
     Cpu86.set_reg16 cpu 7 m.mouse_dy;
     (* 이동량은 호출이 소비한다 — AX=0x0B 와 같은 읽기다. *)
