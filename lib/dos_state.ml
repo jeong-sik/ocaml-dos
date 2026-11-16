@@ -45,25 +45,101 @@ let mouse_button_count = 3
 let new_button_logs () =
   Array.init mouse_button_count (fun _ -> { times = 0; last_x = 0; last_y = 0 })
 
-(* AX=07h·08h 의 범위. None 은 드라이버의 기본값인 화면 전체다 — 이
-   기계는 화면 크기로 자르지 않고 하네스가 준 좌표를 그대로 쓴다. *)
-let clamp_to range v = match range with None -> v | Some (lo, hi) -> max lo (min hi v)
+(* AX=07h·08h 의 범위. 드라이버가 상주할 때, 리셋할 때, INT 10h 로 모드를
+   세울 때 가상 화면 전체({!Dos_mouse_space})로 돌아간다. *)
+let clamp_to (lo, hi) v = max lo (min hi v)
+
+(* 커서 깃발(HelpPC 2.10 INT 33,1): 0 이면 커서가 보이고 음수면 숨는다.
+   드라이버를 리셋하면 -1 이다. *)
+let cursor_flag_after_reset = -1
+
+(* AX=09h 그래픽 커서는 열여섯 줄이고 줄마다 16비트 워드 하나다. 화면
+   마스크 열여섯 워드 뒤에 커서 마스크 열여섯 워드가 온다(RBIL INT 33/0009
+   표 03170). *)
+let cursor_rows = 16
+
+type graphics_cursor =
+  | Default_arrow
+      (** 리셋 뒤 드라이버에 든 화살표다. 이 기계는 그 비트맵을 지어내지
+          않는다. 무엇을 그릴지는 커서를 그리는 쪽이 정한다(이슈 #77). *)
+  | Custom_cursor of {
+      hot_x : int;  (** BX 그대로 *)
+      hot_y : int;  (** CX 그대로 *)
+      screen_mask : int array;  (** [cursor_rows] 워드, 화면과 AND *)
+      cursor_mask : int array;  (** [cursor_rows] 워드, 그 뒤 XOR *)
+    }
+
+(* 화살표의 핫스폿은 왼쪽 위 (0, 0)이다(DOSBox-X mouse.cpp 의 리셋이
+   hotx·hoty 를 0 으로 둔다). *)
+let default_hot_spot = (0, 0)
+
+(* AX=0Ah 텍스트 커서(RBIL INT 33/000A). 소프트웨어 커서는 커서 자리의
+   글자·속성 워드를 화면 마스크와 AND 한 뒤 커서 마스크와 XOR 한다.
+   하드웨어 커서는 CRTC 커서의 시작·끝 스캔 줄이다. *)
+type text_cursor =
+  | Software_text of { screen_mask : int; cursor_mask : int }
+  | Hardware_text of { first_line : int; last_line : int }
+
+(* 리셋 뒤 텍스트 커서는 속성 바이트만 뒤집는 소프트웨어 커서다(DOSBox-X
+   mouse.cpp defaultTextAndMask 77FFh·defaultTextXorMask 7700h). *)
+let default_text_cursor = Software_text { screen_mask = 0x77FF; cursor_mask = 0x7700 }
+
+(* 움직임 설정 — AX=0Fh 미키/화소 비율, 1Ah 감도, 13h·1Ah 두 배 속도 문턱
+   (RBIL INT 33/000F, 001A, 0013). *)
+type mouse_motion = {
+  mickeys_x : int;  (** 가로 8 화소당 미키 *)
+  mickeys_y : int;  (** 세로 8 화소당 미키 *)
+  speed_x : int;  (** 1Ah 가로 감도, 1..100 *)
+  speed_y : int;
+  double_speed : int;  (** 미키/초 *)
+}
+
+(* 리셋 값. 비율은 RBIL INT 33/000F("default 8", "default 16")와 HelpPC
+   INT 33,0, 문턱 64 는 RBIL INT 33/0013, 감도 50 은 CuteMouse ctmouse.asm
+   기본값(sensval 49, 1Bh 가 1 을 더해 낸다)이다. *)
+let default_motion =
+  { mickeys_x = 8; mickeys_y = 16; speed_x = 50; speed_y = 50; double_speed = 64 }
+
+let lowest_speed = 1
+let highest_speed = 100
+
+(* 0Fh 비율은 8 화소당 미키다 *)
+let pixels_per_ratio = 8
+
+(* 커서가 [pixels] 움직인 만큼의 미키. 드라이버는 미키를 세고 커서를
+   미키 × 8 / 비율만큼 옮긴다(CuteMouse updateposition, DOSBox-X
+   Mouse_CursorMoved). 이 기계는 하네스가 커서 자리를 주니 거꾸로 화소 × 비율
+   / 8 이다. 감도는 미키를 세기 전에 들어가므로 여기에 끼지 않는다. 8 로
+   나눈 나머지(0..7)는 [carry] 로 다음 움직임에 넘겨 느린 움직임이 사라지지
+   않게 한다. *)
+let mickeys_of_pixels ~per_8 ~carry pixels =
+  let v = (pixels * per_8) + carry in
+  let m =
+    if v >= 0 then v / pixels_per_ratio
+    else -(((-v) + pixels_per_ratio - 1) / pixels_per_ratio)
+  in
+  (m, v - (m * pixels_per_ratio))
 
 type mouse = {
   mutable mouse_present : bool;
   mutable mouse_x : int;
   mutable mouse_y : int;
   mutable mouse_buttons : int;
-  mutable mouse_visible : bool;
-  mutable mouse_dx : int;
+  mutable mouse_cursor_flag : int;  (** 0 이하. 0 이면 보인다 *)
+  mutable mouse_graphics_cursor : graphics_cursor;
+  mutable mouse_text_cursor : text_cursor;
+  mutable mouse_dx : int;  (** 미키 *)
   mutable mouse_dy : int;
+  mutable mouse_motion : mouse_motion;
+  mutable mouse_carry_x : int;  (** [mickeys_of_pixels] 의 나머지 *)
+  mutable mouse_carry_y : int;
   mutable mouse_handler_mask : int;
   mutable mouse_handler_seg : int;
   mutable mouse_handler_off : int;
   mouse_presses : button_log array;
   mouse_releases : button_log array;
-  mutable mouse_range_x : (int * int) option;
-  mutable mouse_range_y : (int * int) option;
+  mutable mouse_range_x : int * int;
+  mutable mouse_range_y : int * int;
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
@@ -163,9 +239,14 @@ type t = {
   mutable epoch_sec : int;
   (* EMS 4.0 스텁(Dos_ems)의 상태 *)
   ems_pages : (int, Bytes.t array) Hashtbl.t;
-        (** 핸들(1 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB) *)
-  mutable ems_mapped : (int * int) array;
-        (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지) *)
+        (** 핸들(0 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB).
+            운영체제 핸들 0 은 늘 있다. *)
+  ems_mapped : (int * int) option array;
+        (** 물리 페이지 0-3 → 지금 겹쳐진 (핸들, 논리 페이지). [None] 은
+            비어 있다. *)
+  ems_saved : (int, (int * int) option array) Hashtbl.t;
+        (** 핸들 → AH=47h 가 저장한 [ems_mapped]. AH=48h 가 꺼내 간다.
+            있는 페이지만 가리킨다. *)
   mouse : mouse;
 }
 
@@ -201,12 +282,17 @@ let seg_off t sreg reg = physical (Cpu86.seg t.cpu sreg) (Cpu86.reg16 t.cpu reg)
 
 (* Copies [len] bytes of [src] into guest memory at physical [dst], wrapping
    at 1MB like [wr8]. A buffer that starts near the top of memory continues
-   at physical 0 instead of raising. *)
+   at physical 0 instead of raising. The bytes go through the CPU's bus, as
+   DOS's own REP MOVS would: in a planar mode the A0000h window is the
+   video planes, not the RAM under it (#117). *)
 let blit_to_mem t src src_off dst len =
-  let dst = dst land phys_mask in
-  let first = min len (phys_mask + 1 - dst) in
-  Bytes.blit src src_off t.mem dst first;
-  if len > first then Bytes.blit src (src_off + first) t.mem 0 (len - first)
+  for i = 0 to len - 1 do
+    Cpu86.bus_write t.cpu ((dst + i) land phys_mask) (Char.code (Bytes.get src (src_off + i)))
+  done
+
+(* The guest byte at physical [a] as the CPU reads it -- the counterpart of
+   [blit_to_mem] for bytes DOS takes from a guest buffer. *)
+let bus_rd8 t a = Cpu86.bus_read t.cpu (a land phys_mask)
 
 (* DS:DX 의 ASCIIZ — INT 21h 파일명 계열이 쓴다. *)
 let asciiz_at t base =
@@ -248,7 +334,7 @@ let days_in_month y m =
   | 4 | 6 | 9 | 11 -> 30
   | _ -> if (y mod 4 = 0 && y mod 100 <> 0) || y mod 400 = 0 then 29 else 28
 
-let elapsed_seconds t = Cpu86.cycles t.cpu / Dos_clock.cpu_hz
+let elapsed_seconds t = Cpu86.cycles t.cpu / Dos_ports.cpu_hz t.ports
 
 (* 기준 시각 + 경과. 윤년까지 세되 달력 라이브러리는 쓰지 않는다 —
    게스트가 보는 건 DOS 의 날짜 필드뿐이다. *)

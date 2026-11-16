@@ -22,13 +22,15 @@ type t
 
 val create : unit -> t
 
-val press : t -> now:int -> int -> unit
-(** One key down at cycle [now] and up 100 ms later, for the BIOS word
+val press : t -> hz:int -> now:int -> int -> unit
+(** [hz] is the CPU's cycles per second; every function that takes it
+    counts the 1 ms byte gap and the 100 ms key hold in it.
+    One key down at cycle [now] and up 100 ms later, for the BIOS word
     [scan lsl 8 lor ascii]. The key and its modifier come from
     {!Dos_keymap.of_word}; for a word no key gives, the make code is the
     word's high byte and nothing is held. *)
 
-val latch : t -> now:int -> bool
+val latch : t -> hz:int -> now:int -> bool
 (** Moves the next byte into port 0x60 if it is due, the last one was
     read, and 1 ms passed since. [true] when a byte arrived: the controller
     raises IRQ1.
@@ -39,7 +41,7 @@ val ready_at : t -> int
     cannot. The machine looks at it before each instruction so that
     nothing else runs while the keyboard is idle. *)
 
-val read_data : t -> now:int -> int
+val read_data : t -> hz:int -> now:int -> int
 (** A read of port 0x60. The first read of a byte empties the buffer;
     reading again before the next byte arrives gives the same byte, as a
     hook that read it and then chains to the BIOS needs. *)
@@ -58,4 +60,4 @@ val holds_key : t -> bool
 (** {1 Snapshot} *)
 
 val write_state : Dos_snap_codec.writer -> t -> unit
-val read_state : Dos_snap_codec.reader -> t -> unit
+val read_state : Dos_snap_codec.reader -> t -> hz:int -> unit

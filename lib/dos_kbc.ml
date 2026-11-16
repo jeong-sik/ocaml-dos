@@ -1,9 +1,12 @@
 (* The 8042 keyboard controller, from the program's side. See dos_kbc.mli. *)
 
-(* In CPU cycles. A keyboard sends a byte as an 11-bit frame at 10-16 kHz,
-   about 1 ms; a person holds a tapped key about 100 ms. *)
-let byte_gap = Dos_clock.cpu_hz / 1000
-let key_hold = Dos_clock.cpu_hz / 10
+(* A keyboard sends a byte as an 11-bit frame at 10-16 kHz, about 1 ms; a
+   person holds a tapped key about 100 ms. [hz] is the CPU's cycles per
+   second, so both stretch with the CPU speed. *)
+let bytes_per_second = 1000
+let taps_per_second = 10
+let byte_gap ~hz = hz / bytes_per_second
+let key_hold ~hz = hz / taps_per_second
 
 let break_bit = 0x80
 
@@ -31,7 +34,7 @@ type t = {
 
 let never = max_int
 
-let update_ready t =
+let update_ready t ~hz =
   t.ready_at <-
     (match t.queue with
      | [] -> never
@@ -40,7 +43,7 @@ let update_ready t =
        else
          match t.last_read with
          | None -> next.due
-         | Some r -> max next.due (r + byte_gap))
+         | Some r -> max next.due (r + byte_gap ~hz))
 
 let create () =
   { queue = []; data = 0; word = None; full = false; last_read = None; ready_at = never }
@@ -54,7 +57,8 @@ let rec insert b = function
 
 (* The key the word stands for, and the modifier held around it. A word
    no key gives keeps the old contract: its high byte is the make code. *)
-let press t ~now word =
+let press t ~hz ~now word =
+  let key_hold = key_hold ~hz in
   let scan, held =
     match Dos_keymap.of_word word with
     | Some { Dos_keymap.scan; held } -> (scan, held)
@@ -71,11 +75,11 @@ let press t ~now word =
         { code = make lor break_bit; word = None; due = now + key_hold } ]
   in
   t.queue <- List.fold_left (fun q b -> insert b q) t.queue bytes;
-  update_ready t
+  update_ready t ~hz
 
 let ready_at t = t.ready_at
 
-let latch t ~now =
+let latch t ~hz ~now =
   now >= t.ready_at
   && (match t.queue with
       | [] -> false
@@ -84,14 +88,14 @@ let latch t ~now =
         t.data <- next.code;
         t.word <- next.word;
         t.full <- true;
-        update_ready t;
+        update_ready t ~hz;
         true)
 
-let read_data t ~now =
+let read_data t ~hz ~now =
   if t.full then begin
     t.full <- false;
     t.last_read <- Some now;
-    update_ready t
+    update_ready t ~hz
   end;
   t.data
 
@@ -126,7 +130,7 @@ let write_state w { queue; data; word; full; last_read; ready_at = _ (* derived 
   | None -> C.put_bool w false
   | Some r -> C.put_bool w true; C.put w ~what:"keyboard last read" C.count r
 
-let read_state r t =
+let read_state r t ~hz =
   (* The reads are in the order the bytes were written; a loop keeps them
      there whatever order a list builder calls its function in. *)
   let rec bytes n acc =
@@ -144,4 +148,4 @@ let read_state r t =
   t.full <- C.get_bool r;
   t.last_read <-
     (if C.get_bool r then Some (C.get r ~what:"keyboard last read" C.count) else None);
-  update_ready t
+  update_ready t ~hz

@@ -454,7 +454,8 @@ let test_vga13_render_matches_reference () =
         let r, g, b = pal.(Char.code (Bytes.get mem (0xA0000 + (i / 3)))) in
         Char.chr (dac8 (match i mod 3 with 0 -> r | 1 -> g | _ -> b)))
   in
-  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_vga13 mem pal = expected)
+  let screen = Bytes.sub mem 0xA0000 (320 * 200) in
+  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_indexed screen pal = expected)
 
 let () =
   test_planar_render_matches_reference ();

@@ -21,8 +21,9 @@ let run_to m n stop = Dos_machine.run_until m ~max_steps:n ~stop
 
 let code_byte m off = Dos_state.rd8 m ((m.Dos_state.psp_seg lsl 4) + off)
 
-let hold = Dos_clock.cpu_hz / 10
-let byte_time = Dos_clock.cpu_hz / 1000
+let pc_hz = Dos_ports.speed_hz Dos_ports.pc_speed
+let hold = pc_hz / 10
+let byte_time = pc_hz / 1000
 
 (* Enough steps for a key to go down and up while the program spins on
    "jmp $" (15 cycles a step): 100 ms is about 32,000 of them. *)
