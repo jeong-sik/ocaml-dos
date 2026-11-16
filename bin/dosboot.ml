@@ -135,10 +135,12 @@ let () =
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
-  let feed_sync = ref "" in
+  let feed_sync = ref "" and args = ref "" in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
+      ("--args", Arg.Set_string args,
+       "TEXT  명령줄 인자 — 프로그램 이름 뒤에 공백 하나와 TEXT 를 친 것처럼 넘긴다");
       ("--demo", Arg.Set_string demo,
        "NAME  내장 데모 — hello(텍스트) 또는 ega(모드 0Dh 색 띠, \
         --steps 2000000 필요)");
@@ -198,12 +200,14 @@ let () =
       | Some (name, path) -> Dos_machine.mount_file m name (read_file path)
       | None -> ())
     (List.rev !mounts);
+  (* COMMAND.COM 이 넘기는 꼬리는 이름 바로 뒤의 공백부터다 *)
+  let tail = if !args = "" then "" else " " ^ !args in
   if !demo = "hello" then Dos_machine.load_com m (hello_com ())
   else if !demo = "ega" then Dos_machine.load_com m (ega_com ())
   else if !com <> "" then
-    Dos_machine.load_com ~name:(Filename.basename !com) m (read_file !com)
+    Dos_machine.load_com ~name:(Filename.basename !com) ~tail m (read_file !com)
   else if !exe <> "" then
-    Dos_machine.load_exe ~name:(Filename.basename !exe) m (read_file !exe)
+    Dos_machine.load_exe ~name:(Filename.basename !exe) ~tail m (read_file !exe)
   else begin
     prerr_endline "need --demo hello|ega or --com PATH or --exe PATH";
     exit 2

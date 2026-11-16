@@ -444,15 +444,40 @@ let load_exe_module ?psp_seg ~child ~env t image m =
   t.exited <- false;
   t.exit_code <- 0
 
-let load_com ?name t image =
-  write_root_env t ~name;
-  load_com_at ~psp_seg:0x1000 ~child:false ~env:root_env_seg t image
+(* 루트 프로그램의 명령줄 꼬리. PSP:80h 가 길이, 81h 부터 글자, 그 뒤에
+   0Dh 다(RBIL INT 21/26 PSP 표). COMMAND.COM 은 명령 이름 바로 뒤 글자부터
+   CR 까지를 옮긴다(MS-DOS 4.0 TCODE.ASM COMTAIL). "GAME a" 면 꼬리는 앞
+   공백을 포함한 " a" 이고 길이는 2 다. 81h..FFh 에 CR 까지 들어가야 하므로
+   126 바이트가 끝이다. 꼬리 안에 CR 은 올 수 없다 — COMMAND.COM 은 첫 CR
+   에서 멈춘다. *)
+let command_tail_room = 126
+let carriage_return = '\r'
 
-let load_exe ?name t image =
+let check_command_tail tail =
+  if String.length tail > command_tail_room then
+    invalid_arg "command tail longer than 126 bytes";
+  if String.contains tail carriage_return then
+    invalid_arg "command tail contains a carriage return"
+
+let write_command_tail t tail =
+  let psp = t.psp_seg * 16 in
+  wr8 t (psp + 0x80) (String.length tail);
+  String.iteri (fun i c -> wr8 t (psp + 0x81 + i) (Char.code c)) tail;
+  wr8 t (psp + 0x81 + String.length tail) (Char.code carriage_return)
+
+let load_com ?name ?(tail = "") t image =
+  check_command_tail tail;
+  write_root_env t ~name;
+  load_com_at ~psp_seg:0x1000 ~child:false ~env:root_env_seg t image;
+  write_command_tail t tail
+
+let load_exe ?name ?(tail = "") t image =
+  check_command_tail tail;
   match loadable image with
   | Ok (Exe_image m) ->
     write_root_env t ~name;
-    load_exe_module ~child:false ~env:root_env_seg t image m
+    load_exe_module ~child:false ~env:root_env_seg t image m;
+    write_command_tail t tail
   | Ok Com_image -> invalid_arg "not an MZ image"
   | Error e -> invalid_arg (mz_error_message e)
 
