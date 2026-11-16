@@ -1,0 +1,3 @@
+(test
+ (name dos_vga_state_test)
+ (libraries dosmachine))
