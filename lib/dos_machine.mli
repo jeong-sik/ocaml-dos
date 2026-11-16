@@ -15,7 +15,15 @@
 
 type t = Dos_state.t
 
-val create : unit -> t
+val create : ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> unit -> t
+(** [model] 은 기본이 [I80286] 이다. [I80386] 이면 게스트가 32 비트 레지스터,
+    FS·GS, 0Fh 명령을 쓰고, CPU 판별이 386 을 본다. [speed] 를 주지 않으면
+    IBM PC 의 4.77MHz 다.
+
+    640KB 기계. [mpu401] 이면(기본 아님) 330h 에 UART 전용 MPU-401 을
+    꽂는다([Dos_mpu401]). MIDI 바이트는 버린다 — 소리 장치가 없다. 기본으로
+    꺼 둔다. 카드를 찾은 게임이 intelligent 모드 명령을 쓰면, 이 카드는
+    답하지 않으므로 그 게임은 답을 기다린다. *)
 
 (** {1 적재} *)
 

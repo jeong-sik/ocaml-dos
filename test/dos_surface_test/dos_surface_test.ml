@@ -483,6 +483,78 @@ let test_word_port_in_reads_two_bytes () =
      상위 바이트가 0 이 된다. *)
   check "워드 IN 은 포트 두 개를 읽는다" (peek16 m scratch) 0xFFFF
 
+(* ---------- BIOS 벡터 ---------- *)
+
+(* 11h·12h·1Ah 는 서비스가 있어도 IVT 가 IRET 스텁을 가리켜 한 번도
+   불리지 않았다. 레지스터를 미리 FFFFh 로 채워, 서비스가 안 돌면
+   그 값이 남게 한다. *)
+let test_bios_equipment_memory_clock () =
+  let m =
+    run_com
+      (assemble
+         (fun _ ->
+            mov_ax 0xFFFF ^ int_ 0x11 ^ store_ax scratch
+            ^ mov_ax 0xFFFF ^ int_ 0x12 ^ store_ax (scratch + 2)
+            ^ "\xfa" (* cli: 틱이 그사이 오르지 않게 *)
+            ^ mov_cx 0xFFFF ^ mov_dx 0xFFFF ^ mov_ax 0x0000 ^ int_ 0x1A
+            ^ store_dx (scratch + 4) ^ store_cx (scratch + 6)
+            ^ "\x31\xc0\x8e\xc0" (* xor ax,ax; mov es,ax *)
+            ^ "\x26\xa1\x6c\x04" ^ store_ax (scratch + 8) (* mov ax,es:[046Ch] *)
+            ^ "\x26\xa1\x6e\x04" ^ store_ax (scratch + 10)
+            ^ mov_ah 0x01 ^ mov_cx 0x0012 ^ mov_dx 0x3456 ^ int_ 0x1A
+            ^ "\x26\xa1\x6c\x04" ^ store_ax (scratch + 12)
+            ^ "\x26\xa1\x6e\x04" ^ store_ax (scratch + 14)
+            ^ quit)
+         "")
+  in
+  check "INT 11h AX=장비 워드" (peek16 m scratch) 0x4021;
+  check "INT 12h AX=640KB" (peek16 m (scratch + 2)) 640;
+  check "INT 1Ah AH=00 DX=틱 하위" (peek16 m (scratch + 4)) (peek16 m (scratch + 8));
+  check "INT 1Ah AH=00 CX=틱 상위" (peek16 m (scratch + 6)) (peek16 m (scratch + 10));
+  check "INT 1Ah AH=01 이 틱 하위를 쓴다" (peek16 m (scratch + 12)) 0x3456;
+  check "INT 1Ah AH=01 이 틱 상위를 쓴다" (peek16 m (scratch + 14)) 0x0012
+
+let test_bios_clock_reads_rtc () =
+  let m = Dos_machine.create () in
+  Dos_machine.set_clock m ~year:1992 ~month:3 ~day:4 ~hour:13 ~minute:45 ~second:7;
+  Dos_machine.load_com m
+    (mov_cx 0xFFFF ^ mov_dx 0xFFFF ^ mov_ah 0x02 ^ int_ 0x1A
+     ^ store_cx scratch ^ store_dx (scratch + 2) ^ sbb_ax_ax ^ store_ax (scratch + 4)
+     ^ quit);
+  Dos_machine.run m ~max_steps:100_000;
+  check "INT 1Ah AH=02 CH:CL=13:45(BCD)" (peek16 m scratch) 0x1345;
+  check "INT 1Ah AH=02 DH=07(BCD)" (peek m (scratch + 3)) 0x07;
+  check "INT 1Ah AH=02 CF=0" (peek16 m (scratch + 4)) 0
+
+(* INT 1Ah 를 가로채 옛 벡터로 넘겨도 AH=02 의 CF=0 이 호출자에게 간다.
+   호출 전 CF=1 로 두어, 호출자 프레임의 FLAGS 가 그대로 돌아오면 남게 한다. *)
+let test_bios_clock_cf_through_a_hook () =
+  let code =
+    assemble
+      (fun off ->
+         let old = off + 5 in
+         mov_ax 0x351A ^ int_ 0x21 ^ store_bx old ^ "\x8c\x06" ^ w (old + 2)
+         ^ mov_dx off ^ mov_ax 0x251A ^ int_ 0x21
+         ^ "\xf9" (* stc *) ^ mov_ah 0x02 ^ int_ 0x1A
+         ^ sbb_ax_ax ^ store_ax scratch ^ quit)
+      ((* hook: jmp far [cs:old] *) "\x2e\xff\x2e" ^ w 0 ^ "\x00\x00\x00\x00")
+  in
+  let hook_at = String.length code - 9 in
+  let code =
+    String.sub code 0 (hook_at + 3) ^ w (0x100 + hook_at + 5) ^ String.sub code (hook_at + 5) 4
+  in
+  let m = run_com code in
+  check "훅을 지난 INT 1Ah AH=02 도 CF=0" (peek16 m scratch) 0
+
+(* 스텁을 까는 쪽과 서비스를 고르는 쪽이 같은 벡터를 본다. *)
+let test_every_host_vector_has_a_stub () =
+  let m = Dos_machine.create () in
+  for v = 0 to 255 do
+    check (Printf.sprintf "벡터 %02Xh: 호스트 서비스와 스텁이 함께 있다" v)
+      (Bool.to_int (Dos_bios.ivt_is_own_stub m v))
+      (Bool.to_int (Option.is_some (Dos_bios.host_vector v)))
+  done
+
 (* ---------- 타이머 ---------- *)
 
 let spin_program = "\xfb\xeb\xfe"          (* sti; jmp $ *)
@@ -584,19 +656,23 @@ let test_psp_both_ways () =
   check "AH=51 BX=PSP 세그먼트" (peek16 m scratch) 0x1000;
   check "AH=62 BX=PSP 세그먼트" (peek16 m (scratch + 2)) 0x1000
 
-(* 어떤 DOS 판에도 없는 AH=80h. 기계는 그 INT 에서 멈추고, 다시 돌려도
-   같은 자리에서 멈춘다. *)
+(* MS-DOS 4.0 표 안(6Ch 이하)이지만 이 DOS 가 아직 만들지 않은 기능:
+   5Fh(네트워크 리디렉터). 6Ch 위 번호는 실기처럼 AL=0 으로 돌아가므로
+   멈춤 시험에 쓰지 않는다. *)
+let unmodeled_function = 0x5F
+
+(* 기계는 그 INT 에서 멈추고, 다시 돌려도 같은 자리에서 멈춘다. *)
 let test_unknown_function_stops () =
   let m = Dos_machine.create () in
-  Dos_machine.load_com m (mov_ah 0x80 ^ int_ 0x21 ^ quit);
+  Dos_machine.load_com m (mov_ah unmodeled_function ^ int_ 0x21 ^ quit);
   let stop () =
     match Dos_machine.run m ~max_steps:1000 with
     | () -> None
     | exception Cpu86.Unsupported msg -> Some msg
   in
   let first = stop () in
-  check_s "AH=80 은 Unsupported 로 멈춘다"
-    (Option.value first ~default:"(멈추지 않음)") "INT 21h AH=80h AL=00h @1000:0102";
+  check_s "AH=5F 는 Unsupported 로 멈춘다"
+    (Option.value first ~default:"(멈추지 않음)") "INT 21h AH=5Fh AL=00h @1000:0102";
   check "IP 는 INT 21h 에 있다" (Cpu86.dump_ip m.Dos_state.cpu) 0x0102;
   check_true "다시 돌려도 같은 자리에서 멈춘다" (stop () = first);
   check_true "프로그램은 끝나지 않았다" (not (Dos_machine.exited m))
@@ -610,7 +686,7 @@ let test_unknown_function_stops_behind_a_hook () =
          let hook = off and old = off + 5 in
          mov_ax 0x3521 ^ int_ 0x21 ^ store_bx old ^ "\x8c\x06" ^ w (old + 2)
          ^ mov_dx hook ^ mov_ax 0x2521 ^ int_ 0x21
-         ^ mov_ah 0x80 ^ int_ 0x21 ^ quit)
+         ^ mov_ah unmodeled_function ^ int_ 0x21 ^ quit)
       ((* hook: jmp far [cs:old] *) "\x2e\xff\x2e" ^ w 0 ^ (* old *) "\x00\x00\x00\x00")
   in
   (* [assemble] 은 데이터 오프셋을 넘기므로 hook 의 피연산자를 고친다. *)
@@ -628,10 +704,10 @@ let test_unknown_function_stops_behind_a_hook () =
   let first = stop () in
   let cpu = m.Dos_state.cpu in
   let at = (Cpu86.seg cpu 1 * 16) + Cpu86.dump_ip cpu in
-  check_s "훅 뒤의 AH=80 도 멈춘다"
+  check_s "훅 뒤의 AH=5F 도 멈춘다"
     (Option.value first ~default:"(멈추지 않음)")
     (* AL 은 앞의 mov ax,2521h 가 남긴 21h 다. *)
-    (Printf.sprintf "INT 21h AH=80h AL=21h @f000:%04x" (Cpu86.dump_ip cpu));
+    (Printf.sprintf "INT 21h AH=5Fh AL=21h @f000:%04x" (Cpu86.dump_ip cpu));
   check "ROM 스텁에서 멈춘다" (Cpu86.seg cpu 1) 0xF000;
   check "그 자리는 INT 명령이다" (Dos_machine.mem_read m at) 0xCD;
   check_true "다시 돌려도 같은 자리에서 멈춘다" (stop () = first);
@@ -670,6 +746,10 @@ let () =
   test_cli_holds_the_tick ();
   test_pit_divisor_speeds_up_ticks ();
   test_cp437_text ();
+  test_bios_equipment_memory_clock ();
+  test_bios_clock_reads_rtc ();
+  test_bios_clock_cf_through_a_hook ();
+  test_every_host_vector_has_a_stub ();
   if !failed = 0 then print_endline "dos 표면: all passed"
   else begin
     Printf.eprintf "dos 표면: %d failures\n%!" !failed;
