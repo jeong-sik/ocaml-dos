@@ -1,4 +1,4 @@
-(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), 키보드
+(** 게스트가 보는 하드웨어 포트 — PIT 타이머, PIC({!Dos_pic}), DMA({!Dos_dma}), 키보드
     컨트롤러({!Dos_kbc}), VGA DAC, CRTC, PC 스피커, CGA 상태 레지스터.
 
     이 포트들이 무엇을 돌려주는지가 게임의 진행 조건이 된다. 고정값을
@@ -19,6 +19,9 @@ type t
     8086 명령표의 값이라서 속도는 "8086 으로 치면 몇 MHz" 다. *)
 
 type speed
+
+val pit_hz : int
+(** PIT 입력 클록(1.193182MHz). 한 펄스가 PIT 한 틱이다. *)
 
 val pc_speed : speed
 (** IBM PC 의 4.77MHz(PIT 한 틱에 4 사이클). *)
@@ -51,12 +54,21 @@ val cpu_hz : t -> int
 val port_in : t -> int -> int
 val port_out : t -> int -> int -> unit
 
-val cycles_per_tick : t -> int
-(** PIT 채널 0 의 분주비가 정하는 IRQ0 간격(CPU 사이클). 기본 분주비
-    65536 = 18.2Hz. 게임이 음악·부드러운 이동을 위해 이 값을 바꾼다. *)
+val irq0_due : t -> bool
+(** 지난 물음 뒤로 PIT 채널 0 의 OUT 이 낮음에서 높음으로 바뀌었다 — IRQ0
+    요청이다. 참이면 [set_now] 의 시각 뒤로 다음 상승을 잡는다. 그 사이 여러
+    번 올랐어도 한 번이다(8259 IRR 은 한 비트다). 기계가 매 스텝 [set_now]
+    뒤에 부른다.
+
+    채널 0 은 BIOS POST 뒤의 상태(모드 3, 카운트 65536 = 18.2Hz)로 켜진다.
+    게임이 음악·부드러운 이동을 위해 모드와 카운트를 바꾼다. 상승 간격과
+    시점은 {!Dos_pit} 가 그 카운트를 실은 때부터 센다. *)
 
 val pic : t -> Dos_pic.t
 (** 포트 0x20·0x21 의 인터럽트 컨트롤러. 기계가 IRQ 를 올리고 고른다. *)
+
+val dma : t -> Dos_dma.t
+(** 포트 00h-0Fh 와 81h·82h·83h·87h 의 DMA 컨트롤러. 장치가 바이트를 당겨 간다. *)
 
 val kbc : t -> Dos_kbc.t
 (** 포트 0x60·0x64 의 키보드 컨트롤러. *)

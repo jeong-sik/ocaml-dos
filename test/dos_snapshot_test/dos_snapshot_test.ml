@@ -314,7 +314,6 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
                       && List.map fst fa.parent_handles = List.map fst fb.parent_handles))
     a.exec_frames b.exec_frames;
   c "last child code" (a.last_child_code = b.last_child_code);
-  c "last tick" (a.last_tick = b.last_tick);
   c "EMS mapping" (a.ems_mapped = b.ems_mapped);
   c "EMS pages" (sorted_bindings a.ems_pages = sorted_bindings b.ems_pages);
   c "EMS saved maps" (sorted_bindings a.ems_saved = sorted_bindings b.ems_saved);
