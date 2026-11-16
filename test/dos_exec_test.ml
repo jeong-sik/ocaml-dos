@@ -84,10 +84,12 @@ let () =
 let () =
   (* 2) TSR 자식(INT 27h) 뒤 다음 자식은 상주 블록 위에 실린다.
        배치 유도: 부모 루트 블록 4A 로 0x20 paras(이미지 전체보다 커야
-       한다 — 작게 부르면 자식 PSP 가 부모 이미지 꼬리를 밟는다) →
-       자식1(first fit) 0x1020. TSR 가 dx=0x120 을 남기면 블록
-       (0x1020, 0x13) — (0x120+15)/16+1 = 19 = 0x13 paras. 자식2 는
-       0x1033 에 실린다.
+       한다 — 작게 부르면 자식 PSP 가 부모 이미지 꼬리를 밟는다).
+       EXEC 는 자식마다 환경 블록을 PSP 앞에 먼저 받는다(1 para).
+       자식1 의 환경 0x1020, PSP 0x1021. TSR 가 dx=0x120 을 남기면 PSP
+       블록은 (0x1021, 0x13) — (0x120+15)/16+1 = 19 = 0x13 paras. 상주
+       종료는 환경 블록도 남긴다(RBIL INT 21/31). 자식2 의 환경은
+       0x1034, PSP 는 0x1035 다.
        자식2 는 자기 CS 를 DS:[0x200] 에 찍고 코드 5 로 끝난다. *)
   let tsr = "\xba\x20\x01\xcd\x27" in          (* mov dx,0x120; int 27h *)
   let child2 =
@@ -107,10 +109,10 @@ let () =
   check "tsr parent exits" (if Dos_machine.exited m then 1 else 0) 1;
   check "child2 code" (Dos_machine.exit_code m) 5;
   let child2_cs =
-    Dos_machine.mem_read m 0x10530
-    lor (Dos_machine.mem_read m 0x10531 lsl 8)
+    Dos_machine.mem_read m 0x10550
+    lor (Dos_machine.mem_read m 0x10551 lsl 8)
   in
-  check "child2 placed above tsr" child2_cs 0x1033
+  check "child2 placed above tsr and its environment" child2_cs 0x1035
 
 let () =
   (* 3) MZ 자식: 재배치 없는 EXE 를 띄워 코드 33 으로 끝나게 한다 *)
