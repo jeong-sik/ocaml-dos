@@ -171,7 +171,8 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   모두 그린다 — 상자 선·블록·악센트 글자는 font8x8(Public Domain)에서,
   웃는 얼굴·카드 무늬·화살표 같은 40자는 이 저장소에서 그렸다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB(29h 이름 나누기 포함), findfirst/findnext, 메모리 할당(48h/49h/4Ah),
+  seek/close/dup), FCB 읽기(0Fh/10h/14h/21h/23h/24h, 확장 FCB, 29h 이름
+  나누기), findfirst/findnext, 메모리 할당(48h/49h/4Ah),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기.
   MZ 는 헤더의 페이지 수만큼 싣고 뒤에 붙은 데이터는 싣지 않는다. 자식은
