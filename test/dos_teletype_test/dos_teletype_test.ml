@@ -21,7 +21,7 @@ let int10 m ~ax ?(bx = 0) ?(cx = 0) ?(dx = 0) () =
   Cpu86.set_reg16 c 3 bx;
   Cpu86.set_reg16 c 1 cx;
   Cpu86.set_reg16 c 2 dx;
-  ignore (Dos_bios.service m 0x10)
+  ignore (Dos_bios.service m Dos_bios.Video)
 
 let locate m ~col ~row = int10 m ~ax:0x0200 ~dx:((row lsl 8) lor col) ()
 let cell m ~col ~row = Dos_state.read_cell m row col
