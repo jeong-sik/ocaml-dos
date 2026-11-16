@@ -2,17 +2,27 @@
     주소는 모두 물리 주소다. *)
 
 val drive : int
+val name : int
+(** 이름 8 칸 + 확장자 3 칸이 시작하는 자리 *)
+
 val extent : int
 val record_size : int
 val file_size : int
 val next_record : int
 val random_record : int
+
+val rename_target : int
+(** 17h 의 새 이름 (이름 8 + 확장자 3) *)
+
 val default_record_size : int
 val wide_record_limit : int
 
 val locate : Dos_state.t -> int -> int
 (** DS:DX 가 가리키는 자리에서 보통 FCB 의 시작을 찾는다 — 확장 FCB 면
     머리 7 바이트를 건너뛴다 (GetExtended). *)
+
+val search_attribute : Dos_state.t -> int -> int
+(** 확장 FCB 머리의 속성 바이트. 보통 FCB 면 0 (TransFCB 의 SAttrib) *)
 
 val current : Dos_state.t -> int -> int
 (** 블록과 다음 레코드가 가리키는 레코드 번호 (GetExtent) *)
