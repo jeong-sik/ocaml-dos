@@ -78,6 +78,12 @@ let blit img ~width ~x ~y (r, g, b) =
   Bytes.set img (i + 1) (Char.chr g);
   Bytes.set img (i + 2) (Char.chr b)
 
+(* 시퀀서가 화면을 끄면 그림 전체가 DAC 0 번 색이다. *)
+let rgb_solid ~width ~height pal =
+  let r, g, b = rgb_of_dac pal 0 in
+  String.init (width * height * 3) (fun i ->
+      Char.chr (match i mod 3 with 0 -> r | 1 -> g | _ -> b))
+
 (* 텍스트 속성 바이트: 아래 니블이 글자색, 위 니블이 바탕색이다. 깜박임이
    켜져 있으면 위 니블의 맨 위 비트는 색이 아니라 깜박임이다. *)
 let attr_nibble = 0x0f
@@ -190,15 +196,15 @@ let rgb_planar planes ~w ~h ~attr ~pal =
   done;
   Bytes.to_string img
 
-(* VGA 13h: 0xA0000 선형 320x200, DAC 은 채널당 6비트. *)
+(* 256색: 화면 순서로 늘어선 색 번호, DAC 은 채널당 6비트. *)
 let vga_colors = 256
 
-let rgb_vga13 mem pal =
-  let width = 320 and height = 200 in
-  let img = Bytes.make (width * height * 3) '\000' in
+let rgb_indexed indices pal =
+  let n = Bytes.length indices in
+  let img = Bytes.make (n * 3) '\000' in
   let colors = Array.init vga_colors (fun i -> rgb_of_dac pal i) in
-  for i = 0 to (width * height) - 1 do
-    let r, g, b = colors.(Char.code (Bytes.get mem (0xA0000 + i))) in
+  for i = 0 to n - 1 do
+    let r, g, b = colors.(Char.code (Bytes.get indices i)) in
     Bytes.set img (i * 3) (Char.chr r);
     Bytes.set img ((i * 3) + 1) (Char.chr g);
     Bytes.set img ((i * 3) + 2) (Char.chr b)

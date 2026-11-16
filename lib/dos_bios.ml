@@ -14,7 +14,8 @@ open Dos_state
    나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
    조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
    12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type bios_service =
+  | Keyboard_irq | Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
 type host_vector =
   | Bios of bios_service
   | Dos_divide_overflow
@@ -25,6 +26,7 @@ type host_vector =
 
 let host_vector = function
   | 0x00 -> Some Dos_divide_overflow
+  | 0x09 -> Some (Bios Keyboard_irq)
   | 0x10 -> Some (Bios Video)
   | 0x11 -> Some (Bios Equipment)
   | 0x12 -> Some (Bios Memory_size)
@@ -48,6 +50,9 @@ let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
+(* INT 21h AH=38h 표가 가리키는 대문자 루틴(Dos_country). 스텁 자리
+   (0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
+let case_map_off = 0x0400
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
@@ -83,17 +88,57 @@ let default_glyph_color t =
   | Dos_video.Cga2 -> 0x01
   | Dos_video.Text | Dos_video.Planar | Dos_video.Linear256 -> 0x0F
 
+(* 하루의 틱 수(SeaBIOS src/std/bda.h TICKS_PER_DAY). *)
+let ticks_per_day = 0x1800B0
+
+let le16 v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xff))
+
 (* IRQ0 에서 도는 ROM 루틴: 0x46C 틱을 올리고 INT 1Ch 사용자 훅을 부른
-   뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다. *)
+   뒤 PIC 에 EOI 를 보내고 IRET. 실기 BIOS 와 같은 사슬이다.
+
+   틱이 하루치 이상이 되면 0 으로 돌리고 0x470 을 하나 올린다(SeaBIOS
+   src/clock.c clock_update). DOS 는 INT 1Ah AH=00h 가 돌려주는 이 값을
+   보고 날짜를 넘긴다. *)
 let bios_int8 =
   "\x1e\x50"                        (* push ds; push ax *)
   ^ "\x31\xc0\x8e\xd8"              (* xor ax,ax; mov ds,ax *)
   ^ "\xa1\x6c\x04\x40\xa3\x6c\x04"  (* mov ax,[046C]; inc ax; mov [046C],ax *)
   ^ "\x75\x04"                      (* jnz +4 — 자리올림 없으면 고워드 skip *)
   ^ "\xff\x06\x6e\x04"              (* inc word [046E] *)
-  ^ "\xcd\x1c"                      (* int 1Ch — 사용자 틱 훅 *)
+  ^ "\x81\x3e\x6e\x04" ^ le16 (ticks_per_day lsr 16)     (* cmp word [046E],hi *)
+  ^ "\x72\x16"                      (* jb hook — 하루가 안 됐다 *)
+  ^ "\x77\x08"                      (* ja midnight *)
+  ^ "\x81\x3e\x6c\x04" ^ le16 (ticks_per_day land 0xffff) (* cmp word [046C],lo *)
+  ^ "\x72\x0c"                      (* jb hook *)
+  ^ "\x31\xc0"                      (* midnight: xor ax,ax *)
+  ^ "\xa3\x6c\x04\xa3\x6e\x04"      (* mov [046C],ax; mov [046E],ax *)
+  ^ "\xfe\x06\x70\x04"              (* inc byte [0470] *)
+  ^ "\xcd\x1c"                      (* hook: int 1Ch — 사용자 틱 훅 *)
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
+
+(* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
+   3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
+let pmtimer_hz = 3579545
+let pmtimer_to_pit = 3
+let pit_tick_interval = 65536
+let ms_per_second = 1000
+let ceil_div a b = (a + b - 1) / b
+
+let ticks_of_time ~hour ~minute ~second =
+  let ms = (((hour * 60) + minute) * 60 + second) * ms_per_second in
+  let pm = ceil_div (ms * pmtimer_hz) pit_tick_interval in
+  ceil_div pm (ms_per_second * pmtimer_to_pit)
+
+(* 부팅 때 BIOS 가 RTC 를 읽어 틱을 채운다(SeaBIOS src/clock.c
+   clock_setup). 자정 넘김 표시는 지운다. now_fields 의 시는 0..23 이라
+   틱은 하루를 넘지 않는다(23:59:59 가 1573025). *)
+let set_ticks_from_clock t =
+  let _, _, _, hour, minute, second = now_fields t in
+  let ticks = ticks_of_time ~hour ~minute ~second in
+  wr16 t 0x46C (ticks land 0xFFFF);
+  wr16 t 0x46E (ticks lsr 16);
+  wr8 t 0x470 0
 
 (* CuteMouse setupvideo(ctmouse.asm): 범위를 지금 모드의 가상 화면 전체로,
    커서를 그 가운데로. 드라이버가 상주할 때, 00h·21h 리셋, INT 10h 모드
@@ -135,6 +180,9 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
+  String.iteri
+    (fun i c -> wr8 t ((rom_seg * 16) + case_map_off + i) (Char.code c))
+    (Dos_country.case_map_code ~at:case_map_off);
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* POST 는 부팅 모드를 세우며 화면을 지운다: 공백, 속성 07h. 이게
      없으면 화면 메모리가 0(검정 위 검정)이라, 칸의 속성을 두는 teletype
@@ -145,6 +193,7 @@ let install t =
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
   wr16 t 0x410 equipment_word;
   wr16 t 0x413 640;                 (* 기억용량 KB *)
+  set_ticks_from_clock t;
   wr8 t 0x417 0;                    (* 시프트 상태 *)
   wr8 t 0x418 0;
   wr16 t 0x41A ring_lo;
@@ -238,6 +287,27 @@ let to_bcd n = ((n / 10) * 16) + (n mod 10)
 
 (* ---------- INT 10h 비디오 ---------- *)
 
+(* EGA/VGA BIOS 데이터: 0x487 은 EGA 기타 정보(bit 0 = 커서 모양 흉내 끔),
+   0x488 은 스위치, 0x489 는 VGA 모드 세우기 깃발(bit 7·4 = 200·400 주사선,
+   bit 3 = 기본 팔레트 싣기 끔). 비트 자리는 DOSBox-staging int10.cpp 와
+   같다. SeaBIOS 1231h 는 0x487 bit 3 을 바꾸지만 정작 그쪽 모드 세우기는
+   0x489 bit 3 을 본다. *)
+let bda_ega_misc = 0x487
+let bda_switches = 0x488
+let bda_vga_flags = 0x489
+let ega_misc_no_cursor_emulation = 0x01
+let vga_flag_200_lines = 0x80
+let vga_flag_400_lines = 0x10
+let vga_flag_keep_palette = 0x08
+let switches_kept = 0xF0
+let switches_cga_emulation = 0x08
+let switches_ega_enhanced = 0x09
+let alt_select_done = 0x12
+
+let set_bda_bit t addr bit on =
+  let v = rd8 t addr in
+  wr8 t addr (if on then v lor bit else v land lnot bit)
+
 (* 속성 컨트롤러의 색 번호 레지스터 00h~0Fh *)
 let palette_regs = 16
 
@@ -257,8 +327,8 @@ let video t =
     Dos_video.set_mode t.video mode ~clear:(al land 0x80 = 0);
     (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
        AL bit7(화면 보존)과는 상관없다. 막는 길은 BDA 0x489 bit3
-       (기본 팔레트 싣기 금지, AX=1200h BL=31h 가 켜는 비트) 하나다. *)
-    if rd8 t 0x489 land 0x08 = 0 then Dos_ports.reset_dac t.ports;
+       (기본 팔레트 싣기 금지, AX=1201h BL=31h 가 켜는 비트) 하나다. *)
+    if rd8 t bda_vga_flags land vga_flag_keep_palette = 0 then Dos_ports.reset_dac t.ports;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
     wr8 t 0x484 (rows t - 1);
@@ -433,12 +503,35 @@ let video t =
         table
     end
   | 0x12 ->
-    (* 대체 선택: BL=10h 이면 EGA/VGA 정보. BH=0(컬러), BL=3(256KB) *)
-    if Cpu86.reg8 cpu 3 = 0x10 then begin
-      Cpu86.set_reg8 cpu 7 0;
-      Cpu86.set_reg8 cpu 3 3;
-      Cpu86.set_reg16 cpu 1 0
-    end
+    (* 대체 선택. BL=10h 는 EGA/VGA 정보: BH=0(컬러), BL=3(256KB).
+       BL=30h·31h·34h·36h 는 받으면 AL=12h, AL 이 범위 밖이면 AL=0 이다
+       (RBIL INT 10/AH=12h BL=30h~36h). 그 밖의 BL 은 AL 을 두고 돌아간다. *)
+    let al_in n f = if al > n then Cpu86.set_reg8 cpu 0 0 else (f (); Cpu86.set_reg8 cpu 0 alt_select_done) in
+    (match Cpu86.reg8 cpu 3 with
+     | 0x10 ->
+       Cpu86.set_reg8 cpu 7 0;
+       Cpu86.set_reg8 cpu 3 3;
+       Cpu86.set_reg16 cpu 1 0
+     | 0x30 ->
+       (* 다음 모드 세우기의 텍스트 주사선 수. BDA 만 바꾼다 — 텍스트 그림은
+          늘 8x8 글자를 세로로 두 배 늘린 400 줄이다. *)
+       al_in 2 (fun () ->
+           let flags = rd8 t bda_vga_flags land lnot (vga_flag_200_lines lor vga_flag_400_lines) in
+           let lines, switches =
+             match al with
+             | 0 -> (vga_flag_200_lines, switches_cga_emulation)
+             | 1 -> (0, switches_ega_enhanced)
+             | _ -> (vga_flag_400_lines, switches_ega_enhanced)
+           in
+           wr8 t bda_vga_flags (flags lor lines);
+           wr8 t bda_switches ((rd8 t bda_switches land switches_kept) lor switches))
+     | 0x31 ->
+       al_in 1 (fun () -> set_bda_bit t bda_vga_flags vga_flag_keep_palette (al = 1))
+     | 0x34 ->
+       (* 커서 모양 바꾸기(AH=01h)는 이 비트와 상관없이 CRTC 에 그대로 쓴다. *)
+       al_in 1 (fun () -> set_bda_bit t bda_ega_misc ega_misc_no_cursor_emulation (al = 1))
+     | 0x36 -> al_in 1 (fun () -> Dos_video.set_screen_blanked t.video (al = 1))
+     | _ -> ())
   | 0x13 ->
     (* 문자열 쓰기: ES:BP=문자열, CX=길이, DH/DL=시작 행/열,
        AL bit0=커서 갱신, bit1=속성이 문자열 안에 섞여 있음 *)
@@ -509,10 +602,43 @@ let keyboard t =
   | 0x05 ->
     (* 키 밀어넣기: CX=(스캔<<8)|ASCII. 꽉 찼으면 AL=1 *)
     let before = ring_tail t in
-    push_key t (Cpu86.reg16 cpu 1);
+    ring_push t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
   | _ -> ()
+
+(* ---------- INT 9 키보드 IRQ ---------- *)
+
+let keyboard_data_port = 0x60
+let bda_shift_flags = 0x417
+let bda_shift_flags_left = 0x418
+
+(* 수식키가 0040:0017 과 0040:0018 에서 세우는 비트. SeaBIOS src/std/bda.h
+   의 KF0_* 와 같다: 0x417 은 bit1 왼쪽 shift, bit2 ctrl, bit3 alt 이고,
+   0x418 은 bit0 왼쪽 ctrl, bit1 왼쪽 alt 다. *)
+let modifier_bits = function
+  | Dos_keymap.Shift -> (0x02, 0x00)
+  | Dos_keymap.Ctrl -> (0x04, 0x01)
+  | Dos_keymap.Alt -> (0x08, 0x02)
+
+(* 실기 BIOS 의 INT 9 처럼 포트 0x60 을 읽어 시프트 상태나 링을 고치고
+   EOI 를 보낸다. 스캔 코드를 글자로 옮기는 표 대신 make 바이트가 지닌
+   워드를 넣는다 — 호스트가 누른 워드가 INT 16h 의 답이다. INT 9 를
+   가로챈 게스트가 먼저 0x60 을 읽고 여기로 넘겨도 같은 바이트를 읽는다
+   (Dos_kbc.read_data). *)
+let keyboard_irq t =
+  let code = Dos_ports.port_in t.ports keyboard_data_port in
+  (match Dos_keymap.modifier_of_code code with
+   | Some (m, edge) ->
+     let flags, left = modifier_bits m in
+     let apply a bits =
+       let v = rd8 t a in
+       wr8 t a (match edge with Dos_keymap.Down -> v lor bits | Dos_keymap.Up -> v land lnot bits)
+     in
+     apply bda_shift_flags flags;
+     apply bda_shift_flags_left left
+   | None -> Option.iter (ring_push t) (Dos_kbc.data_word (Dos_ports.kbc t.ports)));
+  Dos_pic.end_of_interrupt (Dos_ports.pic t.ports)
 
 (* ---------- INT 1Ah 시각 ---------- *)
 
@@ -773,6 +899,7 @@ let mouse t =
 
 let service t s =
   match s with
+  | Keyboard_irq -> keyboard_irq t; Completed
   | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
   | Keyboard -> keyboard t; Completed
   | Video -> video t; Completed
@@ -780,3 +907,5 @@ let service t s =
   | Memory_size -> Cpu86.set_reg16 t.cpu 0 (rd16 t 0x413); Completed
   | Time_of_day -> clock t; Completed
   | Mouse -> mouse t; Completed
+
+let case_map_entry = (rom_seg, case_map_off)

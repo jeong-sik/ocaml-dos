@@ -10,7 +10,9 @@ let store off = "\xa3" ^ word off
 let int21 = "\xcd\x21"
 let exit = mov_ax 0x4c00 ^ int21
 let marker = "\xb2\x58\xb4\x02" ^ int21
-let run m = ignore (Dos_machine.run_until m ~max_steps:100 ~stop:(fun _ -> false))
+(* A keyboard sends a byte in about 1 ms, some 2,400 idle steps; a burst of
+   a few keys needs a few of those. *)
+let run m = ignore (Dos_machine.run_until m ~max_steps:20_000 ~stop:(fun _ -> false))
 let byte m off = Dos_state.rd8 m (0x10000 + off)
 let read_word m off = Dos_state.rd16 m (0x10000 + off)
 let bytes m off n = String.init n (fun i -> Char.chr (byte m (off + i)))
@@ -33,7 +35,7 @@ let test_byte ah =
       run current;
       check "DOS byte read exits after one key" (Dos_machine.exited current);
       check "DOS byte is delivered once" (byte current 0x200 = Char.code 'Q');
-      check "second key remains queued" (Dos_state.peek_key current land 0xff = Char.code 'R');
+      check "second key remains unread" (Dos_machine.key_unread current);
       check "only AH01 echoes" (screen_prefix current (if ah = 1 then 2 else 1)
           = if ah = 1 then "QX" else "X")) [m; resumed];
   check "byte wait snapshot resumes identically" (save m = save resumed)
@@ -48,7 +50,7 @@ let test_extended_and_polls () =
   check "extended key prefix returned" (byte m 0x200 = 0);
   check "DOS status sees pending scan without consuming" (byte m 0x202 = 0xff);
   check "next DOS byte read returns pending scan" (byte m 0x204 = 0x50);
-  check "extended key consumed exactly once" (m.Dos_state.ext_scan_pending = 0 && not (Dos_state.key_pending m));
+  check "extended key consumed exactly once" (m.Dos_state.ext_scan_pending = 0 && not (Dos_machine.key_unread m));
   let empty = machine (mov_dx 0xff ^ mov_ax 0x0600 ^ int21 ^ "\x9c\x58" ^ store 0x200
                        ^ mov_ax 0x0b00 ^ int21 ^ store 0x202 ^ marker ^ exit) in
   run empty;
@@ -58,7 +60,8 @@ let test_extended_and_polls () =
   let peek = machine (mov_ax 0x0b00 ^ int21 ^ store 0x200
                       ^ mov_ax 0x0b00 ^ int21 ^ store 0x202
                       ^ mov_ax 0x0800 ^ int21 ^ store 0x204 ^ exit) in
-  Dos_machine.type_string peek "Q";
+  (* 'Q' is in the BIOS buffer before the first peek. *)
+  Dos_state.ring_push peek 0x1051;
   run peek;
   check "DOS0B peeks without consuming" (byte peek 0x200 = 0xff && byte peek 0x202 = 0xff
                                          && byte peek 0x204 = Char.code 'Q')
@@ -66,11 +69,11 @@ let test_extended_and_polls () =
 let test_flush_once () =
   let m = machine (mov_ax 0x0800 ^ int21 ^ store 0x200
                    ^ mov_ax 0x0c08 ^ int21 ^ store 0x202 ^ marker ^ exit) in
-  Dos_machine.push_key m 0x5000;
-  Dos_machine.type_string m "old";
+  (* Down arrow, then "old", all in the BIOS buffer before the program runs. *)
+  List.iter (Dos_state.ring_push m) [ 0x5000; 0x186F; 0x266C; 0x2064 ];
   run m;
   check "AH0C clears pending scan and queued typeahead"
-    (byte m 0x200 = 0 && m.Dos_state.ext_scan_pending = 0 && not (Dos_state.key_pending m));
+    (byte m 0x200 = 0 && m.Dos_state.ext_scan_pending = 0 && not (Dos_machine.key_unread m));
   check "AH0C subfunction remains blocked" (not (Dos_machine.exited m));
   let resumed = restore (save m) in
   List.iter (fun current ->
@@ -100,7 +103,8 @@ let line_machine fn capacity =
 
 let test_line fn =
   let m = line_machine fn 5 in
-  if fn = 0x0c0a then Dos_machine.type_string m "old";
+  (* Typeahead the AH=0Ch flush must drop: "old", already in the buffer. *)
+  if fn = 0x0c0a then List.iter (Dos_state.ring_push m) [ 0x186F; 0x266C; 0x2064 ];
   run m;
   check "line read initially blocks" (not (Dos_machine.exited m));
   Dos_machine.type_string m "a\tb";
@@ -153,7 +157,9 @@ let test_console_read () =
   let partial = restore (save m) in
   List.iter (fun current ->
       Dos_machine.type_string current "\r";
-      ignore (Dos_machine.step_result current);
+      (* Stop at the step the first read returns, before the second one. *)
+      ignore (Dos_machine.run_until current ~max_steps:20_000
+                ~stop:(fun c -> byte c 0x300 = Char.code 'a'));
       check "first read returns one byte and retains rest" (byte current 0x300 = Char.code 'a'
           && current.Dos_state.console_pending = "b\r\n")) [m; partial];
   let resumed = restore (save m) in
