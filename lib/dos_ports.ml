@@ -6,15 +6,52 @@
    벽시계가 아니라 CPU 누적 사이클에서 만든다. 같은 이미지 + 같은 입력 =
    같은 실행이라는 계약을 포트도 지켜야 한다. *)
 
-(* 4.77MHz CPU 와 1.193182MHz PIT 의 비 — 반올림해서 4. PIT 한 틱이
-   CPU 사이클 4 다. 분주비 65536 이면 262144 사이클 = 18.2Hz. *)
-let cpu_cycles_per_pit_tick = 4
+(* ---------- CPU 속도 ----------
+
+   게스트가 시간을 재는 길(IRQ0, PIT 카운터, 리프레시 비트, 재주사 비트,
+   OPL 타이머, 시각)은 모두 실제 시간에 묶여 있다. CPU 가 빠르면 같은
+   시간에 사이클이 더 돈다. 그래서 속도를 "PIT 한 틱(1/1193182초)에 CPU
+   사이클 몇 개" 라는 정수 하나로 둔다. 정수라서 PIT 틱 경계가 사이클
+   경계와 어긋나지 않는다. IBM PC 는 14.31818MHz 수정을 CPU 는 3 으로,
+   PIT 는 12 로 나눠 쓰므로 4 다. 분주비 65536 이면 262144 사이클 = 18.2Hz.
+
+   사이클 값은 8086 명령표에서 온다([Cpu86]). 그래서 속도는 "8086 으로
+   치면 몇 MHz" 다. 같은 MHz 의 286·386 은 한 사이클에 일을 더 한다. *)
+
+type speed = int
+
+let pit_hz = 1_193_182
+let pc_speed = 4
+
+(* MHz 를 정수 배수로 바꿀 때 float → int 변환이 넘치지 않게 둔 상한
+   (약 1.19GHz). *)
+let max_speed = 1000
+
+let speed_hz k = k * pit_hz
+
+let speed_of_mhz mhz =
+  let range () =
+    Printf.sprintf "%g MHz is outside %.2f..%.0f MHz" mhz
+      (float_of_int (speed_hz 1) /. 1e6) (float_of_int (speed_hz max_speed) /. 1e6)
+  in
+  match Float.classify_float mhz with
+  | FP_nan | FP_infinite -> Error (range ())
+  | FP_normal | FP_subnormal | FP_zero ->
+    let k = Float.round (mhz *. 1e6 /. float_of_int pit_hz) in
+    if k < 1. || k > float_of_int max_speed then Error (range ()) else Ok (int_of_float k)
+
+(* 아래 시간 값은 PC 의 4.77MHz 사이클로 적었다. 기계의 속도에 맞춰
+   늘리는 일은 [at_speed] 가 한다. *)
 
 (* 포트 0x61 bit4(리프레시)가 뒤집히는 주기. AT 이후 기계에서 이 비트는
    PIT 채널 1 의 리프레시 요청마다 뒤집힌다. 채널 1 의 분주비는 18 이라
    PIT 18 틱 = 15.0857µs(216 / 14.31818MHz) 마다, CPU 사이클로 18 × 4 = 72
    다(PCTIM003 7.4·7.37 절). 지연 루프가 이 비트를 세며 시간을 잰다. *)
 let refresh_toggle_cycles = 72
+
+(* 포트 0x3DA bit3(수직 귀선)은 이 길이의 칸 8 개 중 한 칸 동안 켜진다. *)
+let vsync_slot_cycles = 70000
+let vsync_slots = 8
 
 (* 포트 0x61 의 비트. 읽을 때 bit4 는 리프레시, bit5 는 PIT 채널 2 의 OUT
    이다. 나머지 비트는 쓴 값을 돌려준다. *)
@@ -42,6 +79,7 @@ type opl_flag = Opl_clear | Opl_raised | Opl_masked
 type t = {
   mem : Bytes.t;
   video : Dos_video.t;          (** 비디오 어댑터의 포트는 여기로 넘긴다 *)
+  mutable speed : speed;  (** PIT 한 틱의 CPU 사이클. 스냅숏을 되살릴 때만 바뀐다 *)
   mutable now : int;                    (** CPU 누적 사이클 *)
   pit2 : Dos_pit.t;                     (** PIT 채널 2 — GATE 는 0x61 bit0 *)
   (* PIT 채널 0 *)
@@ -104,10 +142,11 @@ let default_vga_pal i =
   end
   else (0, 0, 0)
 
-let create ~mpu401 ~mem ~video =
+let create ~speed ~mpu401 ~mem ~video =
   {
     mem;
     video;
+    speed;
     now = 0;
     pit2 = Dos_pit.create ();
     pit0_divisor = 0;
@@ -151,6 +190,9 @@ let reset_dac t =
   t.dac_read_index <- 0;
   t.dac_phase <- 0;
   t.dac_mask <- 0xFF
+
+let cpu_hz t = speed_hz t.speed
+let at_speed t pc_cycles = pc_cycles * t.speed / pc_speed
 
 (* ---------- OPL2 타이머 ---------- *)
 
@@ -214,12 +256,12 @@ let opl_timer_control ~step ~count ~now ~on ~masked (at, flag) =
    쓰기 전에 그때까지 지난 넘침을 반영한다. *)
 let opl_update t =
   let at, flag =
-    opl_timer_update ~step:opl_t1_step ~count:t.opl_t1_count ~now:t.now (t.opl_t1_at, t.opl_t1_exp)
+    opl_timer_update ~step:(at_speed t opl_t1_step) ~count:t.opl_t1_count ~now:t.now (t.opl_t1_at, t.opl_t1_exp)
   in
   t.opl_t1_at <- at;
   t.opl_t1_exp <- flag;
   let at, flag =
-    opl_timer_update ~step:opl_t2_step ~count:t.opl_t2_count ~now:t.now (t.opl_t2_at, t.opl_t2_exp)
+    opl_timer_update ~step:(at_speed t opl_t2_step) ~count:t.opl_t2_count ~now:t.now (t.opl_t2_at, t.opl_t2_exp)
   in
   t.opl_t2_at <- at;
   t.opl_t2_exp <- flag
@@ -232,14 +274,14 @@ let opl_control t v =
   end
   else begin
     let at, flag =
-      opl_timer_control ~step:opl_t1_step ~count:t.opl_t1_count ~now:t.now
+      opl_timer_control ~step:(at_speed t opl_t1_step) ~count:t.opl_t1_count ~now:t.now
         ~on:(v land opl_ctl_start_t1 <> 0) ~masked:(v land opl_ctl_mask_t1 <> 0)
         (t.opl_t1_at, t.opl_t1_exp)
     in
     t.opl_t1_at <- at;
     t.opl_t1_exp <- flag;
     let at, flag =
-      opl_timer_control ~step:opl_t2_step ~count:t.opl_t2_count ~now:t.now
+      opl_timer_control ~step:(at_speed t opl_t2_step) ~count:t.opl_t2_count ~now:t.now
         ~on:(v land opl_ctl_start_t2 <> 0) ~masked:(v land opl_ctl_mask_t2 <> 0)
         (t.opl_t2_at, t.opl_t2_exp)
     in
@@ -270,17 +312,17 @@ let set_scancode t sc = t.scancode <- sc land 0xff
 let irq0_masked t = t.pic_mask land 1 <> 0
 let speaker_on t = t.port_b land 0x03 = 0x03
 
-let pit_tick t = t.now / cpu_cycles_per_pit_tick
+let pit_tick t = t.now / t.speed
 let gate2 t = t.port_b land gate2_bit <> 0
 
 let divisor t = if t.pit0_divisor = 0 then 0x10000 else t.pit0_divisor
 
-let cycles_per_tick t = divisor t * cpu_cycles_per_pit_tick
+let cycles_per_tick t = divisor t * t.speed
 
 (* 채널 0 은 되풀이 모드로 센다: 분주비에서 지난 만큼을 뺀 나머지. *)
 let pit0_count t =
   let d = divisor t in
-  let elapsed = (t.now / cpu_cycles_per_pit_tick) mod d in
+  let elapsed = (t.now / t.speed) mod d in
   (d - elapsed) land 0xffff
 
 (* CRTC 커서 레지스터(0x0E/0x0F)는 화면 시작부터의 글자 수다. BIOS 는
@@ -336,7 +378,7 @@ let port_in t p =
        주면 이 비트를 세는 지연 루프가 안 끝난다. bit5 는 채널 2 의 OUT
        이다 — 채널 2 를 모드 0 으로 걸고 이 비트를 기다리는 지연 루프가
        있다(SeaBIOS src/hw/timer.c tsctimer_setup). *)
-    let refresh = if (t.now / refresh_toggle_cycles) land 1 = 0 then 0 else refresh_bit in
+    let refresh = if (t.now / at_speed t refresh_toggle_cycles) land 1 = 0 then 0 else refresh_bit in
     let out2 = if Dos_pit.out t.pit2 ~tick:(pit_tick t) then out2_bit else 0 in
     (t.port_b land lnot (refresh_bit lor out2_bit)) lor refresh lor out2
   | 0x64 -> 0x14                     (* 출력 버퍼 빔, 입력 버퍼 빔 *)
@@ -373,7 +415,9 @@ let port_in t p =
        번갈이도 index 로 돌아간다. 그 부수효과에 기대는 코드가 있다. *)
     Dos_video.reset_attr_flip t.video;
     t.cga_status <- not t.cga_status;
-    let vsync = if (t.now / 70000) land 7 = 0 then 0x08 else 0x00 in
+    let vsync =
+      if (t.now / at_speed t vsync_slot_cycles) mod vsync_slots = 0 then 0x08 else 0x00
+    in
     (if t.cga_status then 0x01 else 0x00) lor vsync
   | 0x388 -> opl_status t
   | _ -> 0xff
@@ -461,6 +505,7 @@ module C = Dos_snap_codec
 (* One range per field, named by both [write_state] and [read_state], so a
    value the writer accepts is one the reader accepts. *)
 let cycle = C.count
+let speed_r = C.range 1 max_speed
 let pit_access = C.range 0 3
 let dac_phase_r = C.range 0 2
 let opl_flag_r = C.range 0 2
@@ -484,13 +529,14 @@ let get_opl_at r =
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
-        now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
+        speed; now; pit0_divisor; pit0_write_hi; pit0_read_hi; pit0_latched;
         pit0_access; pic_mask; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; crtc_index; crtc; scancode; port_b; cga_status;
         mode_control; color_select; cmos_index; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
   in
   let put what r v = C.put w ~what r v in
+  put "speed" speed_r speed;
   put "ports.now" cycle now;
   Dos_pit.write_state w pit2;
   put "pit0_divisor" C.word pit0_divisor;
@@ -530,6 +576,7 @@ let write_state w t =
 
 let read_state r t =
   let get what rng = C.get r ~what rng in
+  t.speed <- get "speed" speed_r;
   t.now <- get "ports.now" cycle;
   Dos_pit.read_state r t.pit2;
   t.pit0_divisor <- get "pit0_divisor" C.word;

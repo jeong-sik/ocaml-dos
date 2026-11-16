@@ -29,7 +29,7 @@ let detect_mask = 0xE0
 let fresh () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  Dos_ports.create ~mpu401:false ~mem ~video
+  Dos_ports.create ~speed:Dos_ports.pc_speed ~mpu401:false ~mem ~video
 
 let write t reg v = Dos_ports.port_out t status_port reg; Dos_ports.port_out t data_port v
 let status t ~now = Dos_ports.set_now t now; Dos_ports.port_in t status_port

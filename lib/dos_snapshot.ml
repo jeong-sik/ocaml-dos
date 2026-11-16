@@ -38,8 +38,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    13: whether an MPU-401 is in the machine, and its mode and waiting
    answers, after the OPL2 timers.
    14: each OPL2 timer carries its next overflow (or stopped) and a flag
-   that is clear, raised or masked, in place of a one-shot expiry stamp. *)
-let format_version = 14
+   that is clear, raised or masked, in place of a one-shot expiry stamp.
+   15: the ports carry the CPU speed (cycles per PIT tick) first, so a
+   restored machine keeps the clock it was saved with. *)
+let format_version = 15
 
 let digest_hex_len = 32
 let checksum_len = 16
