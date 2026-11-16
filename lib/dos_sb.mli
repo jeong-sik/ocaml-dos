@@ -46,9 +46,10 @@ val create : unit -> t
 val port_in : t -> int -> int option
 (** A read of 226h, 22Ah, 22Ch or 22Eh; [None] for any other port. *)
 
-val port_out : t -> now:int -> int -> int -> bool
+val port_out : t -> hz:int -> now:int -> int -> int -> bool
 (** A write to 226h or 22Ch at CPU cycle [now]; [false] for any other
-    port. *)
+    port. [hz] is the CPU's cycles per second: the DSP's delays and byte
+    rate are in microseconds. *)
 
 val due_at : t -> int
 (** The CPU cycle of the DSP's next event, [max_int] when none is
@@ -60,7 +61,7 @@ val irq_line : t -> bool
     has not been taken yet drops it when the line falls (DOSBox
     [PIC_DeActivateIRQ]). *)
 
-val advance : t -> now:int -> dma:Dos_dma.t -> mem:Bytes.t -> bool
+val advance : t -> hz:int -> now:int -> dma:Dos_dma.t -> mem:Bytes.t -> bool
 (** Runs every event due by [now]: the end of a reset, timer IRQs, and the
     bytes of the playing block, taken from DMA channel 1. [true] when the
     DSP raises its IRQ: the machine asks the PIC. *)

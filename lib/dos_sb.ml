@@ -6,7 +6,9 @@ let read_data_port = 0x22A
 let write_port = 0x22C
 let read_status_port = 0x22E
 
-let cycles_of_us us = us * Dos_clock.cpu_hz / 1_000_000
+(* [hz] is the CPU's cycles per second (Dos_ports.cpu_hz). *)
+let us_per_second = 1_000_000
+let cycles_of_us ~hz us = us * hz / us_per_second
 
 (* DOSBox dsp_do_reset: AAh 20µs after the reset bit drops. *)
 let reset_delay_us = 20
@@ -135,7 +137,7 @@ let create () =
     playback = Idle; timers = []; irq_high = false; time_constant = default_time_constant;
     block_length = default_block; speaker = false; test_register = 0 }
 
-let byte_cycles t = cycles_of_us (256 - t.time_constant)
+let byte_cycles t ~hz = cycles_of_us ~hz (256 - t.time_constant)
 
 (* DOSBox DspBufSize: a full buffer drops the answer. *)
 let answer_capacity = 64
@@ -158,7 +160,7 @@ let reset_dsp t =
   t.speaker <- false
 
 (* A new transfer drops an unacknowledged IRQ (DOSBox dsp_do_dma_transfer). *)
-let start_single t ~now length =
+let start_single t ~hz ~now length =
   t.irq_high <- false;
   match t.playback with
   | Playing (({ auto = true; _ } as b), next) ->
@@ -166,29 +168,29 @@ let start_single t ~now length =
   | Paused ({ auto = true; _ } as b) ->
     t.playback <- Paused { b with auto = false; queued = Some length }
   | Idle | Playing ({ auto = false; _ }, _) | Paused { auto = false; _ } ->
-    t.playback <- Playing ({ left = length; auto = false; queued = None }, now + byte_cycles t)
+    t.playback <- Playing ({ left = length; auto = false; queued = None }, now + byte_cycles t ~hz)
 
-let start_auto t ~now =
+let start_auto t ~hz ~now =
   t.irq_high <- false;
-  t.playback <- Playing ({ left = t.block_length; auto = true; queued = None }, now + byte_cycles t)
+  t.playback <- Playing ({ left = t.block_length; auto = true; queued = None }, now + byte_cycles t ~hz)
 
-let run t ~now req =
+let run t ~hz ~now req =
   match req with
   | Direct_dac | Unmodelled -> ()
-  | Dma_once length -> start_single t ~now length
-  | High_speed_once -> start_single t ~now t.block_length
-  | Dma_auto -> start_auto t ~now
+  | Dma_once length -> start_single t ~hz ~now length
+  | High_speed_once -> start_single t ~hz ~now t.block_length
+  | Dma_auto -> start_auto t ~hz ~now
   | Direct_adc -> answer t adc_silence
   | Time_constant tc -> t.time_constant <- tc
   | Block_size length -> t.block_length <- length
-  | Silence length -> add_timer t (now + (length * byte_cycles t))
+  | Silence length -> add_timer t (now + (length * byte_cycles t ~hz))
   | Halt ->
     (match t.playback with
      | Playing (b, _) -> t.playback <- Paused b
      | Idle | Paused _ -> ())
   | Continue ->
     (match t.playback with
-     | Paused b -> t.playback <- Playing (b, now + byte_cycles t)
+     | Paused b -> t.playback <- Playing (b, now + byte_cycles t ~hz)
      | Idle | Playing _ -> ())
   | Speaker_on -> t.speaker <- true
   | Speaker_off -> t.speaker <- false
@@ -204,32 +206,32 @@ let run t ~now req =
     answer t version_minor
   | Test_write v -> t.test_register <- v
   | Test_read -> answer_alone t t.test_register
-  | Trigger_irq -> add_timer t (now + cycles_of_us trigger_delay_us)
+  | Trigger_irq -> add_timer t (now + cycles_of_us ~hz trigger_delay_us)
   | Undocumented_zero -> answer_alone t undocumented_answer
 
-let write t ~now b =
+let write t ~hz ~now b =
   match t.pending with
   | No_command ->
     (match decode b with
-     | Ready req -> run t ~now req
+     | Ready req -> run t ~hz ~now req
      | Needs_one k -> t.pending <- One_left { code = b; first = None; k }
      | Needs_two k -> t.pending <- Two_left { code = b; k })
   | One_left { k; _ } ->
     t.pending <- No_command;
-    run t ~now (k b)
+    run t ~hz ~now (k b)
   | Two_left { code; k } -> t.pending <- One_left { code; first = Some b; k = k b }
 
-let reset_write t ~now v =
+let reset_write t ~hz ~now v =
   let held = v land 1 <> 0 in
   match t.reset, held with
   | (Running | Releasing _), true -> reset_dsp t; t.reset <- Held
-  | Held, false -> t.reset <- Releasing (now + cycles_of_us reset_delay_us)
+  | Held, false -> t.reset <- Releasing (now + cycles_of_us ~hz reset_delay_us)
   | Held, true | (Running | Releasing _), false -> ()
 
-let port_out t ~now p v =
+let port_out t ~hz ~now p v =
   let v = v land 0xFF in
-  if p = reset_port then begin reset_write t ~now v; true end
-  else if p = write_port then begin write t ~now v; true end
+  if p = reset_port then begin reset_write t ~hz ~now v; true end
+  else if p = write_port then begin write t ~hz ~now v; true end
   else false
 
 let read_data t =
@@ -272,7 +274,7 @@ let next_block t b =
   | None, true -> Some { b with left = t.block_length }
   | None, false -> None
 
-let advance t ~now ~dma ~mem =
+let advance t ~hz ~now ~dma ~mem =
   let fired = ref false in
   let raise_irq () =
     if not t.irq_high then begin
@@ -297,7 +299,7 @@ let advance t ~now ~dma ~mem =
             byte goes the moment it does, not in a burst for the wait. *)
          t.playback <- Playing (b, now)
        | Dos_dma.Byte _ | Dos_dma.No_data _ ->
-         let next = next + byte_cycles t in
+         let next = next + byte_cycles t ~hz in
          let left = b.left - 1 in
          if left > 0 then t.playback <- Playing ({ b with left }, next)
          else begin
