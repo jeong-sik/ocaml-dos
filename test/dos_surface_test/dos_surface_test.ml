@@ -210,7 +210,8 @@ let test_flush_then_input () =
   Dos_machine.load_com m
     (assemble
        (fun _ -> mov_ax 0x0C08 ^ int_ 0x21 ^ store_ax scratch ^ quit) "");
-  Dos_machine.type_string m "ab";
+  (* Keys already in the BIOS buffer when the flush runs: 'a' and 'b'. *)
+  List.iter (Dos_state.ring_push m) [ 0x1E61; 0x3062 ];
   Dos_machine.run m ~max_steps:100_000;
   check_true "AH=0C 하위 읽기가 호출자를 막는다" (not (Dos_machine.exited m));
   check_true "버퍼가 비었다" (Dos_machine.kbd_waiting m);

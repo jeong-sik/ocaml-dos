@@ -14,7 +14,8 @@ open Dos_state
    나온다. 전용 스텁이 없으면 전벡터 IRET 스텁이 배달을 삼켜 서비스가
    조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
    12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
-type bios_service = Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
+type bios_service =
+  | Keyboard_irq | Video | Equipment | Memory_size | Keyboard | Time_of_day | Mouse
 type host_vector =
   | Bios of bios_service
   | Dos_divide_overflow
@@ -25,6 +26,7 @@ type host_vector =
 
 let host_vector = function
   | 0x00 -> Some Dos_divide_overflow
+  | 0x09 -> Some (Bios Keyboard_irq)
   | 0x10 -> Some (Bios Video)
   | 0x11 -> Some (Bios Equipment)
   | 0x12 -> Some (Bios Memory_size)
@@ -430,10 +432,31 @@ let keyboard t =
   | 0x05 ->
     (* 키 밀어넣기: CX=(스캔<<8)|ASCII. 꽉 찼으면 AL=1 *)
     let before = ring_tail t in
-    push_key t (Cpu86.reg16 cpu 1);
+    ring_push t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
   | _ -> ()
+
+(* ---------- INT 9 키보드 IRQ ---------- *)
+
+let keyboard_data_port = 0x60
+let bda_shift_flags = 0x417
+let left_shift_down = 0x02
+
+(* 실기 BIOS 의 INT 9 처럼 포트 0x60 을 읽어 시프트 상태나 링을 고치고
+   EOI 를 보낸다. 스캔 코드를 글자로 옮기는 표 대신 make 바이트가 지닌
+   워드를 넣는다 — 호스트가 누른 워드가 INT 16h 의 답이다. INT 9 를
+   가로챈 게스트가 먼저 0x60 을 읽고 여기로 넘겨도 같은 바이트를 읽는다
+   (Dos_kbc.read_data). *)
+let keyboard_irq t =
+  let code = Dos_ports.port_in t.ports keyboard_data_port in
+  let shift = rd8 t bda_shift_flags in
+  if code = Dos_kbc.left_shift_make then
+    wr8 t bda_shift_flags (shift lor left_shift_down)
+  else if code = Dos_kbc.left_shift_break then
+    wr8 t bda_shift_flags (shift land lnot left_shift_down)
+  else Option.iter (ring_push t) (Dos_kbc.data_word (Dos_ports.kbc t.ports));
+  Dos_pic.end_of_interrupt (Dos_ports.pic t.ports)
 
 (* ---------- INT 1Ah 시각 ---------- *)
 
@@ -694,6 +717,7 @@ let mouse t =
 
 let service t s =
   match s with
+  | Keyboard_irq -> keyboard_irq t; Completed
   | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
   | Keyboard -> keyboard t; Completed
   | Video -> video t; Completed

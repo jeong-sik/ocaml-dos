@@ -2,8 +2,9 @@
 
    계약: 속도가 바뀌면 게스트가 시간을 재는 길이 모두 같은 비율로
    늘어난다. IRQ0 간격, PIT 카운터, 포트 0x61 리프레시 비트, 0x3DA 수직
-   귀선 비트, OPL 타이머, 시각(초)이 그렇다. 실제 시간은 그대로고 그 사이에
-   도는 사이클만 많아진다. 스냅숏은 속도를 같이 싣는다. *)
+   귀선 비트, OPL 타이머, 키보드 바이트 간격, 시각(초)이 그렇다. 실제
+   시간은 그대로고 그 사이에 도는 사이클만 많아진다. 스냅숏은 속도를 같이
+   싣는다. *)
 
 let failed = ref 0
 
@@ -160,6 +161,21 @@ let test_pit2 () =
   check "fast PIT channel 2 low one cycle before" (not (out2 (due - 1)));
   check "fast PIT channel 2 high after N+1 ticks" (out2 due)
 
+(* 키보드도 실제 시간으로 잰다: 바이트 사이 1ms, 키 누름 100ms. 대문자는
+   Shift make 다음에 글자 make 가 나간다. *)
+let shifted_a = 0x1E41
+
+let test_keyboard () =
+  let hz = Dos_ports.speed_hz fast in
+  let k = Dos_kbc.create () in
+  Dos_kbc.press k ~hz ~now:0 shifted_a;
+  check "fast keyboard: Shift make at once" (Dos_kbc.latch k ~hz ~now:0);
+  ignore (Dos_kbc.read_data k ~hz ~now:0);
+  check_int "fast keyboard: next byte 1 ms later" (Dos_kbc.ready_at k) (hz / 1000);
+  check "fast keyboard: A make then" (Dos_kbc.latch k ~hz ~now:(hz / 1000));
+  ignore (Dos_kbc.read_data k ~hz ~now:(hz / 1000));
+  check_int "fast keyboard: break 100 ms after the press" (Dos_kbc.ready_at k) (hz / 10)
+
 let test_machine m =
   (* IRQ0 은 655360 사이클마다: 1200 만 사이클이면 18 번. 틱을 세는 기준은
      틱이 들어간 명령의 끝이라 한 틱이 덜 셀 수 있다. *)
@@ -187,6 +203,7 @@ let () =
   test_ports ();
   test_opl ();
   test_pit2 ();
+  test_keyboard ();
   let m = run_fast_machine () in
   test_machine m;
   test_snapshot m;

@@ -178,8 +178,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   환경 블록을 따로 받고 그 끝에 프로그램 이름이 붙는다),
   날짜·시각, 벡터
   읽기·쓰기, IOCTL, DOS 버전 5.0
-- **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), PIC 마스크,
-  VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
+- **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), 8259 PIC(IRR·
+  ISR·마스크, EOI 두 가지, OCW3 읽기 — IRQ0 이 IRQ1 보다 앞선다), 8042
+  키보드 컨트롤러(0x60 데이터·0x64 상태, 바이트마다 IRQ1), VGA DAC(0x3C8/0x3C9), CRTC, CGA 상태·모드, PC 스피커, 조이스틱,
   EMS 4.0(INT 67h — 프레임 0xD000, 페이지 실체는 겹칠 때 만든다.
   40h-48h, 4Bh-4Dh, 51h, 58h, 5Ah. 운영체제 핸들 0 을 센다),
   OPL2(0x388/0x389) 타이머 둘과 상태 — 소리는 없다. 타이머는 레지스터
@@ -388,6 +389,14 @@ let png_source = Dos_machine.frame_rgb m
 HLT idle을 포함한 machine-step clock이다. 실제 guest 명령 수는 `instructions`로
 따로 센다. IRQ handler가 실행한 명령은 이 명령 수에 포함된다.
 
+`push_key`는 키 하나를 눌렀다 뗀다. make 바이트는 바로, break 바이트는
+100ms 뒤에 포트 0x60 으로 오고, 바이트 사이는 1ms 이상 벌어진다. 바이트마다
+IRQ1 이 INT 9 로 가고, BIOS INT 9 가 make 바이트의 워드를 링에 넣는다. INT
+9 를 가로챈 게임은 스캔 코드를 직접 읽고, 넘기지 않으면 링에는 아무것도
+들어가지 않는다. 그래서 키는 넣은 순간이 아니라 IF 가 켜지고 IRQ1 이 풀린
+뒤에 링에 닿는다. `key_unread`는 링이나 컨트롤러에 프로그램이 아직 안 가져간
+키가 있는지 답한다.
+
 BIOS INT 16h AH=00/10은 키가 없으면 호출자를 멈추며, IRQ handler는 실행될 수
 있다. `kbd_waiting`은 마지막 읽기나 비차단 poll이 빈 링을 관측했다는 뜻이다.
 이 관측만으로 게임의 화면 전환 완료를 보장하지는 않는다.
@@ -421,9 +430,11 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 |---|---|
 | `Cpu86` | 8086/186 코어. 메모리와 포트는 콜백으로 바깥에 있다 |
 | `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계 |
-| `Dos_ports` | 하드웨어 포트 — PIT, PIC, DAC, CRTC, 스피커 |
+| `Dos_ports` | 하드웨어 포트 — PIT, DAC, CRTC, 스피커. PIC 와 키보드 포트는 아래 둘에 넘긴다 |
+| `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
+| `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러 |
-| `Dos_bios` | ROM·IVT·BDA 와 INT 10h/11h/12h/16h/1Ah/33h |
+| `Dos_bios` | ROM·IVT·BDA 와 INT 09h/10h/11h/12h/16h/1Ah/33h |
 | `Dos_mouse_space` | 마우스 가상 화면 — 비디오 모드마다 좌표 넓이와 한 칸의 크기(CuteMouse 표) |
 | `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
 | `Dos_fcb_parse` | INT 21h AH=29h — 글자열을 FCB 의 드라이브·이름·확장자로 나눈다(MS-DOS 4.0 `MakeFcb`) |

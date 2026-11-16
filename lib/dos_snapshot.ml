@@ -43,8 +43,12 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    restored machine keeps the clock it was saved with.
    16: EMS carries the OS handle 0 among its handles, a frame page is shown
    or empty instead of handle 0 standing for empty, and each handle's page
-   map saved by INT 67h AH=47h. *)
-let format_version = 16
+   map saved by INT 67h AH=47h.
+   17: the interrupt controller (mask, requests, in service, OCW3 read
+   choice) and the keyboard controller (queued bytes, port 0x60, its full
+   flag, the last read) replace the PIC mask, the last scan code and the
+   machine's pending-tick flag. *)
+let format_version = 17
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -298,7 +302,7 @@ let model_of_code = function
 let write_payload w t =
   let { mem; cpu; ports; exited; exit_code; video; host_files;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
-        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; pending_irq0; free_base;
+        ext_scan_pending; input_continuations; console_pending; kbd_requests; last_tick; free_base;
         free_top; blocks; find_queue; stubs;
         exec_frames = _ (* with [handles], through [handle_pool] *);
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
@@ -347,7 +351,6 @@ let write_payload w t =
   C.put_string w console_pending;
   put "keyboard requests" C.count kbd_requests;
   put "last tick" C.count last_tick;
-  C.put_bool w pending_irq0;
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
@@ -592,7 +595,6 @@ let read_payload r =
   t.console_pending <- C.get_string r;
   t.kbd_requests <- get "keyboard requests" C.count;
   t.last_tick <- get "last tick" C.count;
-  t.pending_irq0 <- C.get_bool r;
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
