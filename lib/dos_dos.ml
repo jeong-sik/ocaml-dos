@@ -1408,6 +1408,53 @@ let char_oper t =
 
 let verify_on = 1
 
+(* DISP.ASM $SET_CTRL_C_TRAPPING 의 AL. 06h 는 DOS 5 가 더했다(RBIL
+   INT 21/AX=3306h). *)
+type break_oper =
+  | Get_break | Set_break | Swap_break | Get_cpsw | Set_cpsw | Boot_drive | True_version
+
+let break_oper_of_al = function
+  | 0 -> Some Get_break
+  | 1 -> Some Set_break
+  | 2 -> Some Swap_break
+  | 3 -> Some Get_cpsw
+  | 4 -> Some Set_cpsw
+  | 5 -> Some Boot_drive
+  | 6 -> Some True_version
+  | _ -> None
+
+let break_on = 1
+(* MSCONST.ASM BOOTDRIVE 는 1 이 A: 다. 이 기계의 드라이브는 C: 하나다. *)
+let boot_drive = default_drive + 1
+(* 3306h DL·DH: 개정 번호 없는 5.00, ROM(비트 3)에도 HMA(비트 4)에도
+   없다 — XMS 가 HMA 를 없다고 답한다(Dos_xms Hma_missing). *)
+let dos_revision = 0
+let dos_version_flags = 0
+
+(* 깃발은 SWAP_START 의 CNTCFLAG 다. 01h 는 DL 을 그대로 두고(PUSH DX),
+   02h 는 DL 과 맞바꾼다. 03h·04h 는 CPSW 코드가 주석 처리돼 아무것도
+   안 한다. 06h 는 AL 을 그대로 둔다. 그 밖은 AL=FFh. 어느 갈래도 IRET
+   으로 끝나 CF 는 그대로다. Ctrl-C 검사 자체는 이 기계에 없어 깃발은
+   읽고 쓰기만 한다. *)
+let break_oper t =
+  let cpu = t.cpu in
+  let flag = sda sda_cntc_flag in
+  match break_oper_of_al (Cpu86.reg8 cpu 0) with
+  | Some Get_break -> Cpu86.set_reg8 cpu 2 (rd8 t flag)
+  | Some Set_break -> wr8 t flag (Cpu86.reg8 cpu 2 land break_on)
+  | Some Swap_break ->
+    let old = rd8 t flag in
+    wr8 t flag (Cpu86.reg8 cpu 2 land break_on);
+    Cpu86.set_reg8 cpu 2 old
+  | Some Get_cpsw | Some Set_cpsw -> ()
+  | Some Boot_drive -> Cpu86.set_reg8 cpu 2 boot_drive
+  | Some True_version ->
+    Cpu86.set_reg8 cpu 3 dos_version_major;        (* BL *)
+    Cpu86.set_reg8 cpu 7 dos_version_minor;        (* BH *)
+    Cpu86.set_reg8 cpu 2 dos_revision;             (* DL *)
+    Cpu86.set_reg8 cpu 6 dos_version_flags         (* DH *)
+  | None -> Cpu86.set_reg8 cpu 0 byte_max
+
 (* ALLOC.ASM $AllocOper 의 AL *)
 type alloc_oper = Get_strategy | Set_strategy
 
@@ -1529,7 +1576,7 @@ let service_immediate t =
     Cpu86.set_reg8 cpu 4 dos_version_minor;
     Cpu86.set_reg8 cpu 3 0xFF;              (* OEM: 일반 *)
     Cpu86.set_reg16 cpu 1 0
-  | 0x33 -> Cpu86.set_reg8 cpu 2 0          (* Ctrl-Break 검사 꺼짐 *)
+  | 0x33 -> break_oper t
   | 0x36 ->
     (* 남은 디스크 공간: 섹터/클러스터, 가용 클러스터, 섹터 크기,
        전체 클러스터. 마운트 표는 메모리 위라 넉넉한 값을 답한다. *)

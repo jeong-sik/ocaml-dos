@@ -307,8 +307,9 @@ let physical seg off = ((seg lsl 4) + off) land phys_mask
    ErrorMode 는 늘 0 이다.
 
    그 뒤는 확장 에러(AH=59h)다: WPErr, EXTERR_LOCUS, EXTERR, EXTERR_ACTION,
-   EXTERR_CLASS, EXTERRPT. 0x0C..0x19(DTA, 현재 PSP 등)는 호스트 상태에
-   있어 비워 두고, Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
+   EXTERR_CLASS, EXTERRPT. 0x0C..0x16(DTA, 현재 PSP 등)는 호스트 상태에
+   있어 비워 둔다. 0x17 은 CNTCFLAG(AH=33h 확장 Ctrl-Break 깃발)다.
+   Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
 let sda_seg = 0x0070
 let sda_error_mode = 0
 let sda_in_dos = 1
@@ -318,6 +319,7 @@ let sda_exterr = 4
 let sda_exterr_action = 6
 let sda_exterr_class = 7
 let sda_exterr_pointer = 8
+let sda_cntc_flag = 0x17
 let sda_user_in_ax = 0x1A
 let byte_max = 0xFF
 let sda off = physical sda_seg off
