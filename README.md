@@ -397,7 +397,9 @@ dune exec --root . bin/dosboot.exe -- \
 디렉터리 안에 파일을 두고, 디렉터리는 함께 생긴다. 게스트는
 `C:\DATA\LEVEL1.DAT`, `DATA\LEVEL1.DAT`, `CD DATA` 뒤의 `LEVEL1.DAT`
 어느 쪽으로도 연다. 드라이브는 C: 하나다. 이름은 DOS 가 읽듯 대문자로
-바꾸고 8.3 으로 자른다.
+바꾸고 8.3 으로 자른다. 이름 사이에 구분자가 여럿 있으면 하나로 읽는다
+(`SAVE\\GAME.SAV` 는 `SAVE\GAME.SAV`). 앞의 두 구분자(`\\SERVER`)는
+네트워크 이름이라 경로 없음이다.
 
 `--keys` 의 한 항목은 `(스캔 코드 lsl 8) lor ASCII` 를 16진수로 쓴 것이고,
 `@STEP` 은 그 스텝 전에는 넣지 않는다는 예약이다. 키를 미리 다 밀어

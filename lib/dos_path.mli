@@ -4,10 +4,13 @@
     - [\] and [/] both separate. A leading separator starts at the root;
       otherwise the name starts at the current directory. A [C:] in front
       is allowed; any other drive is not.
+    - Separators in a row between components count as one: [A\\B] is
+      [A\B]. Two in front name a network path and one at the end leaves
+      no name; both are errors.
     - [.] stays and [..] goes up. [..] at the root is an error.
     - A component is upper-cased and cut to 8.3 as DOS cuts it:
       [LONGFILENAME.TEXT] is [LONGFILE.TEX]. A second dot, an empty
-      component, or a character DOS does not allow in a name (a double
+      name, or a character DOS does not allow in a name (a double
       quote, any of [* + , / : ; < = > ? |], a bracket, a backslash, a
       space or a control character) is an error.
 

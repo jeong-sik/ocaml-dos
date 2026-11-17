@@ -55,19 +55,27 @@ let walk start parts =
 let ( let* ) = Result.bind
 
 (* The components of [s] after its drive, and where they start. [""] is not
-   a name; a lone separator is the root. *)
+   a name; a lone separator is the root. MS-DOS 4.0 MACRO2.ASM TransPath
+   reads two separators in front as a network name (\\SERVER), and this
+   machine has no network. Canonicalize copies one separator between
+   components and skips the rest (CanonPathLoop), so [A\\B] is [A\B]. A
+   separator at the end leaves no name. *)
 let start_and_parts ~cwd s =
   if s = "" then Error Bad_name
   else
     let* rest = split_drive s in
-    let absolute = rest <> "" && is_separator rest.[0] in
-    let body = if absolute then String.sub rest 1 (String.length rest - 1) else rest in
+    let n = String.length rest in
+    let absolute = n > 0 && is_separator rest.[0] in
+    let network = absolute && n > 1 && is_separator rest.[1] in
+    let body = if absolute then String.sub rest 1 (n - 1) else rest in
     let parts =
       if body = "" then []
       else String.split_on_char separator (String.map (fun c -> if c = '/' then separator else c) body)
     in
-    if List.mem "" parts then Error Bad_name
-    else Ok ((if absolute then root else cwd), parts)
+    match List.rev parts with
+    | "" :: _ -> Error Bad_name
+    | _ when network -> Error Bad_name
+    | _ -> Ok ((if absolute then root else cwd), List.filter (( <> ) "") parts)
 
 let parse ~cwd s =
   let* start, parts = start_and_parts ~cwd s in
