@@ -79,8 +79,9 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    29: directories — the table of directories and the current one after the
    host files, and each find result says whether it is a file (by path key)
    or a directory entry (by name). Host file keys are read back only in
-   their canonical Dos_path form. *)
-let format_version = 29
+   their canonical Dos_path form.
+   30: the OPL2's voice registers 00h-F5h after its timers (Dos_opl). *)
+let format_version = 30
 
 let digest_hex_len = 32
 let checksum_len = 16

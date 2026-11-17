@@ -104,6 +104,7 @@ type t = {
   mutable opl_t2_at : int option;
   mutable opl_t1_exp : opl_flag;
   mutable opl_t2_exp : opl_flag;
+  opl : Dos_opl.t;                      (** 음색 레지스터. 02h-04h 는 위의 타이머 몫이다 *)
   mutable mpu : Dos_mpu401.t option;    (** 330h 의 MPU-401. 스냅숏이 꽂고 뺀다 *)
 }
 
@@ -191,6 +192,7 @@ let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
     opl_t2_at = None;
     opl_t1_exp = Opl_clear;
     opl_t2_exp = Opl_clear;
+    opl = Dos_opl.create ();
     mpu = (if mpu401 then Some (Dos_mpu401.create ()) else None);
   }
 
@@ -360,13 +362,14 @@ let opl_write t v =
   | 0x02 -> t.opl_t1_count <- v
   | 0x03 -> t.opl_t2_count <- v
   | 0x04 -> opl_control t v
-  | _ -> ()                            (* 음색 레지스터 — 소리가 없어 무시 *)
+  | reg -> Dos_opl.write t.opl reg v   (* 음색 레지스터 *)
 
 let set_now t n = t.now <- n
 let palette t = t.pal
 let pic t = t.pic
 let dma t = t.dma
 let sound_blaster t = t.sb
+let opl t = t.opl
 
 (* Sound Blaster 2.0 의 FM 은 카드의 228h·229h 에도 보인다 — 388h·389h 의
    OPL2 와 같은 칩이다(DOSBox 도 base+8 에 OPL 을 단다). *)
@@ -629,7 +632,7 @@ let write_state w t =
         speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
         mode_control; color_select; cmos; opl_reg; opl_t1_count;
-        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
+        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; opl; pit2; mpu } = t
   in
   let put what r v = C.put w ~what r v in
   put "speed" speed_r speed;
@@ -665,6 +668,7 @@ let write_state w t =
   put_opl_at w opl_t2_at;
   put "opl_t1_exp" opl_flag_r (opl_flag_tag opl_t1_exp);
   put "opl_t2_exp" opl_flag_r (opl_flag_tag opl_t2_exp);
+  Dos_opl.write_state w opl;
   match mpu with
   | None -> C.put_bool w false
   | Some m -> C.put_bool w true; Dos_mpu401.write_state w m
@@ -710,6 +714,7 @@ let read_state r t =
   t.opl_t2_at <- get_opl_at r;
   t.opl_t1_exp <- opl_flag_of_tag (get "opl_t1_exp" opl_flag_r);
   t.opl_t2_exp <- opl_flag_of_tag (get "opl_t2_exp" opl_flag_r);
+  Dos_opl.read_state r t.opl;
   t.mpu <-
     (if C.get_bool r then begin
        let m = Dos_mpu401.create () in
