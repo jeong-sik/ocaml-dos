@@ -496,6 +496,18 @@ let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 
 let on_unserved t f = t.on_unserved <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
+
+(* 포트 쪽 시각은 스텝 처음에 맞춘다. 스텝 밖에서 부르면 지금 사이클로
+   먼저 맞춘다 — 다음 스텝이 하는 일과 같다. *)
+let start_audio t ~rate =
+  Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
+  Dos_ports.start_audio t.ports ~rate
+
+let take_audio t =
+  Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
+  Dos_ports.take_audio t.ports
+
+let audio_clipped t = Dos_ports.audio_clipped t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
 
