@@ -1,6 +1,6 @@
 (** Sound as PCM samples (RFC 0006). A sample is the average of the
     machine's sound level over the CPU cycles it covers: sample [i] covers
-    cycles [b i] to [b (i + 1)), where [b i = i * cpu_hz / rate]. A level
+    cycles [b i] to [b (i + 1)), where [b i = start + i * cpu_hz / rate]. A level
     that holds over part of a sample counts by the cycles it holds, so the
     same sequence of levels always gives the same samples, at any rate.
 
@@ -15,9 +15,11 @@ val opl2_rate : int
 (** 49716 Hz: the YM3812 at 3.579545 MHz (14.31818 MHz / 4) makes one
     sample every 72 clocks (ModdingWiki, "OPL chip"). *)
 
-val create : cpu_hz:int -> rate:int -> t
-(** Silence up to cycle 0. Raises [Invalid_argument] unless
-    [0 < rate <= cpu_hz]: every sample is then at least one cycle long. *)
+val create : cpu_hz:int -> rate:int -> start:int -> t
+(** Samples from cycle [start] on: a machine whose sound is turned on, or
+    restored from a snapshot, at that cycle. Raises [Invalid_argument]
+    unless [0 < rate <= cpu_hz]: every sample is then at least one cycle
+    long. *)
 
 val render : t -> until:int -> (int -> int * int) -> unit
 (** [render t ~until source] covers cycles {!position} to [until]. [source
@@ -36,6 +38,11 @@ val take : t -> Bytes.t
 
 val clipped : t -> int
 (** How many samples so far were clipped. *)
+
+val wav_header : rate:int -> data_bytes:int -> Bytes.t
+(** The 44 bytes in front of {!take}'s samples in a WAV file: RIFF WAVE,
+    PCM, mono, 16 bits, [rate] samples a second, [data_bytes] of
+    samples. *)
 
 (** {1 Sources} *)
 

@@ -31,7 +31,7 @@ let steps l c =
 (* ---------- box averages ---------- *)
 
 let test_box () =
-  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 in
+  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 ~start:0 in
   Dos_audio.render a ~until:30 (steps [ (0, 100); (5, 0); (20, -7) ]);
   let s = samples (Dos_audio.take a) in
   checki "three samples" (Array.length s) 3;
@@ -41,13 +41,13 @@ let test_box () =
   checki "take empties" (Bytes.length (Dos_audio.take a)) 0;
   checki "position" (Dos_audio.position a) 30;
   (* rounding: half away from zero *)
-  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 in
+  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 ~start:0 in
   Dos_audio.render a ~until:20 (steps [ (0, 1); (5, 0); (10, -1); (15, 0) ]);
   let s = samples (Dos_audio.take a) in
   checki "+0.5 rounds to 1" s.(0) 1;
   checki "-0.5 rounds to -1" s.(1) (-1);
   (* an unfinished sample stays inside *)
-  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 in
+  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 ~start:0 in
   Dos_audio.render a ~until:15 (steps [ (0, 10) ]);
   checki "one finished" (Bytes.length (Dos_audio.take a)) 2;
   Dos_audio.render a ~until:12 (steps [ (0, 999) ]);
@@ -55,26 +55,47 @@ let test_box () =
   Dos_audio.render a ~until:20 (steps [ (0, 30) ]);
   checki "the rest of the sample at another level" (samples (Dos_audio.take a)).(0) 20;
   (* uneven boundaries: 7 cycles at rate 3 are samples of 2, 2, 3 *)
-  let a = Dos_audio.create ~cpu_hz:7 ~rate:3 in
+  let a = Dos_audio.create ~cpu_hz:7 ~rate:3 ~start:0 in
   Dos_audio.render a ~until:7 (steps [ (0, 6); (4, 0) ]);
   let s = samples (Dos_audio.take a) in
   check "boundaries i*7/3" (s = [| 6; 6; 0 |]);
   (* clipping *)
-  let a = Dos_audio.create ~cpu_hz:2 ~rate:1 in
+  let a = Dos_audio.create ~cpu_hz:2 ~rate:1 ~start:0 in
   Dos_audio.render a ~until:6 (steps [ (0, 40000); (2, -40000); (4, 32767) ]);
   let s = samples (Dos_audio.take a) in
   check "clipped to the 16-bit range" (s = [| 32767; -32768; 32767 |]);
   checki "two clipped" (Dos_audio.clipped a) 2;
   (* a source that does not move on *)
-  let a = Dos_audio.create ~cpu_hz:2 ~rate:1 in
+  let a = Dos_audio.create ~cpu_hz:2 ~rate:1 ~start:0 in
   check "a stuck source is an error"
     (match Dos_audio.render a ~until:4 (fun c -> (0, c)) with
      | () -> false
      | exception Invalid_argument _ -> true);
   check "a rate above the CPU clock is an error"
-    (match Dos_audio.create ~cpu_hz:2 ~rate:3 with
+    (match Dos_audio.create ~cpu_hz:2 ~rate:3 ~start:0 with
      | _ -> false
      | exception Invalid_argument _ -> true)
+
+(* Sound turned on at cycle 1003: samples count from there, and a render
+   up to an earlier cycle does nothing. *)
+let test_start () =
+  let a = Dos_audio.create ~cpu_hz:10 ~rate:1 ~start:1003 in
+  checki "position starts at the start" (Dos_audio.position a) 1003;
+  Dos_audio.render a ~until:500 (steps [ (0, 1) ]);
+  checki "nothing before the start" (Bytes.length (Dos_audio.take a)) 0;
+  Dos_audio.render a ~until:1023 (steps [ (0, 0); (1008, 100) ]);
+  let s = samples (Dos_audio.take a) in
+  check "samples from cycle 1003" (s = [| 50; 100 |])
+
+(* RIFF WAVE header: 49716 Hz mono 16-bit, 1000 bytes of samples. *)
+let test_wav_header () =
+  let le32 n = String.init 4 (fun i -> Char.chr ((n lsr (8 * i)) land 0xff)) in
+  let le16 n = String.init 2 (fun i -> Char.chr ((n lsr (8 * i)) land 0xff)) in
+  let want =
+    "RIFF" ^ le32 1036 ^ "WAVE" ^ "fmt " ^ le32 16 ^ le16 1 ^ le16 1 ^ le32 49716
+    ^ le32 99432 ^ le16 2 ^ le16 16 ^ "data" ^ le32 1000
+  in
+  check "WAV header" (Bytes.to_string (Dos_audio.wav_header ~rate:49716 ~data_bytes:1000) = want)
 
 (* Splitting a render anywhere gives the same samples. *)
 let test_split () =
@@ -82,9 +103,9 @@ let test_split () =
   for _ = 1 to 200 do
     let points = List.init 30 (fun _ -> Random.State.int rng 5000) |> List.sort_uniq compare in
     let l = (0, 0) :: List.map (fun p -> (p + 1, Random.State.int rng 2000 - 1000)) points in
-    let whole = Dos_audio.create ~cpu_hz:1000 ~rate:37 in
+    let whole = Dos_audio.create ~cpu_hz:1000 ~rate:37 ~start:0 in
     Dos_audio.render whole ~until:6000 (steps l);
-    let parts = Dos_audio.create ~cpu_hz:1000 ~rate:37 in
+    let parts = Dos_audio.create ~cpu_hz:1000 ~rate:37 ~start:0 in
     let cuts = List.init 10 (fun _ -> Random.State.int rng 6000) |> List.sort compare in
     List.iter (fun u -> Dos_audio.render parts ~until:u (steps l)) (cuts @ [ 6000 ]);
     check "split renders" (Bytes.equal (Dos_audio.take whole) (Dos_audio.take parts))
@@ -176,7 +197,7 @@ let speaker_case name ~ticks events =
   program ref_pit ~tick:0 ~gate:true 1193;
   let gate = ref true and data = ref true in
   let rgate = ref true and rdata = ref true in
-  let a = Dos_audio.create ~cpu_hz ~rate in
+  let a = Dos_audio.create ~cpu_hz ~rate ~start:0 in
   let apply pit gate data tick = function
     | Count n ->
       Dos_pit.write pit ~tick ~gate:!gate (n land 0xff);
@@ -258,6 +279,8 @@ let test_speaker () =
 let () =
   test_box ();
   test_split ();
+  test_start ();
+  test_wav_header ();
   test_next_change ();
   test_speaker ();
   if !failed > 0 then begin
