@@ -434,10 +434,11 @@ dune exec --root . bin/dosboot.exe -- --com KOEI.COM --mount ... --steps 0 \
 `--sound-blaster` 는 카드를 꽂는다 — 게임 설정에서 Sound Blaster
 (220h, IRQ 7, DMA 1)를 고를 때 쓴다.
 
-`--audio-out FILE` 은 PC 스피커 소리를 WAV(49716Hz, 16비트 모노)로 쓴다
-(RFC 0006). 표본 하나는 그 구간 CPU 사이클의 평균값이라 같은 입력이면
-같은 파일이 나온다. 소리를 켜도 기계가 가는 길은 같다. 끝에 표본 수와
-16비트를 넘어 자른 수를 찍는다. Sound Blaster 와 OPL2 는 아직 소리가 없다.
+`--audio-out FILE` 은 PC 스피커와 Sound Blaster 8비트 DAC 소리를
+WAV(49716Hz, 16비트 모노)로 쓴다(RFC 0006). 표본 하나는 그 구간 CPU
+사이클의 평균값이라 같은 입력이면 같은 파일이 나온다. 소리를 켜도 기계가
+가는 길은 같다. 끝에 표본 수와 16비트를 넘어 자른 수를 찍는다. OPL2 와 SB
+ADPCM 은 아직 소리가 없다.
 
 ```
 audio /tmp/tone.wav: 20491 samples, clipped 0
@@ -611,9 +612,10 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
   않는다. 0xA0000 창의 주인은 모드가 정한다 — BIOS 로 모드를 세운
   프로그램은 이 둘이 늘 일치한다.
 - 8087 코프로세서가 없다.
-- 소리는 PC 스피커만 낸다(`--audio-out`). Sound Blaster 는 DMA 바이트를
-  제때 가져가 버리고, OPL2 는 타이머만 있다. `dosplay` 는 아직 소리를
-  내지 않는다.
+- 소리는 PC 스피커와 Sound Blaster 8비트 PCM(직접 DAC 10h, DMA)만 낸다
+  (`--audio-out`). SB ADPCM 은 해독하지 않고, OPL2 는 타이머만 있다.
+  `dosplay` 는 아직 소리를 내지 않는다. DAC 값은 스냅숏에 들지 않아서
+  되살린 DSP 는 80h(쉼)에서 시작한다.
 
 ## 구조
 
@@ -625,8 +627,8 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, 스피커. PIC·DMA·키보드 포트는 아래 셋에 넘긴다 |
 | `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
 | `Dos_dma` | 8237 DMA 컨트롤러 — 장치가 메모리의 어느 바이트를 언제 가져가는가 |
-| `Dos_sb` | Sound Blaster 2.0 DSP — 포트 답, PCM·ADPCM 블록 시간, MIDI UART, IRQ(소리 없음) |
-| `Dos_audio` | 소리 표본(RFC 0006) — 사이클 구간의 평균값을 16비트로, PC 스피커 원천, WAV 머리. 포트 42h·43h·61h 가 쓰기·읽기 전에 그때까지를 표본으로 만든다 |
+| `Dos_sb` | Sound Blaster 2.0 DSP — 포트 답, PCM·ADPCM 블록 시간, MIDI UART, IRQ, 8비트 DAC 값(ADPCM 해독 없음) |
+| `Dos_audio` | 소리 표본(RFC 0006) — 사이클 구간의 평균값을 16비트로, PC 스피커·SB DAC 원천, WAV 머리. 포트 42h·43h·61h 접근과 DSP 출력 변화 앞에서 그때까지를 표본으로 만든다 |
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가, 컨트롤러·키보드 명령의 답 |
 | `Dos_keymap` | BIOS 키 워드 ↔ 키·수식키 표 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러, 시퀀서, CRTC |

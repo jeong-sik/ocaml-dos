@@ -107,3 +107,7 @@ let wav_header ~rate ~data_bytes =
   Bytes.blit_string "data" 0 b 36 4;
   Bytes.set_int32_le b 40 (Int32.of_int data_bytes);
   b
+
+let sb_step = 128
+
+let sb_level dac = dac * sb_step

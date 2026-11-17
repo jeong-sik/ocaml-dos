@@ -58,3 +58,13 @@ val speaker : Dos_pit.t -> data:bool -> speed:int -> int -> int * int
     writes to ports 42h, 43h (channel 2) and 61h the level only changes
     where OUT does, so the source walks {!Dos_pit.next_change}. The PIT
     must not have been called past the cycles asked for. *)
+
+val sb_step : int
+(** The level of one step of the Sound Blaster's 8-bit DAC. A full swing
+    (-128..127) takes half the 16-bit range, so the speaker and the FM
+    chip still fit beside it. *)
+
+val sb_level : int -> int
+(** The level of a DAC output of -128..127 ({!Dos_sb.output}). Between two
+    changes the DAC holds, so the source is constant: the DSP tells the
+    caller before each change ({!Dos_sb.on_output}). *)
