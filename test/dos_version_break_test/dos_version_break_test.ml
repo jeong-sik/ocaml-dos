@@ -1,7 +1,8 @@
 (* INT 21h AH=33h — MS-DOS 4.0 DISP.ASM $SET_CTRL_C_TRAPPING(00h-05h),
    CONST2.ASM SWAP_START 의 CNTCFLAG(0x17), RBIL INT 21/AX=3306h(DOS 5+
    진짜 버전). DISP.ASM 은 33h 를 DSKROUT 앞에서 끝내 확장 에러를 건드리지
-   않는다. *)
+   않는다. AH=30h — GETSET.ASM $GET_VERSION, DOSMES.ASM OEMNUM, RBIL
+   INT 21/AH=30h(DOS 5+ AL=01h). *)
 
 let failed = ref 0
 let check name got want =
@@ -73,13 +74,16 @@ let () =
           call ~ax:0x3306 ~bx:0xFFFF ~dx:0xFFFF;
           call ~ax:0x3307 ~dx:0x7777;
           call ~ax:0x33FF ~dx:0x7777;
-          flag_via_in_dos ]
+          flag_via_in_dos;
+          call ~ax:0x3000 ~bx:0xFFFF;
+          call ~ax:0x3001 ~bx:0xFFFF;
+          call ~ax:0x3002 ~bx:0xFFFF ]
   in
   let r = List.nth rs in
-  let expect name k ?(bx = bx_in) ~ax ~dx () =
+  let expect name k ?(bx = bx_in) ?(cx = cx_in) ~ax ~dx () =
     check (name ^ ": AX") (r k).ax ax;
     check (name ^ ": BX") (r k).bx bx;
-    check (name ^ ": CX") (r k).cx cx_in;
+    check (name ^ ": CX") (r k).cx cx;
     check (name ^ ": DX") (r k).dx dx;
     check (name ^ ": CF kept") (r k).carry cf
   in
@@ -96,7 +100,13 @@ let () =
   expect "3306h true version 5.00" 10 ~ax:0x3306 ~bx:0x0005 ~dx:0 ();
   expect "3307h is Windows 95" 11 ~ax:0x33FF ~dx:0x7777 ();
   expect "33FFh" 12 ~ax:0x33FF ~dx:0x7777 ();
-  check "the flag at INDOS+16h" ((r 13).ax land 0xff) 1
+  check "the flag at INDOS+16h" ((r 13).ax land 0xff) 1;
+  (* BH OEM FFh(Microsoft), BL:CX 사용자 번호 0, AL.AH = 5.00 *)
+  expect "3000h" 14 ~ax:0x0005 ~bx:0xFF00 ~cx:0 ~dx:dx_in ();
+  expect "3001h: BH is the version flag" 15 ~ax:0x0005 ~bx:0x0000 ~cx:0 ~dx:dx_in ();
+  expect "3002h: BH is the OEM number" 16 ~ax:0x0005 ~bx:0xFF00 ~cx:0 ~dx:dx_in ();
+  (* 30h 의 AL.AH 와 3306h 의 BL.BH 는 SETVER 가 없으니 같다 *)
+  check "30h and 3306h agree" (r 14).ax (r 10).bx
 
 (* 열기 실패(locus 2: Disk) 뒤 59h 가 주는 값은 그 사이에 33h 를 불러도
    같다. DSKROUT 을 탔다면 locus 가 1(Unknown)로 지워진다. *)
@@ -114,4 +124,4 @@ let () =
     Printf.eprintf "%d failure(s)\n%!" !failed;
     exit 1
   end
-  else print_endline "dos break: all passed"
+  else print_endline "dos version and break: all passed"
