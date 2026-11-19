@@ -43,6 +43,18 @@ val xms_control_id : int
 val install : Dos_state.t -> unit
 (** ROM·IVT·BDA 를 실기 부팅 상태로 채운다. *)
 
+val opens_irq_window : vector:int -> ah:int -> bool
+(** The one call the host does not answer on the spot: INT 1Ah AH=00h reads
+    the tick count after a brief window for pending IRQs (SeaBIOS
+    handle_1a00 calls yield() first). The machine sends it to the ROM stub,
+    whose guest code opens the window ([sti; nop; cli]) and then reaches the
+    host service. A program that waits for the count to grow with interrupts
+    off depends on it. *)
+
+val irq_window_off : int
+(** Where the ROM routine of that window starts in the ROM segment:
+    [sti; nop; cli; int 9Ah; iret]. *)
+
 val ivt_is_own_stub : Dos_state.t -> int -> bool
 (** 그 벡터가 아직 우리 스텁을 가리키는가 — 게스트가 가로챘으면 false. *)
 

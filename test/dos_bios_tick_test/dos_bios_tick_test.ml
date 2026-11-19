@@ -120,6 +120,35 @@ let () =
   check "guest: DX after midnight" (word (out + 4)) 0;
   check "guest: AL read again" (byte (out + 6)) 0
 
+(* ---------- 인터럽트를 끈 채 틱을 기다리는 지연 루프 ----------
+   SeaBIOS handle_1a00 은 틱을 읽기 전에 yield() 로 보류된 IRQ 를 받게 한다.
+   cli 로 시작해 INT 1Ah AH=0 만 되풀이하는 프로그램도 틱이 오르는 것을 본다
+   (Arcy 2 의 지연 루프). *)
+let () =
+  let out = 0x200 in
+  let w v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xff)) in
+  let code =
+    "\xfa"                                (* cli *)
+    ^ "\xb4\x00\xcd\x1a"                  (* mov ah,0; int 1Ah *)
+    ^ "\x89\xd6"                          (* mov si,dx *)
+    ^ "\xb4\x00\xcd\x1a"                  (* poll: mov ah,0; int 1Ah *)
+    ^ "\x39\xf2"                          (* cmp dx,si *)
+    ^ "\x74\xf8"                          (* je poll *)
+    ^ "\x89\x16" ^ w out                  (* mov [out],dx *)
+    ^ "\x89\x36" ^ w (out + 2)            (* mov [out+2],si *)
+    ^ "\xb8\x00\x4c\xcd\x21"
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m code;
+  let base = Dos_machine.psp_seg_of m * 16 in
+  write_ticks m 1000;
+  Dos_machine.run m ~max_steps:3_000_000;
+  let byte a = Dos_machine.mem_read m (base + a) in
+  let word a = byte a lor (byte (a + 1) lsl 8) in
+  check "delay loop with IF=0: exited" (if Dos_machine.exited m then 1 else 0) 1;
+  check "delay loop with IF=0: first reading" (word (out + 2)) 1000;
+  check "delay loop with IF=0: the count grew by one" (word out) 1001
+
 let () =
   if !failed = 0 then print_endline "dos bios tick: all passed"
   else begin
