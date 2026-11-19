@@ -416,9 +416,9 @@ ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_te
 SAMGUK3_DIR=/path/to/samguk3 dune exec --root . test/samguk3_scenario_test/samguk3_scenario_test.exe
 ```
 
-프리웨어 게임 열세 개(Snarf, Caves of Thor, Xargon, Kiloblaster, Jetpack, Arctic
-Adventure, Bio Menace, Monuments of Mars, Dark Ages, Halloween Harry, Ken's
-Labyrinth, Supernova, Beyond the Titanic)가 시작해
+프리웨어·쉐어웨어 게임 열다섯 개(Snarf, Caves of Thor, Xargon, Kiloblaster, Jetpack,
+Arctic Adventure, Bio Menace, Monuments of Mars, Dark Ages, Halloween Harry,
+Ken's Labyrinth, Supernova, Beyond the Titanic, Arcy 2, Charlie the Duck)가 시작해
 키에 답하는지는 연기 시험 하나로 본다. 받는 스크립트가 게임을
 `DEST/<이름>/` 에 푼다(curl 과 unzip 필요). 장면의 해시는 보지 않고, 화면에
 글자나 비디오 모드와 색 수가 나올 때까지만 기다린다. 이미 받은 뒤에는 M3 Max 에서
