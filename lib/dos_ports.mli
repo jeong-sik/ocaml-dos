@@ -93,6 +93,10 @@ val sound_blaster : t -> Dos_sb.t option
     올린다. 22Eh 읽기·리셋·새 전송으로 DSP 가 선을 내리면, CPU 가 아직 안
     받은 PIC 요청은 이 모듈이 거둔다. *)
 
+val opl : t -> Dos_opl.t
+(** OPL2 의 음색 레지스터. 389h 로 쓴다. Sound Blaster 를 꽂으면 229h 로도
+    쓴다. *)
+
 val kbc : t -> Dos_kbc.t
 (** 포트 0x60·0x64 의 키보드 컨트롤러. *)
 

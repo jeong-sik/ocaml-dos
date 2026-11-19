@@ -668,6 +668,7 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_dma` | 8237 DMA 컨트롤러 — 장치가 메모리의 어느 바이트를 언제 가져가는가 |
 | `Dos_sb` | Sound Blaster 2.0 DSP — 포트 답, PCM·ADPCM 블록 시간, MIDI UART, IRQ, 8비트 DAC 값(ADPCM 해독 없음) |
 | `Dos_audio` | 소리 표본(RFC 0006) — 사이클 구간의 평균값을 16비트로, PC 스피커·SB DAC 원천, WAV 머리. 포트 42h·43h·61h 접근과 DSP 출력 변화 앞에서 그때까지를 표본으로 만든다 |
+| `Dos_opl` | OPL2 음색 레지스터(01h·08h·20h-F5h, RFC 0006 단계 4) — 기계 상태라 스냅숏에 든다. 아직 소리는 없다 |
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가, 컨트롤러·키보드 명령의 답 |
 | `Dos_keymap` | BIOS 키 워드 ↔ 키·수식키 표 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러, 시퀀서, CRTC |

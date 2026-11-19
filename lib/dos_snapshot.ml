@@ -87,8 +87,9 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    32: the CMOS carries whether its IRQ8 line is up and the cycle IRQF next
    rises, after the periodic count start.
    33: a suspended service may wait for INT 15h AH=86h (input request tag
-   4, no fields). *)
-let format_version = 33
+   4, no fields).
+   34: the OPL2's voice registers 00h-F5h after its timers (Dos_opl). *)
+let format_version = 34
 
 let digest_hex_len = 32
 let checksum_len = 16
