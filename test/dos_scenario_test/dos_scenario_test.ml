@@ -24,6 +24,30 @@ let paint_keys =
       "\xb8\x00\x4c";     (* 0x116 mov ax,4C00h *)
       "\xcd\x21" ]        (* 0x119 int 21h *)
 
+(* Mode 13h, reset the mouse, then poll it with INT 33h AX=03h: the first
+   time the left button is down, paint 'M' at pixel 0; once it is up again,
+   paint 'R' at pixel 3 and exit. *)
+let poll_mouse =
+  String.concat ""
+    [ "\xb8\x13\x00";                 (* 0x100 mov ax,0013h *)
+      "\xcd\x10";                     (* 0x103 int 10h *)
+      "\xb8\x00\x00";                 (* 0x105 mov ax,0 *)
+      "\xcd\x33";                     (* 0x108 int 33h: reset *)
+      "\xb8\x00\xa0";                 (* 0x10a mov ax,0A000h *)
+      "\x8e\xc0";                     (* 0x10d mov es,ax *)
+      "\xb8\x03\x00";                 (* 0x10f down: mov ax,3 *)
+      "\xcd\x33";                     (* 0x112 int 33h *)
+      "\xf6\xc3\x01";                 (* 0x114 test bl,1 *)
+      "\x74\xf6";                     (* 0x117 jz down *)
+      "\x26\xc6\x06\x00\x00\x4d";     (* 0x119 mov byte es:[0],'M' *)
+      "\xb8\x03\x00";                 (* 0x11f up: mov ax,3 *)
+      "\xcd\x33";                     (* 0x122 int 33h *)
+      "\xf6\xc3\x01";                 (* 0x124 test bl,1 *)
+      "\x75\xf6";                     (* 0x127 jnz up *)
+      "\x26\xc6\x06\x03\x00\x52";     (* 0x129 mov byte es:[3],'R' *)
+      "\xb8\x00\x4c";                 (* 0x12f mov ax,4C00h *)
+      "\xcd\x21" ]                    (* 0x132 int 21h *)
+
 let machine () =
   let m = Dos_machine.create () in
   Dos_machine.load_com m paint_keys;
@@ -118,6 +142,28 @@ let test_region_outside_frame () =
       { x = -1; y = 0; w = 1; h = 1 };
       { x = 0; y = 0; w = 0; h = 1 } ]
 
+let test_click_presses_and_releases () =
+  let m = Dos_machine.create () in
+  Dos_machine.attach_mouse m;
+  Dos_machine.load_com m poll_mouse;
+  ignore (Dos_machine.run_until m ~max_steps:100_000 ~stop:(fun _ -> false));
+  check_true "nothing is painted before a click" (Dos_machine.pixel m ~x:0 ~y:0 = 0);
+  (match Dos_scenario.run m [ Click { what = "click"; x = 100; y = 80 } ] with
+   | Ok n -> check_true "a click spends machine steps" (n > 0)
+   | Error f -> check_true (Dos_scenario.failure_to_string f) false);
+  check_true "the game saw the button go down" (Dos_machine.pixel m ~x:0 ~y:0 = Char.code 'M');
+  check_true "the game saw the button come up" (Dos_machine.pixel m ~x:3 ~y:0 = Char.code 'R');
+  (* The program has exited: a second click is reported at its own step. *)
+  match
+    Dos_scenario.run m [ Click { what = "after exit"; x = 1; y = 1 } ]
+  with
+  | Ok _ -> check_true "a click after exit fails" false
+  | Error f ->
+    check_true "the failure names the click and the exit"
+      (f.index = 0 && f.what = "after exit"
+       && String.length f.reason > 0
+       && String.starts_with ~prefix:"click (1, 1): the program exited" f.reason)
+
 let () =
   test_press_paints_and_region_reads_it ();
   test_wait_for_seen_picture ();
@@ -125,6 +171,7 @@ let () =
   test_bad_key_name ();
   test_exit_stops_the_run ();
   test_region_outside_frame ();
+  test_click_presses_and_releases ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;
     exit 1
