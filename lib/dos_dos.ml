@@ -359,6 +359,7 @@ let saved_vectors_len = 3 * 4
    비어 있다. 이름을 모르면 꼬리를 쓰지 않는다. EXEC 자식은
    [child_environment] 로 블록을 따로 받는다. *)
 let root_env_seg = 0x500
+let root_psp_seg = 0x1000               (* 루트 프로그램의 PSP — COM·EXE 공통 *)
 let root_env_room = 0x100                (* 0x500..0x5FF *)
 let env_program_count = 1
 let env_scan_limit = 0x7FFF              (* EXEC.ASM: at most 32k of environment *)
@@ -548,25 +549,22 @@ let loadable image =
   if not (has_mz_signature image) then Ok Com_image
   else Result.map (fun m -> Exe_image m) (mz_module image)
 
-(* MZ EXE — 실기 배치. 프로그램은 conventional RAM 위쪽에 실린다:
-   LZEXE 같은 자기 압축 해제 스텁이 이 위치를 기준으로 원본 진입점을
-   계산하기 때문에, 낮은 고정 세그먼트에 두면 엉뚱한 주소로 뛴다
-   (ZZT 실측). 상한은 이미지 끝이 0xA000(비디오 메모리 시작)을 넘지
-   않는 자리다 — 넘으면 비디오 모드 세팅이 코드를 지운다.
-   [psp_seg] 를 주면 그 자리에(배치는 호출자 계약), 없으면 루트 공식
-   대로 memtop 아래에 블록 하나로 받는다. 자식 EXE 도 마찬가지로
+(* MZ EXE — 실기 배치. 루트는 COM 과 같은 [root_psp_seg] 에 PSP 를 두고
+   남은 메모리를 통째로 블록 하나로 받는다. 실기 DOS 도 가장 낮은 빈
+   자리에 싣고 남은 메모리를 준다. 프로그램이 AH=4Ah 로 블록을 줄이면
+   그 위가 빈 메모리가 되어 AH=48h 가 성공한다.
+   예전에는 이미지 끝이 0x9FF0 에 닿게 위쪽에 실었다. 그러면 줄여도 위가
+   비지 않아서 MS C 런타임이 환경 복사본(2 문단)을 못 받고 R6009 로,
+   Borland C 런타임은 abort 로 끝났다(Snarf·Caves of Thor 실측).
+   LZEXE 압축 EXE(ZZT.EXE 실측)도 이 자리에서 풀린다.
+   [psp_seg] 를 주면 그 자리에(배치는 호출자 계약). 자식 EXE 도 마찬가지로
    남은 메모리를 통째로 블록으로 받는다 — 실기와 같아서, 자식이 다시
    EXEC 하려면 먼저 AH=4Ah 로 줄여야 한다. *)
 let load_exe_module ?psp_seg ~child ~env t image m =
   let u16 = header_u16 image in
   let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
   let exe_sp = u16 0x10 and exe_ss = u16 0x0E in
-  let minalloc = u16 0x0A in
-  let psp_seg =
-    match psp_seg with
-    | Some p -> p
-    | None -> max 0x1000 (0x9FF0 - m.load_paras - minalloc)
-  in
+  let psp_seg = Option.value psp_seg ~default:root_psp_seg in
   let image_seg = psp_seg + 0x10 in
   place_mz_module t image m ~base:(image_seg * 16) ~factor:image_seg;
   write_psp ~init:(not child) ~env t psp_seg;
@@ -619,7 +617,7 @@ let write_command_tail t tail =
 let load_com ?name ?(tail = "") t image =
   check_command_tail tail;
   write_root_env t ~name;
-  load_com_at ~psp_seg:0x1000 ~child:false ~env:root_env_seg t image;
+  load_com_at ~psp_seg:root_psp_seg ~child:false ~env:root_env_seg t image;
   write_command_tail t tail
 
 let load_exe ?name ?(tail = "") t image =
