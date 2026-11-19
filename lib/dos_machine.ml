@@ -159,8 +159,15 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   wall_clock :=
     (fun () ->
       let year, month, day, hour, minute, second = Dos_state.now_fields t in
-      { Dos_cmos.year; month; day; weekday = Dos_state.day_of_week (year, month, day);
-        hour; minute; second });
+      let weekday =
+        match Dos_clock.date_of_fields ~year ~month ~day with
+        | Some d -> Dos_clock.weekday (Dos_clock.days_of_date d)
+        | None ->
+          invalid_arg
+            (Printf.sprintf "CMOS date %04d-%02d-%02d is outside 1980-01-01..2099-12-31"
+               year month day)
+      in
+      { Dos_cmos.year; month; day; weekday; hour; minute; second });
   Dos_bios.install t;
   init_dos_data t;
   Dos_dos.set_date_from_clock t;
