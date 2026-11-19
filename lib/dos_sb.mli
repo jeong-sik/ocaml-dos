@@ -77,6 +77,21 @@ val advance : t -> hz:int -> now:int -> dma:Dos_dma.t -> mem:Bytes.t -> bool
     bytes of the playing block, taken from DMA channel 1. [true] when the
     DSP raises its IRQ: the machine asks the PIC. *)
 
+(** {1 Sound (RFC 0006)} *)
+
+val output : t -> int
+(** What the DSP's DAC puts out now, -128..127: the last 8-bit sample less
+    80h, or 0 while the speaker is off (D3h, a reset, power-on; DOSBox
+    [init_speaker_state] for an SB Pro and before). The last sample holds
+    after a block ends. ADPCM bytes are not decoded: the value stays. *)
+
+val on_output : t -> (int -> unit) -> unit
+(** [on_output t f]: [f at] runs just before {!output} may change at CPU
+    cycle [at] — a DMA byte at its own time, a 10h byte, D1h, D3h, a
+    reset. [at] never goes back. The DAC value is sound, not machine
+    state: a snapshot does not carry it and a restored DSP starts at
+    80h. *)
+
 (** {1 Snapshot} *)
 
 val write_state : Dos_snap_codec.writer -> t -> unit

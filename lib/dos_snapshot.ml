@@ -80,8 +80,16 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    host files, and each find result says whether it is a file (by path key)
    or a directory entry (by name). Host file keys are read back only in
    their canonical Dos_path form.
-   30: the OPL2's voice registers 00h-F5h after its timers (Dos_opl). *)
-let format_version = 30
+   30: the CMOS carries the periodic flag raised before its last register A
+   write and the cycle its count starts from, after register B.
+   31: the slave 8259 (mask, requests, in service, OCW3 read choice) after
+   the master's.
+   32: the CMOS carries whether its IRQ8 line is up and the cycle IRQF next
+   rises, after the periodic count start.
+   33: a suspended service may wait for INT 15h AH=86h (input request tag
+   4, no fields).
+   34: the OPL2's voice registers 00h-F5h after its timers (Dos_opl). *)
+let format_version = 34
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -161,7 +169,7 @@ let check_consistency t =
       && List.for_all (fun width -> width >= 1 && width <= 8) line.echo_widths
     in
     let request_ok = match wait.request with
-      | Bios_key | Dos_input (Read_character _) -> true
+      | Bios_key | Bios_wait | Dos_input (Read_character _) -> true
       | Dos_input (Read_buffered_line { capacity; line; _ }) -> line_ok capacity line
       | Dos_input (Read_console_line { line; _ }) -> line_ok console_line_capacity line
     in
@@ -221,10 +229,14 @@ let put_line_input w { text; echo_widths } =
   put_list w ~what:"input echo widths"
     (C.put w ~what:"input echo width" (C.range 1 8)) echo_widths
 
+(* 0 BIOS 키, 1-3 DOS 입력, 4 INT 15h AH=86h 기다리기 *)
+let input_request_tags = C.range 0 4
+
 let put_input_request w request =
-  let tag n = C.put w ~what:"input request" (C.range 0 3) n in
+  let tag n = C.put w ~what:"input request" input_request_tags n in
   match request with
   | Bios_key -> tag 0
+  | Bios_wait -> tag 4
   | Dos_input (Read_character { echo }) -> tag 1; C.put_bool w echo
   | Dos_input (Read_buffered_line { base; capacity; line }) ->
     tag 2;
@@ -550,8 +562,9 @@ let get_line_input r =
   { text; echo_widths }
 
 let get_input_request r =
-  match C.get r ~what:"input request" (C.range 0 3) with
+  match C.get r ~what:"input request" input_request_tags with
   | 0 -> Bios_key
+  | 4 -> Bios_wait
   | 1 -> Dos_input (Read_character { echo = C.get_bool r })
   | 2 ->
     let base = C.get r ~what:"input buffer address" C.physical in
