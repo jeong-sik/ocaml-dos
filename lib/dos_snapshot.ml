@@ -97,8 +97,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    37: the standard devices are handle records too: a record is a file
    (name, buffer) or CON, AUX or PRN, then its position.
    38: a handle record carries its access mode and whether EXEC's child
-   gets it, between the target and the position. *)
-let format_version = 38
+   gets it, between the target and the position.
+   39: port 3D9h's value lives only in the video state; the ports no
+   longer carry a copy. *)
+let format_version = 39
 
 let digest_hex_len = 32
 let checksum_len = 16

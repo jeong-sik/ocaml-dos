@@ -94,7 +94,6 @@ type t = {
   mutable port_b : int;                 (** 0x61 래치 *)
   mutable cga_status : bool;
   mutable mode_control : int;           (** 0x3D8 *)
-  mutable color_select : int;           (** 0x3D9 *)
   cmos : Dos_cmos.t;  (** 포트 70h·71h *)
   (* OPL2 — 타이머 둘과 상태 포트만 있다. 소리는 없다. *)
   mutable opl_reg : int;                (** 0x388 로 고른 레지스터 *)
@@ -186,7 +185,6 @@ let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
     port_b = 0;
     cga_status = false;
     mode_control = 0x29;
-    color_select = 0;
     cmos;
     opl_reg = 0;
     opl_t1_count = 0;
@@ -573,7 +571,9 @@ let port_in t p =
     end;
     v land 0x3f
   | 0x3D8 -> t.mode_control
-  | 0x3D9 -> t.color_select
+  (* 3D9h 의 값은 화면을 그리는 Dos_video 하나만 가진다. 모드를 세우면 거기서
+     30h 로 돌아가고, 읽기도 그 값을 본다. *)
+  | 0x3D9 -> Dos_video.cga_color_select t.video
   | 0x3BA | 0x3DA ->
     (* 재주사 상태: 읽을 때마다 bit0(디스플레이 인에이블)을 뒤집는다.
        CRT 루틴이 VRAM 직접 쓰기 전에 "clear 대기 → set 대기" 상승
@@ -659,7 +659,7 @@ let port_out t p v =
       t.dac_write_index <- (i + 1) land 0xff
     end
   | 0x3D8 -> t.mode_control <- v
-  | 0x3D9 -> t.color_select <- v; Dos_video.set_cga_color_select t.video v
+  | 0x3D9 -> Dos_video.set_cga_color_select t.video v
   | 0x388 -> t.opl_reg <- v              (* 레지스터 선택 *)
   | 0x389 -> opl_write t v
   | _ -> ()
@@ -697,7 +697,7 @@ let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
-        mode_control; color_select; cmos; opl_reg; opl_t1_count;
+        mode_control; cmos; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; opl; pit2; mpu;
         audio = _ (* an observer, not machine state *) } = t
   in
@@ -726,7 +726,6 @@ let write_state w t =
   put "port_b" C.byte port_b;
   C.put_bool w cga_status;
   put "mode_control" C.byte mode_control;
-  put "color_select" C.byte color_select;
   Dos_cmos.write_state w cmos;
   put "opl_reg" C.byte opl_reg;
   put "opl_t1_count" C.byte opl_t1_count;
@@ -772,7 +771,6 @@ let read_state r t =
   t.port_b <- get "port_b" C.byte;
   t.cga_status <- C.get_bool r;
   t.mode_control <- get "mode_control" C.byte;
-  t.color_select <- get "color_select" C.byte;
   Dos_cmos.read_state r t.cmos;
   t.opl_reg <- get "opl_reg" C.byte;
   t.opl_t1_count <- get "opl_t1_count" C.byte;
