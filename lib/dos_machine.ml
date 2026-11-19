@@ -32,12 +32,27 @@ let accept_service t ~return_to = function
 
 (* [None]: IVT 가 0:0 인 벡터. 실기라면 0000:0000 으로 뛴다. *)
 let host_service t ~return_to v =
+  if v = Dos_bios.xms_control_id then begin
+    (* The XMS control function is a far-called stub, not a vector:
+       IVT[43h] stays the IRET stub. A move copies the way HIMEM's own
+       MOVSW does: through the CPU's bus, so the planar video window
+       takes it like guest stores. *)
+    Dos_xms.control t.xms t.cpu ~read:(Cpu86.bus_read t.cpu)
+      ~write:(Cpu86.bus_write t.cpu);
+    Completed
+  end
+  else
   match Dos_bios.host_vector v with
   | Some Dos_divide_overflow -> Dos_dos.divide_overflow t; Control_transferred
   | Some Dos_terminate -> Dos_dos.terminate t; Control_transferred
   | Some Dos_call -> Dos_dos.service t ~return_to
   | Some Dos_keep -> Dos_dos.int27 t; Control_transferred
   | Some Ems -> Dos_ems.service t; Completed
+  | Some Multiplex ->
+    (match Dos_xms.multiplex t.cpu ~entry:(Dos_bios.rom_seg, Dos_bios.xms_entry_off) with
+     | Dos_xms.Answered -> ()
+     | Dos_xms.Not_xms -> report_unserved t No_function ~vector:v);
+    Completed
   | Some (Bios s) -> Dos_bios.service t s
   | None -> Completed
 
@@ -50,13 +65,20 @@ let service_status_mask t v =
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
-  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Ems)
+  | Some (Bios (Keyboard_irq | Rtc_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
-let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false) () =
+let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false)
+    ?(sound_blaster = false) () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
-  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video in
+  (* CMOS 시계는 기계의 시각을 읽는다. 기계는 포트 뒤에 만들어지므로
+     시계는 아래에서 잇는다. *)
+  let wall_clock =
+    ref (fun () -> invalid_arg "Dos_machine: CMOS clock read before the machine exists")
+  in
+  let cmos = Dos_cmos.create ~clock:(fun () -> !wall_clock ()) in
+  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
      있다. 나머지 주소는 그대로 1MB 배열이다. *)
@@ -92,13 +114,13 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
     {
       mem; cpu; ports;
       exited = false; exit_code = 0; video;
-      host_files = Hashtbl.create 8;
+      host_files = Hashtbl.create 8; dirs = Hashtbl.create 8; cwd = Dos_path.root;
       handles = Hashtbl.create 4;
       open_files = Hashtbl.create 4;
       (* DOS 예약 핸들 0-4(stdin/stdout/stderr/aux/prn)는 피해서 준다 *)
       fcbs = Hashtbl.create 4;
       dta = 0x80; psp_seg = 0;
-      kbd_wait = false; kbd_requests = 0; last_tick = 0;
+      kbd_wait = false; kbd_requests = 0;
       ext_scan_pending = 0; input_continuations = []; console_pending = "";
       free_base = 0x1000; free_top = 0x9FFF; blocks = []; find_queue = [];
       stubs = []; exec_frames = []; last_child_code = 0;
@@ -109,6 +131,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
       ems_names = Hashtbl.create 1;
+      xms = Dos_xms.create ();
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면
@@ -126,13 +149,20 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
         (* 범위와 자리는 [Dos_bios.install] 이 BDA 를 채운 뒤 부팅 모드의
            가상 화면에 맞춰 다시 쓴다 *)
         mouse_range_x = (0, 0); mouse_range_y = (0, 0);
+        mouse_drawn = Dos_state.Not_drawn;
       };
+      on_unserved = (fun _ ~vector:_ ~ax:_ -> ());
     }
   in
   on_ring_poll :=
     (fun () -> if key_pending t then t.kbd_wait <- false else starve t);
+  wall_clock :=
+    (fun () ->
+      let year, month, day, hour, minute, second = Dos_state.now_fields t in
+      { Dos_cmos.year; month; day; weekday = Dos_state.day_of_week (year, month, day);
+        hour; minute; second });
   Dos_bios.install t;
-  wr8 t (sda sda_wp_err) byte_max;              (* CONST2.ASM WPErr <-1> *)
+  init_dos_data t;
   Dos_dos.set_date_from_clock t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
@@ -145,6 +175,9 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
           frame_ss = Cpu86.seg cpu 2; frame_sp = Cpu86.reg16 cpu 4; status_mask } in
         accept_service t ~return_to (host_service t ~return_to v)
       | None ->
+        (* ROM 이 부르는 INT 1Ch 같은 것은 빼고, 프로그램이 부른 것만 *)
+        if Dos_bios.ivt_is_iret_stub t raw && Cpu86.seg cpu 1 <> Dos_bios.rom_seg then
+          report_unserved t Iret_stub ~vector:raw;
         if (not (Dos_bios.ivt_is_own_stub t raw)) && deliver_ivt t raw then ()
         else accept_service t ~return_to:Direct_return
             (host_service t ~return_to:Direct_return raw));
@@ -167,13 +200,37 @@ let load_exe ?name ?tail t image =
 
 (* ---------- 파일 마운트 ---------- *)
 
+let path_error = function
+  | Dos_path.Bad_drive -> "only drive C: exists"
+  | Dos_path.Bad_name -> "not a DOS name"
+  | Dos_path.Above_root -> ".. goes above the root"
+
+(* Every directory above a mounted file exists, as it would on the disk the
+   file was copied from. *)
+let rec add_parents t p =
+  match Dos_path.parent p with
+  | None -> ()
+  | Some dir ->
+    if dir <> Dos_path.root then begin
+      Hashtbl.replace t.dirs (Dos_path.key dir) ();
+      add_parents t dir
+    end
+
 let mount_file t name data =
-  Hashtbl.replace t.host_files (String.uppercase_ascii name)
-    (Bytes.of_string data)
+  match Dos_path.parse ~cwd:Dos_path.root name with
+  | Error e -> Error (Printf.sprintf "%S: %s" name (path_error e))
+  | Ok p when p = Dos_path.root -> Error (Printf.sprintf "%S: the root is not a file" name)
+  | Ok p when Hashtbl.mem t.dirs (Dos_path.key p) ->
+    Error (Printf.sprintf "%S: a directory has that name" name)
+  | Ok p ->
+    add_parents t p;
+    Hashtbl.replace t.host_files (Dos_path.key p) (Bytes.of_string data);
+    Ok ()
 
 let read_mounted t name =
-  Option.map Bytes.to_string
-    (Hashtbl.find_opt t.host_files (String.uppercase_ascii name))
+  match Dos_path.parse ~cwd:Dos_path.root name with
+  | Error _ -> None
+  | Ok p -> Option.map Bytes.to_string (Hashtbl.find_opt t.host_files (Dos_path.key p))
 
 let mounted_names t =
   List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [])
@@ -191,16 +248,24 @@ let step_result t =
   if t.exited then Exited
   else begin
     Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
-    let interval = Dos_ports.cycles_per_tick t.ports in
     let cyc = Cpu86.cycles t.cpu in
     let pic = Dos_ports.pic t.ports in
-    if cyc - t.last_tick >= interval then begin
-      t.last_tick <- cyc;
-      Dos_pic.raise_irq pic Dos_pic.Timer
-    end;
+    (* 채널 0 의 OUT 이 오르면 IRQ0 을 요청한다. 그 사이 여러 번 올랐어도
+       IRR 은 한 비트다. *)
+    if Dos_ports.irq0_due t.ports then Dos_pic.raise_irq pic Dos_pic.Timer;
+    if Dos_ports.rtc_irq_due t.ports then Dos_pic.raise_irq pic Dos_pic.Rtc;
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;
+    (* DSP 는 바이트·리셋·타이머 때가 오면 DMA 채널 1 에서 가져가고, 블록
+       끝이면 IRQ 7 을 올린다. DMA 는 1MB 배열을 그대로 읽는다 — 비디오
+       평면 창(A0000h)을 DMA 로 읽는 프로그램은 다루지 않는다. *)
+    (match Dos_ports.sound_blaster t.ports with
+     | Some sb when cyc >= Dos_sb.due_at sb ->
+       if Dos_sb.advance sb ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc
+            ~dma:(Dos_ports.dma t.ports) ~mem:t.mem then
+         Dos_pic.raise_irq pic Dos_pic.Sound_blaster
+     | Some _ | None -> ());
     (* 요청은 IF 가 켜지고, 마스크가 풀리고, 같거나 높은 줄이 EOI 를 받을
        때까지 IRR 에 남는다 — 버리면 임계구역이 긴 프로그램에서 시계가
        느려지고 키가 사라진다. 벡터가 0:0 이면 아무것도 넣지 않고, 그 줄은
@@ -219,6 +284,7 @@ let step_result t =
            && Cpu86.seg t.cpu 2 = wait.return_ss && Cpu86.reg16 t.cpu 4 = wait.return_sp ->
       let result = match wait.request with
         | Bios_key -> Dos_bios.read_key t
+        | Bios_wait -> Dos_bios.resume_wait t
         | Dos_input request -> Dos_dos.resume_input t request
       in
       (match result with
@@ -398,8 +464,9 @@ let input_requests t = t.kbd_requests
 (* ---------- 화면 ---------- *)
 
 let frame_dims t = Dos_video.dims t.video
-let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t)
-let screen_text_utf8 t = Dos_render.text_utf8 t.mem ~cols:(cols t)
+let screen_text t = Dos_render.text_ascii t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
+let screen_text_utf8 t =
+  Dos_render.text_utf8 t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
 
 let frame_rgb t =
   let pal = Dos_ports.palette t.ports in
@@ -410,7 +477,7 @@ let frame_rgb t =
   else
   match Dos_video.kind t.video with
   | Dos_video.Text ->
-    Dos_render.rgb_text t.mem ~cols:(cols t)
+    Dos_render.rgb_text t.mem ~cols:(cols t) ~cell:(Dos_video.text_cell t.video)
       ~attr:(Dos_video.attr_palette t.video) ~pal
       ~blink:(Dos_video.text_blink t.video)
   | Dos_video.Cga4 ->
@@ -431,7 +498,21 @@ let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
 let mem_write t a v = wr8 t a v
 let tick_count t = read_ticks t
+
+let on_unserved t f = t.on_unserved <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
+
+(* 포트 쪽 시각은 스텝 처음에 맞춘다. 스텝 밖에서 부르면 지금 사이클로
+   먼저 맞춘다 — 다음 스텝이 하는 일과 같다. *)
+let start_audio t ~rate =
+  Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
+  Dos_ports.start_audio t.ports ~rate
+
+let take_audio t =
+  Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
+  Dos_ports.take_audio t.ports
+
+let audio_clipped t = Dos_ports.audio_clipped t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
 
@@ -510,6 +591,9 @@ let set_mouse t ~x ~y ~buttons =
     (if moved then 0x01 else 0)
     lor edge 0x1 0x02 0x04 lor edge 0x2 0x08 0x10 lor edge 0x4 0x20 0x40
   in
+  (* 드라이버는 사건마다 커서를 다시 그린 뒤 핸들러를 부른다(DOSBox-X
+     INT74_Handler 의 DrawCursor). 숨어 있으면 그리지 않는다. *)
+  if events <> 0 then Dos_mouse_cursor.draw t;
   let mask = m.mouse_handler_mask in
   if mask <> 0 && events land mask <> 0
      && (m.mouse_handler_seg <> 0 || m.mouse_handler_off <> 0)

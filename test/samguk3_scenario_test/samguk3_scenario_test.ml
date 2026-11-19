@@ -16,6 +16,11 @@
    The game is not in the repository. SAMGUK3_DIR names a directory with
    KOEI.COM and its files; without it the test is skipped. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let region x y w h = { Dos_scenario.x; y; w; h }
 
 (* A stage budget is generous: the slowest stage (the opening skip, then
@@ -110,8 +115,8 @@ let boot ?save dir =
   Sys.readdir dir |> Array.to_list |> List.sort compare
   |> List.iter (fun f ->
       let p = Filename.concat dir f in
-      if not (Sys.is_directory p) then Dos_machine.mount_file m f (read p));
-  Option.iter (Dos_machine.mount_file m save_file) save;
+      if not (Sys.is_directory p) then mount m f (read p));
+  Option.iter (mount m save_file) save;
   Dos_machine.load_com m (read (Filename.concat dir "KOEI.COM"));
   m
 

@@ -1,6 +1,11 @@
 (* Execute real COM instructions through the installed INT hook. An empty
    blocking read cannot reach the following store, marker, or exit. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let check name condition = if not condition then failwith name
 
 let word n = String.init 2 (fun i -> Char.chr ((n lsr (8 * i)) land 0xff))
@@ -147,7 +152,7 @@ let test_exec_return_frame () =
   List.iter (fun child_exit -> List.iter (fun carry ->
       let m = exec_through_old_vector ~carry () in
       let child = "\xa1\x02\x00" ^ store 0x700 ^ child_exit in
-      Dos_machine.mount_file m "CHILD.COM" child;
+      mount m "CHILD.COM" child;
       let report = Dos_machine.run_until m ~max_steps:100
           ~stop:(fun current -> current.Dos_state.psp_seg <> 0x1000) in
       check "old-vector EXEC starts child" (report.stop_reason = Dos_machine.Stop_requested);
@@ -199,7 +204,10 @@ let test_deferred_trap () =
 
 let test_idle_clock_reaches_irq () =
   let m = machine (bios_read 0 ^ store 0x200 ^ marker ^ exit) in
-  let tick_cycles = Dos_ports.cycles_per_tick m.Dos_state.ports in
+  (* POST 뒤 채널 0 은 모드 3·65536 이고, 셈은 실은 다음 틱부터다: 첫
+     상승은 65537 틱이다. *)
+  let cycles_per_pit_tick = Dos_ports.speed_hz Dos_ports.pc_speed / Dos_ports.pit_hz in
+  let tick_cycles = (0x10000 + 1) * cycles_per_pit_tick in
   let boot_ticks = Dos_machine.tick_count m in
   (* Two-cycle idle quanta reach the PIT deadline within this machine-step
      budget, with the remaining half available for the real ROM IRQ code. *)

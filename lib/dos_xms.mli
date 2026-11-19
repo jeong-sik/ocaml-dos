@@ -116,9 +116,14 @@ val control :
     in MS HIMEM per HimemX) and 0Eh (BL = free handles). The move
     structure at DS:SI is read through [read]. *)
 
-val multiplex : Cpu86.t -> entry:int * int -> unit
+type multiplex_answer =
+  | Answered  (** AX was 4300h or 4310h *)
+  | Not_xms   (** any other AX: no register changed *)
+
+val multiplex : Cpu86.t -> entry:int * int -> multiplex_answer
 (** INT 2Fh: AX=4300h sets AL=80h, AX=4310h sets ES:BX to [entry]
-    (segment, offset). Any other AX leaves every register as it was. *)
+    (segment, offset). Any other AX leaves every register as it was and
+    answers [Not_xms], so the caller can report the call as unserved. *)
 
 val write_state : Dos_snap_codec.writer -> t -> unit
 val read_state : Dos_snap_codec.reader -> t -> unit

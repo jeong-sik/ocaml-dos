@@ -16,7 +16,8 @@
 
 type t = Dos_state.t
 
-val create : ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> unit -> t
+val create :
+  ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> ?sound_blaster:bool -> unit -> t
 (** [model] 은 기본이 [I80286] 이다. [I80386] 이면 게스트가 32 비트 레지스터,
     FS·GS, 0Fh 명령을 쓰고, CPU 판별이 386 을 본다. [speed] 를 주지 않으면
     IBM PC 의 4.77MHz 다.
@@ -24,7 +25,11 @@ val create : ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> uni
     640KB 기계. [mpu401] 이면(기본 아님) 330h 에 UART 전용 MPU-401 을
     꽂는다([Dos_mpu401]). MIDI 바이트는 버린다 — 소리 장치가 없다. 기본으로
     꺼 둔다. 카드를 찾은 게임이 intelligent 모드 명령을 쓰면, 이 카드는
-    답하지 않으므로 그 게임은 답을 기다린다. *)
+    답하지 않으므로 그 게임은 답을 기다린다.
+
+    [sound_blaster] 이면(기본 아님) 220h·IRQ 7·DMA 1 에 Sound Blaster 2.0 을
+    꽂는다. 기본으로 꺼 둔다 — 카드를 찾은 게임이 모델에 없는 전송(ADPCM 등)을
+    고르면 IRQ 를 기다리다 멈추기 때문이다. *)
 
 (** {1 적재} *)
 
@@ -41,11 +46,16 @@ val load_exe : ?name:string -> ?tail:string -> t -> string -> unit
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
     MZ 서명이 아니면 [Invalid_argument]. [name]·[tail] 은 [load_com] 과 같다. *)
 
-val mount_file : t -> string -> string -> unit
-(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)
+val mount_file : t -> string -> string -> (unit, string) result
+(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 루트에서 시작하는 DOS
+    경로다 — [DATA\X.DAT] 나 [DATA/X.DAT] 처럼 쓰고, DOS 가 읽듯
+    대문자로 바꾸고 8.3 으로 자른다({!Dos_path}). 위 디렉터리는 함께
+    생긴다. DOS 이름이 될 수 없는 이름이나 디렉터리와 같은 이름은
+    [Error] 다. *)
 
 val read_mounted : t -> string -> string option
-(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다. *)
+(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다.
+    이름은 [mount_file] 과 같이 읽는다. *)
 
 val mounted_names : t -> string list
 
@@ -226,6 +236,12 @@ val mem_write : t -> int -> int -> unit
 (** 물리 주소 한 바이트 쓰기({!mem_read} 의 짝). 하네스가 게스트 RAM 에
     상태를 주입하는 용도. 값은 하위 8비트로 잘린다. *)
 
+val on_unserved : t -> (Dos_state.unserved -> vector:int -> ax:int -> unit) -> unit
+(** 이 기계가 받지 못한 INT 호출을 알려 줄 관찰자를 건다. 기계 동작은 그대로다.
+    [No_function] 은 호스트 서비스(21h·10h·15h·16h·1Ah·33h)에 그 기능 갈래가 없을
+    때, [Iret_stub] 은 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔을 때다.
+    [ax] 는 호출 순간의 AX 다. *)
+
 val tick_count : t -> int
 (** BIOS 타이머 틱(0x40:0x6C). 자정부터 센 수라 처음 값은 기준시각의
     틱이다(08:00:00 이면 524348). 18.2Hz 가 기본이고 게스트가 PIT
@@ -233,7 +249,19 @@ val tick_count : t -> int
     돌아간다. *)
 
 val speaker_on : t -> bool
-(** 스피커의 게이트와 데이터가 둘 다 열렸다. 소리는 내지 않는다. *)
+(** 스피커의 게이트와 데이터가 둘 다 열렸다. *)
+
+val start_audio : t -> rate:int -> unit
+(** 지금부터 PC 스피커 소리를 초당 [rate] 개의 표본으로 만든다(RFC 0006).
+    표본은 기계가 간 길을 바꾸지 않는다. 스냅숏은 표본을 담지 않으므로
+    되살린 기계는 다시 불러야 한다. *)
+
+val take_audio : t -> Bytes.t option
+(** 지금까지 만든 표본 가운데 아직 가져가지 않은 것. 16비트 부호 있는
+    리틀 엔디언 모노다. {!start_audio} 를 부르지 않았으면 [None] 이다. *)
+
+val audio_clipped : t -> int option
+(** 16비트 범위를 넘어 자른 표본 수. *)
 
 val free_paras : t -> int
 (** INT 21h AH=48h 이 지금 줄 수 있는 가장 큰 덩어리. *)

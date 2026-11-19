@@ -44,6 +44,28 @@ let ega_com () =
       "\xb8\x00\x4c";      (* mov ax,4C00h *)
       "\xcd\x21" ]           (* int 21h *)
 
+(* --unserved: 이 기계가 받지 못한 INT 호출을 (갈래, 벡터, AH) 로 묶어 센다.
+   AL 은 처음 본 순서대로 남긴다. *)
+let unserved_tally () =
+  let tally = Hashtbl.create 16 in
+  let record kind ~vector ~ax =
+    let key = (kind, vector, ax lsr 8) and al = ax land 0xff in
+    let count, als = Option.value (Hashtbl.find_opt tally key) ~default:(0, []) in
+    Hashtbl.replace tally key (count + 1, if List.mem al als then als else als @ [ al ])
+  in
+  let kind_name = function
+    | Dos_state.No_function -> "no-function"
+    | Dos_state.Iret_stub -> "iret-stub"
+  in
+  let print () =
+    Hashtbl.fold (fun k v acc -> (k, v) :: acc) tally []
+    |> List.sort compare
+    |> List.iter (fun ((kind, vector, ah), (count, als)) ->
+        Printf.eprintf "UNSERVED %s INT %02xh AH=%02xh x%d AL=%s\n%!" (kind_name kind)
+          vector ah count (String.concat "," (List.map (Printf.sprintf "%02x") als)))
+  in
+  (record, print)
+
 let read_file path =
   let ic = open_in_bin path in
   let s = really_input_string ic (in_channel_length ic) in
@@ -124,6 +146,11 @@ let hex s =
   let s = if String.length s > 2 && String.sub s 0 2 = "0x" then s else "0x" ^ s in
   int_of_string s
 
+(* --audio-out 이 표본을 파일로 흘리는 간격(machine step). 표본이 메모리에
+   쌓이지 않게 하는 값일 뿐 결과는 같다. *)
+let audio_flush_steps = 100_000
+let audio_sample_bytes = 2
+
 (* --cpu 의 값: 정확히 같은 글자만 받는다. *)
 let model_of_flag = function
   | "286" -> Some Cpu86.I80286
@@ -136,11 +163,12 @@ let () =
   and out = ref "/tmp/dosboot" and mounts = ref [] and trace = ref 0
   and keys = ref "" and typed = ref "" and utf8 = ref false
   and dump = ref "" and int_trace = ref false and saves = ref []
+  and unserved = ref false
   and snap_every = ref 0
   and glyph_max = ref 0 and glyph_rec = ref 0
   and mouse = ref "" and clock = ref "" and feed = ref "" in
   let scenario = ref [] and digests = ref [] and args = ref "" and cpu_mhz = ref None
-  and mpu401 = ref false in
+  and mpu401 = ref false and sound_blaster = ref false and audio_out = ref "" in
   Arg.parse
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지 실행");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지 실행");
@@ -195,6 +223,8 @@ let () =
       ("--mouse", Arg.Set_string mouse, "X,Y,BUTTONS  마우스를 붙이고 위치를 준다");
       ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
        "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다");
+      ("--sound-blaster", Arg.Set sound_blaster,
+       "  Sound Blaster 2.0 을 꽂는다(220h, IRQ 7, DMA 1, 소리 없음)");
       ("--clock", Arg.Set_string clock,
        "Y-M-D,H:M:S  게스트가 보는 기준시각 (기본 1990-1-1,8:0:0)");
       ("--out", Arg.Set_string out, "PREFIX  PPM 덤프 접두어");
@@ -203,6 +233,7 @@ let () =
       ("--utf8", Arg.Set utf8, "  화면을 코드 페이지 437 그대로 출력");
       ("--trace", Arg.Int (fun n -> trace := n), "N  N 스텝마다 CS:IP 추적");
       ("--int-trace", Arg.Set int_trace, "  INT 명령을 만날 때마다 기록");
+      ("--unserved", Arg.Set unserved, "  이 기계가 받지 못한 INT 호출을 끝에 센다(stderr)");
       ("--glyph-trace", Arg.String (fun s ->
          match String.split_on_char ',' s with
          | [ mx; rec_ ] ->
@@ -212,7 +243,9 @@ let () =
          | _ -> prerr_endline "bad --glyph-trace (want MAX,RECSIZE)"),
        "  INT 21h AH=42 seek 중 폰트 글리프 요청(offset = idx*RECSIZE+base 패턴) 기록");
       ("--dump", Arg.Set_string dump, "ADDR,LEN  끝난 뒤 물리 메모리 덤프");
-      ("--mpu401", Arg.Set mpu401, "  330h 에 MPU-401(UART 전용)을 꽂는다. MIDI 바이트는 버린다") ]
+      ("--mpu401", Arg.Set mpu401, "  330h 에 MPU-401(UART 전용)을 꽂는다. MIDI 바이트는 버린다");
+      ("--audio-out", Arg.Set_string audio_out,
+       "FILE  PC 스피커 소리를 WAV(49716Hz, 16비트 모노)로 쓴다(RFC 0006)") ]
     (fun _ -> ())
     "dosboot — DOS 이미지 실행 하네스";
   let speed =
@@ -228,7 +261,11 @@ let () =
         prerr_endline ("bad --cpu-mhz: " ^ e);
         exit 2)
   in
-  let m = Dos_machine.create ?model:!cpu ~speed ~mpu401:!mpu401 () in
+  let m =
+    Dos_machine.create ?model:!cpu ~speed ~mpu401:!mpu401 ~sound_blaster:!sound_blaster ()
+  in
+  let record_unserved, print_unserved = unserved_tally () in
+  if !unserved then Dos_machine.on_unserved m record_unserved;
   (match String.split_on_char ',' !clock with
    | [ date; time ] ->
      (match (String.split_on_char '-' date, String.split_on_char ':' time) with
@@ -247,7 +284,10 @@ let () =
   List.iter
     (fun spec ->
       match parse_pair spec "mount" with
-      | Some (name, path) -> Dos_machine.mount_file m name (read_file path)
+      | Some (name, path) ->
+        (match Dos_machine.mount_file m name (read_file path) with
+         | Ok () -> ()
+         | Error e -> prerr_endline ("bad --mount " ^ e); exit 2)
       | None -> ())
     (List.rev !mounts);
   (* COMMAND.COM 이 넘기는 꼬리는 이름 바로 뒤의 공백부터다 *)
@@ -263,6 +303,28 @@ let () =
     exit 2
   end;
   String.iter (fun c -> Dos_machine.push_ascii m c) !typed;
+  (* --audio-out: 표본을 도는 동안 파일로 흘리고, 끝에서 WAV 머리의 길이
+     칸을 고친다. 표본률은 RFC 0006 의 추천값이다. *)
+  let audio =
+    if !audio_out = "" then None
+    else begin
+      let rate = Dos_audio.opl2_rate in
+      Dos_machine.start_audio m ~rate;
+      let oc = open_out_bin !audio_out in
+      output_bytes oc (Dos_audio.wav_header ~rate ~data_bytes:0);
+      Some (oc, rate, ref 0)
+    end
+  in
+  let flush_audio () =
+    match audio with
+    | None -> ()
+    | Some (oc, _, written) ->
+      (match Dos_machine.take_audio m with
+       | Some b ->
+         output_bytes oc b;
+         written := !written + Bytes.length b
+       | None -> ())
+  in
   let feeds = Queue.create () in
   List.iter (fun (w, at) -> Queue.push (w, at) feeds) (parse_feed !feed);
   let feed_at mm n =
@@ -275,6 +337,7 @@ let () =
   in
   let on_step mm n =
     feed_at mm n;
+    if n mod audio_flush_steps = 0 then flush_audio ();
     let c = Dos_machine.cpu_of mm in
     let pc = ((Cpu86.seg c 1 lsl 4) + Cpu86.dump_ip c) land 0xfffff in
     let op = Dos_machine.mem_read mm pc in
@@ -339,6 +402,17 @@ let () =
          (Dos_machine.run_with_keys ~on_step ~on_key m ~max_steps:!steps
             ~keys:(parse_keys !keys))
      with Cpu86.Unsupported msg -> Printf.eprintf "UNSUPPORTED: %s\n%!" msg);
+  if !unserved then print_unserved ();
+  (match audio with
+   | None -> ()
+   | Some (oc, rate, written) ->
+     flush_audio ();
+     seek_out oc 0;
+     output_bytes oc (Dos_audio.wav_header ~rate ~data_bytes:!written);
+     close_out oc;
+     Printf.printf "audio %s: %d samples, clipped %d\n" !audio_out
+       (!written / audio_sample_bytes)
+       (Option.value ~default:0 (Dos_machine.audio_clipped m)));
   let c = Dos_machine.cpu_of m in
   let fw, fh = Dos_machine.frame_dims m in
   Printf.printf "mode=%02xh frame=%dx%d\n%!" (Dos_machine.video_mode m) fw fh;

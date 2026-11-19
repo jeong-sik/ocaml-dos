@@ -59,8 +59,8 @@ let cursor_rows = 16
 
 type graphics_cursor =
   | Default_arrow
-      (** 리셋 뒤 드라이버에 든 화살표다. 이 기계는 그 비트맵을 지어내지
-          않는다. 무엇을 그릴지는 커서를 그리는 쪽이 정한다(이슈 #77). *)
+      (** 리셋 뒤 드라이버에 든 화살표다. 비트맵은 Dos_mouse_cursor 의
+          default_screen_mask·default_cursor_mask(DOSBox-X mouse.cpp)다. *)
   | Custom_cursor of {
       hot_x : int;  (** BX 그대로 *)
       hot_y : int;  (** CX 그대로 *)
@@ -82,6 +82,15 @@ type text_cursor =
 (* 리셋 뒤 텍스트 커서는 속성 바이트만 뒤집는 소프트웨어 커서다(DOSBox-X
    mouse.cpp defaultTextAndMask 77FFh·defaultTextXorMask 7700h). *)
 let default_text_cursor = Software_text { screen_mask = 0x77FF; cursor_mask = 0x7700 }
+
+(* 드라이버가 화면에 그려 둔 커서와 그 밑에 있던 것. 숨기거나 옮기기 전에
+   되돌린다(DOSBox-X mouse.cpp backData·backposx·backposy). *)
+type drawn_cursor =
+  | Not_drawn
+  | Drawn_text of { page : int; col : int; row : int; under : int }
+      (** 칸 하나, [under] 는 그 칸의 글자·속성 워드 *)
+  | Drawn_graphics of { left : int; top : int; width : int; height : int; under : int array }
+      (** 화면 안으로 자른 사각형. [under] 는 위 줄부터 줄마다 [width] 점 *)
 
 (* 움직임 설정 — AX=0Fh 미키/화소 비율, 1Ah 감도, 13h·1Ah 두 배 속도 문턱
    (RBIL INT 33/000F, 001A, 0013). *)
@@ -139,6 +148,7 @@ type mouse = {
   mouse_releases : button_log array;
   mutable mouse_range_x : int * int;
   mutable mouse_range_y : int * int;
+  mutable mouse_drawn : drawn_cursor;  (** {!Dos_mouse_cursor} 가 쓴다 *)
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
@@ -185,7 +195,10 @@ type dos_input_request =
   | Read_buffered_line of { base : int; capacity : int; line : line_input }
   | Read_console_line of { destination : int; length : int; line : line_input }
 
-type input_request = Bios_key | Dos_input of dos_input_request
+(* 멈춘 BIOS·DOS 서비스가 기다리는 것. [Bios_wait] 은 입력이 아니라 INT 15h
+   AH=86h 가 RTC 의 끝 깃발(40:A1h bit 7)을 기다리는 것이다 — 기다리는 동안
+   IRQ 가 들어오는 길이 같아서 여기에 있다. *)
+type input_request = Bios_key | Bios_wait | Dos_input of dos_input_request
 
 type service_result = Completed | Control_transferred | Awaiting_input of input_request
 
@@ -199,6 +212,16 @@ type input_continuation = {
   service_return : service_return;
 }
 
+(* What AH=4Eh found and AH=4Fh still has to give: a file by its path key,
+   or a directory entry by the name it shows ([.], [..] or its name). *)
+type find_hit = File_hit of string | Dir_hit of string
+
+(* 이 기계가 받지 못한 INT 호출의 갈래. 기계 동작은 바꾸지 않고 관찰자에게만
+   알린다 — 게임을 돌려 무엇이 빠졌는지 찾는 진단용이다. *)
+type unserved =
+  | No_function  (** 호스트 서비스(21h·10h·15h·16h·1Ah·2Fh·33h)에 이 기능 갈래가 없다 *)
+  | Iret_stub    (** 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔다 *)
+
 type t = {
   mem : Bytes.t;                              (** 1MB *)
   cpu : Cpu86.t;
@@ -206,7 +229,12 @@ type t = {
   mutable exited : bool;
   mutable exit_code : int;
   video : Dos_video.t;
-  host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
+  host_files : (string, Bytes.t) Hashtbl.t;
+        (** 하네스가 마운트한 파일 — 키는 {!Dos_path.key} *)
+  dirs : (string, unit) Hashtbl.t;
+        (** 루트 밖의 디렉터리 — 키는 {!Dos_path.key}. 마운트한 파일의 위
+            디렉터리와 게스트가 AH=39h 로 만든 것 *)
+  mutable cwd : Dos_path.t;                   (** C: 의 현재 디렉터리 *)
   handles : (int, handle) Hashtbl.t;
         (** 핸들 번호 [first_file_handle] .. [max_handles - 1] 만 쓴다 *)
   open_files : (string, Bytes.t ref) Hashtbl.t;
@@ -221,11 +249,10 @@ type t = {
   mutable input_continuations : input_continuation list;
   mutable console_pending : string;  (* cooked AH=3F line bytes not yet returned *)
   mutable kbd_requests : int;                 (** 빈 링을 만난 횟수 *)
-  mutable last_tick : int;                    (** 마지막 IRQ0 의 사이클 *)
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
-  mutable find_queue : string list;           (** findnext 가 남긴 이름 *)
+  mutable find_queue : find_hit list;         (** findnext 가 남긴 것 *)
   mutable stubs : (int * int) list;           (** (벡터, ROM 스텁 오프셋) *)
   mutable exec_frames : exec_frame list;      (** EXEC 로 띄운 자식의 부모 프레임 *)
   mutable last_child_code : int;              (** AH=4Dh 가 돌려줄 마지막 자식 코드 *)
@@ -254,8 +281,13 @@ type t = {
         (** 핸들 → AH=53h 로 붙인 이름. 여덟 바이트이고, 첫 NUL 뒤는 모두
             NUL 이다. 이름이 없는(모두 NUL) 핸들은 없고, 같은 이름은 둘
             없다. *)
+  xms : Dos_xms.t;                            (** XMS 드라이버(INT 2Fh AH=43h) *)
   mouse : mouse;
+  mutable on_unserved : unserved -> vector:int -> ax:int -> unit;
+        (** 관찰자. 기계 상태가 아니어서 스냅숏에 싣지 않는다 *)
 }
+
+let report_unserved t kind ~vector = t.on_unserved kind ~vector ~ax:(Cpu86.reg16 t.cpu 0)
 
 (* ---------- 메모리 ---------- *)
 
@@ -292,8 +324,9 @@ let physical seg off = ((seg lsl 4) + off) land phys_mask
    ErrorMode 는 늘 0 이다.
 
    그 뒤는 확장 에러(AH=59h)다: WPErr, EXTERR_LOCUS, EXTERR, EXTERR_ACTION,
-   EXTERR_CLASS, EXTERRPT. 0x0C..0x19(DTA, 현재 PSP 등)는 호스트 상태에
-   있어 비워 두고, Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
+   EXTERR_CLASS, EXTERRPT. 0x0C..0x16(DTA, 현재 PSP 등)는 호스트 상태에
+   있어 비워 둔다. 0x17 은 CNTCFLAG(AH=33h 확장 Ctrl-Break 깃발)다.
+   Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
 let sda_seg = 0x0070
 let sda_error_mode = 0
 let sda_in_dos = 1
@@ -303,9 +336,27 @@ let sda_exterr = 4
 let sda_exterr_action = 6
 let sda_exterr_class = 7
 let sda_exterr_pointer = 8
+let sda_cntc_flag = 0x17
 let sda_user_in_ax = 0x1A
 let byte_max = 0xFF
 let sda off = physical sda_seg off
+
+(* CONST2.ASM 에서 SWAP_START 앞: VERFLG, CharCo, chSwitch, AllocMethod,
+   fShare, DIFFNAM, MYNAME(16), CritPatch(10) 해서 32 바이트, 그 뒤 EVEN.
+   그 앞 크기를 몰라 EVEN 은 0 바이트로 친다. 게스트가 주소로 찾는 값이
+   아니어서 자리는 이 기계가 고른 것이다. [sda] 는 SWAP_START 기준이라
+   음수 오프셋도 받는다. *)
+let pre_swap_verify = -32
+let pre_swap_switch_char = -30
+let pre_swap_alloc_method = -29
+let default_switch_char = Char.code '/'
+
+(* CONST2.ASM 초기값 중 0 이 아닌 것: WPErr <-1>, chSwitch <'/'> *)
+let init_dos_data t =
+  wr8 t (sda sda_wp_err) byte_max;
+  wr8 t (sda pre_swap_switch_char) default_switch_char
+
+let set_locus t l = wr8 t (sda sda_exterr_locus) (Dos_error.locus_code l)
 
 (* DISP.ASM DSKROUT: AH 가 0 이거나 0Ch 보다 크고 59h 가 아닌 기능에 들어갈
    때. 50h·51h·62h·33h·64h 는 그 앞에서 따로 끝나 여기에 오지 않는다. *)
@@ -323,7 +374,7 @@ let enter_call t =
   if disk_route (ax lsr 8) then begin
     wr8 t (sda sda_user_in_ax) (ax land 0xff);
     wr8 t (sda (sda_user_in_ax + 1)) (ax lsr 8);
-    wr8 t (sda sda_exterr_locus) (Dos_error.locus_code Dos_error.Unknown_locus);
+    set_locus t Dos_error.Unknown_locus;
     wr8 t (sda sda_error_mode) 0;
     wr8 t (sda sda_wp_err) byte_max
   end
@@ -331,7 +382,7 @@ let enter_call t =
 let set_input_continuations t waits =
   t.input_continuations <- waits;
   let in_dos = List.length (List.filter (fun w ->
-      match w.request with Dos_input _ -> true | Bios_key -> false) waits) in
+      match w.request with Dos_input _ -> true | Bios_key | Bios_wait -> false) waits) in
   wr8 t (physical sda_seg sda_in_dos) (min in_dos byte_max)
 
 let finish_service_return t = function
@@ -399,7 +450,7 @@ let fail t code =
    | Some { Dos_error.error_class; action; locus } ->
      wr8 t (sda sda_exterr_class) (Dos_error.class_code error_class);
      wr8 t (sda sda_exterr_action) (Dos_error.action_code action);
-     Option.iter (fun l -> wr8 t (sda sda_exterr_locus) (Dos_error.locus_code l)) locus);
+     Option.iter (set_locus t) locus);
   Cpu86.set_reg16 t.cpu 0 (Dos_error.returned_code ~fn code);
   set_cf t true
 
@@ -438,28 +489,102 @@ let write_ticks t v =
   wr16 t bda_ticks (v land 0xFFFF);
   wr16 t (bda_ticks + 2) ((v lsr 16) land 0xFFFF)
 
-(* ---------- 커서와 화면 ---------- *)
+(* ---------- 쪽·커서·화면 ---------- *)
 
-(* 커서의 진실 원천은 BDA 0x450/0x451 이다(실기 BIOS 와 같다). CRTC
-   레지스터도 같은 값으로 맞춰 둔다 — 두 벌로 갈라지면 게스트가 직접
-   CRTC 를 읽을 때 딴 자리를 본다. *)
-let get_cursor t = (rd8 t 0x450, rd8 t 0x451)   (* (열, 행) *)
+(* 텍스트 화면은 쪽 여덟 장을 가진다. BIOS 는 쪽마다 커서를 따로 두고
+   (BDA 0x450 + 2 × 쪽), 보이는 쪽(0x462)의 커서만 CRTC 에도 쓴다(SeaBIOS
+   vgabios.c set_cursor_pos). 커서의 진실 원천은 BDA 다. CRTC 를 같이
+   맞춰 두지 않으면 게스트가 CRTC 를 직접 읽을 때 딴 자리를 본다. 쪽
+   번호가 0-7 밖이면 커서를 바꾸지 않고, 읽으면 (0, 0) 이다. *)
+let active_page t = rd8 t Dos_ports.bda_active_page
+let cursor_slot page = Dos_ports.bda_cursor_pos + (2 * page)
 
-let set_cursor t col row =
-  let w = cols t in
-  let col = max 0 (min (w - 1) col) and row = max 0 (min (rows t - 1) row) in
-  wr8 t 0x450 col;
-  wr8 t 0x451 row;
-  let linear = (row * w) + col in
-  Dos_ports.port_out t.ports 0x3D4 0x0E;
-  Dos_ports.port_out t.ports 0x3D5 (linear lsr 8);
-  Dos_ports.port_out t.ports 0x3D4 0x0F;
-  Dos_ports.port_out t.ports 0x3D5 (linear land 0xff)
+(* 쪽 [page] 의 (r, c) 칸이 0xB800 세그먼트 안에서 차지하는 오프셋.
+   BIOS 는 B800:오프셋 으로 쓰므로 오프셋이 16비트에서 돈다(SeaBIOS
+   vgafb.c text_address). 쪽 크기는 모드를 세울 때 BDA 0x44C 에 적힌다. *)
+let segment_mask = 0xFFFF
 
-let cell_addr t r c = vram_base + (((r * cols t) + c) * 2)
+let page_offset t ~page r c =
+  ((rd16 t Dos_ports.bda_page_size * page) + (((r * cols t) + c) * 2)) land segment_mask
 
-let read_cell t r c = rd16 t (cell_addr t r c)
-let write_cell t r c v = wr16 t (cell_addr t r c) v
+(* 쪽 하나의 바이트 수(SeaBIOS vgabios.c calc_page_size). 텍스트는 칸마다
+   두 바이트를 2KB 로, 16색·256색은 화면 점 수 / 8 을 8KB 로 올린다. CGA
+   는 16KB 다. *)
+let text_page_align = 0x800
+let graphics_page_align = 0x2000
+let cga_page_size = 0x4000
+let dots_per_plane_byte = 8
+let round_up n unit = (n + unit - 1) / unit * unit
+
+let page_size_of t =
+  match Dos_video.kind t.video with
+  | Dos_video.Text -> round_up (cols t * rows t * 2) text_page_align
+  | Dos_video.Cga4 | Dos_video.Cga2 -> cga_page_size
+  | Dos_video.Planar | Dos_video.Linear256 ->
+    let w, h = Dos_video.dims t.video in
+    round_up (w * h / dots_per_plane_byte) graphics_page_align
+
+(* 쪽 오프셋(바이트)을 CRTC 시작 주소로 바꾸는 비율. SeaBIOS stdvga.c
+   stdvga_set_displaystart 가 오프셋 × stdvga_vram_ratio / 4 를 쓴다. *)
+let display_ratio = function
+  | Dos_video.Text | Dos_video.Cga4 -> 2
+  | Dos_video.Cga2 | Dos_video.Planar -> 4
+  | Dos_video.Linear256 -> 1
+let display_ratio_unit = 4
+
+(* 모드를 세운 뒤: 쪽 크기를 다시 적고, 0 쪽을 보이며, 쪽 여덟 장의
+   커서를 (0,0)으로 둔다(SeaBIOS vgabios.c vga_set_mode). *)
+let reset_pages t =
+  wr16 t Dos_ports.bda_page_size (page_size_of t);
+  wr16 t Dos_ports.bda_page_start 0;
+  wr8 t Dos_ports.bda_active_page 0;
+  for page = 0 to Dos_ports.page_count - 1 do wr16 t (cursor_slot page) 0 done
+
+let get_cursor_on t ~page =
+  if page < Dos_ports.page_count then (rd8 t (cursor_slot page), rd8 t (cursor_slot page + 1))
+  else (0, 0)
+
+let set_cursor_on t ~page col row =
+  if page < Dos_ports.page_count then begin
+    let w = cols t in
+    let col = max 0 (min (w - 1) col) and row = max 0 (min (rows t - 1) row) in
+    wr8 t (cursor_slot page) col;
+    wr8 t (cursor_slot page + 1) row;
+    if page = active_page t then begin
+      let linear = page_offset t ~page row col / 2 in
+      Dos_ports.port_out t.ports 0x3D4 0x0E;
+      Dos_ports.port_out t.ports 0x3D5 (linear lsr 8);
+      Dos_ports.port_out t.ports 0x3D4 0x0F;
+      Dos_ports.port_out t.ports 0x3D5 (linear land 0xff)
+    end
+  end
+
+(* INT 10h AH=05h — 보이는 쪽 바꾸기(SeaBIOS vgabios.c set_active_page).
+   CRTC 시작 주소를 그 쪽 처음으로 옮기고, BDA 에 쪽 번호와 시작 오프셋을
+   적고, 그 쪽의 커서를 CRTC 에 쓴다. 0-7 밖이면 아무것도 하지 않는다. *)
+let select_page t page =
+  if page < Dos_ports.page_count then begin
+    let off = page_offset t ~page 0 0 in
+    let start = off * display_ratio (Dos_video.kind t.video) / display_ratio_unit in
+    Dos_ports.port_out t.ports 0x3D4 0x0C;
+    Dos_ports.port_out t.ports 0x3D5 ((start lsr 8) land 0xff);
+    Dos_ports.port_out t.ports 0x3D4 0x0D;
+    Dos_ports.port_out t.ports 0x3D5 (start land 0xff);
+    wr16 t Dos_ports.bda_page_start off;
+    wr8 t Dos_ports.bda_active_page page;
+    let col, row = get_cursor_on t ~page in
+    set_cursor_on t ~page col row
+  end
+
+(* 쪽을 말하지 않는 길(teletype, INT 21h 출력, AH=06h/07h)은 보이는 쪽을 쓴다. *)
+let get_cursor t = get_cursor_on t ~page:(active_page t)   (* (열, 행) *)
+let set_cursor t col row = set_cursor_on t ~page:(active_page t) col row
+
+let cell_addr t ~page r c = vram_base + page_offset t ~page r c
+let read_cell_on t ~page r c = rd16 t (cell_addr t ~page r c)
+let write_cell_on t ~page r c v = wr16 t (cell_addr t ~page r c) v
+let read_cell t r c = read_cell_on t ~page:(active_page t) r c
+let write_cell t r c v = write_cell_on t ~page:(active_page t) r c v
 
 (* ---------- 그래픽 모드의 글자 ----------
 
@@ -506,27 +631,33 @@ let write_glyph t ~col ~row ch ~fg ~bg =
 
 (* 창 스크롤 — INT 10h AH=06/07 과 teletype 의 줄 넘침이 함께 쓴다.
    [lines]=0 은 창 전체를 지운다. 그래픽 모드에서 [attr] 는 빈 행을 채울
-   색이다. *)
-let scroll_window t ~up ~lines ~top ~left ~bottom ~right ~attr =
+   색이다. 텍스트 모드에서는 창의 아래·오른쪽 끝을 화면 안으로
+   자른다(SeaBIOS vgabios.c verify_scroll). 자르지 않으면 다음 쪽을
+   덮는다. *)
+let scroll_window_on t ~page ~up ~lines ~top ~left ~bottom ~right ~attr =
   if graphics t then
     Dos_gtext.scroll t.video ~up ~lines ~top ~left ~bottom ~right ~fill:attr
   else
+  let bottom = min bottom (rows t - 1) and right = min right (cols t - 1) in
   let blank = (attr lsl 8) lor 0x20 in
   let lines = if lines = 0 then bottom - top + 1 else lines in
+  let read r c = read_cell_on t ~page r c and write r c v = write_cell_on t ~page r c v in
   if up then
     for r = top to bottom do
       for c = left to right do
         let src = r + lines in
-        write_cell t r c (if src > bottom then blank else read_cell t src c)
+        write r c (if src > bottom then blank else read src c)
       done
     done
   else
     for r = bottom downto top do
       for c = left to right do
         let src = r - lines in
-        write_cell t r c (if src < top then blank else read_cell t src c)
+        write r c (if src < top then blank else read src c)
       done
     done
+
+let scroll_window t = scroll_window_on t ~page:(active_page t)
 
 (* 글자를 찍는 두 길. AH=13h 는 텍스트 모드에서도 속성을 쓴다
    ([Attribute]). teletype(AH=0Eh)과 DOS 출력은 텍스트 모드에서 글자만
@@ -537,18 +668,20 @@ type ink = Attribute of int | Teletype of int
 
 (* 텍스트 모드에서 칸의 속성을 두고 글자만 바꾼다. 그래픽 모드는 [color]
    로 그린다. *)
-let write_char_only t ~col ~row ch ~color =
+let write_char_only t ~page ~col ~row ch ~color =
   if graphics t then
     write_glyph t ~col ~row ch ~fg:color ~bg:(glyph_background t ~fg:color ~back256:0)
-  else write_cell t row col ((read_cell t row col land 0xFF00) lor (ch land 0xff))
+  else
+    write_cell_on t ~page row col
+      ((read_cell_on t ~page row col land 0xFF00) lor (ch land 0xff))
 
-(* 글자 하나 찍기. 마지막 줄을 넘으면 화면을 한 줄 올린다. 넘침을
+(* 글자 하나 찍기. 마지막 줄을 넘으면 그 쪽을 한 줄 올린다. 넘침을
    클램프로 막으면 글자가 마지막 칸에 계속 덮어써져 출력이 통째로
    사라진다. 새 줄은 그래픽 모드면 검정, 텍스트 모드면 이 글자를 찍기 전
    커서 칸의 속성으로 채운다(DOSBox teletype_output_attr 이 AH=08h 로
-   읽어 쓰는 값). *)
-let output_char t ch ink =
-  let col0, row0 = get_cursor t in
+   읽어 쓰는 값). 그래픽 모드의 글자는 쪽과 상관없이 보이는 화면에 찍는다. *)
+let output_char_on t ~page ch ink =
+  let col0, row0 = get_cursor_on t ~page in
   let col = ref col0 and row = ref row0 in
   (match ch with
    | 0x0D -> col := 0
@@ -558,24 +691,25 @@ let output_char t ch ink =
    | 0x07 -> ()                       (* 벨 — 소리는 내지 않는다 *)
    | _ ->
      (match ink with
-      | Teletype color -> write_char_only t ~col:!col ~row:!row ch ~color
+      | Teletype color -> write_char_only t ~page ~col:!col ~row:!row ch ~color
       | Attribute attr ->
         if graphics t then
           write_glyph t ~col:!col ~row:!row ch ~fg:attr
             ~bg:(glyph_background t ~fg:attr ~back256:0)
-        else write_cell t !row !col ((attr lsl 8) lor (ch land 0xff)));
+        else write_cell_on t ~page !row !col ((attr lsl 8) lor (ch land 0xff)));
      incr col;
      if !col >= cols t then begin col := 0; incr row end);
   if !row >= rows t then begin
-    let fill = if graphics t then 0 else read_cell t row0 col0 lsr 8 in
-    scroll_window t ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows t - 1)
+    let fill = if graphics t then 0 else read_cell_on t ~page row0 col0 lsr 8 in
+    scroll_window_on t ~page ~up:true ~lines:1 ~top:0 ~left:0 ~bottom:(rows t - 1)
       ~right:(cols t - 1) ~attr:fill;
     row := rows t - 1
   end;
-  set_cursor t !col !row
+  set_cursor_on t ~page !col !row
 
-let put_char t ch attr = output_char t ch (Attribute attr)
-let teletype t ch color = output_char t ch (Teletype color)
+let put_char_on t ~page ch attr = output_char_on t ~page ch (Attribute attr)
+let put_char t ch attr = put_char_on t ~page:(active_page t) ch attr
+let teletype t ch color = output_char_on t ~page:(active_page t) ch (Teletype color)
 
 let put_string t s attr = String.iter (fun c -> put_char t (Char.code c) attr) s
 

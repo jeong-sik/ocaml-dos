@@ -15,13 +15,15 @@ open Dos_state
    조용히 무시된다(실측: TSR 의 INT 27h). 두 목록이 따로 있을 때 11h·
    12h·1Ah 가 스텁 목록에서 빠져 한 번도 불리지 않았다. *)
 type bios_service =
-  | Keyboard_irq | Video | Equipment | Memory_size | System | Keyboard | Time_of_day | Mouse
+  | Keyboard_irq | Rtc_irq | Video | Equipment | Memory_size | System | Keyboard | Time_of_day
+  | Mouse
 type host_vector =
   | Bios of bios_service
   | Dos_divide_overflow
   | Dos_terminate
   | Dos_call
   | Dos_keep
+  | Multiplex   (* INT 2Fh: XMS 가 43h 로 답한다 *)
   | Ems
 
 let host_vector = function
@@ -36,17 +38,21 @@ let host_vector = function
   | 0x20 -> Some Dos_terminate
   | 0x21 -> Some Dos_call
   | 0x27 -> Some Dos_keep
+  | 0x2F -> Some Multiplex
   | 0x33 -> Some (Bios Mouse)
   | 0x67 -> Some Ems
+  | 0x70 -> Some (Bios Rtc_irq)
   | _ -> None
 
 (* ROM 안의 자리 배치. EMM 디바이스 헤더는 0(이름 칸이 세그먼트+0x0A
    라는 관례 때문에 0 번지여야 한다), INT 8 루틴은 0x40, IRET 스텁은
-   0x20, 호스트 서빙 벡터의 되돌림 스텁은 0x100 부터 16바이트씩. *)
+   0x20, 하드웨어 IRQ 기본 루틴은 0x30, 호스트 서빙 벡터의 되돌림 스텁은
+   0x100 부터 16바이트씩. *)
 let rom_seg = 0xF000
 let timer_vector = 0x08
 let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
+let hw_irq_off = 0x0030
 let bios_int8_off = 0x0040
 let stub_area = 0x0100
 let stub_stride = 16
@@ -57,9 +63,9 @@ let rom_font_off = 0xFA6E
    (FFh)를 가린다. *)
 let model_byte_off = 0xFFFE
 let at_model_byte = 0xFC
-(* INT 21h AH=38h 표가 가리키는 대문자 루틴(Dos_country). 스텁 자리
-   (0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
-let case_map_off = 0x0400
+(* 나라별 표(Dos_country): 대문자 루틴과 INT 21h AH=38h·63h·65h 가
+   가리키는 표들. 스텁 자리(0x100 부터 16 바이트씩) 위의 빈 곳이다. *)
+let country_off = 0x0400
 let rom_font_first = 0x20
 let rom_font_last = 0x7E
 
@@ -78,6 +84,24 @@ let alt_font_off = 0xD000
 
 (* 호스트 구현으로 되돌리는 사설 벡터 번호 — 실벡터 + 0x80. *)
 let private_vector v = v + 0x80
+
+let country, country_rom = Dos_country.image ~segment:rom_seg ~at:country_off
+
+(* The XMS control function (Dos_xms), far-called at F000:[xms_entry_off]
+   after INT 2Fh AX=4310h. XMS 3.0 "IMPLEMENTATION NOTES" ask it to start
+   with a short jump over three NOPs: a hooking program patches a far
+   jump over those five bytes and chains to entry + 5. Its service id is
+   43h, the multiplex number XMS answers to. It names the stub in
+   [stubs] and picks the private vector; IVT[43h] is left alone (it is
+   the graphics font pointer). *)
+let xms_control_id = 0x43
+let xms_hook_bytes = 5
+
+let xms_control =
+  "\xeb\x03\x90\x90\x90"                (* jmp short +3; nop; nop; nop *)
+  ^ "\xcd" ^ String.make 1 (Char.chr (private_vector xms_control_id))
+                                     (* int 0C3h — the host serves it *)
+  ^ "\xcb"                            (* retf *)
 
 let set_ivt t v off sg =
   wr16 t (v * 4) off;
@@ -123,6 +147,49 @@ let bios_int8 =
   ^ "\xcd\x1c"                      (* hook: int 1Ch — 사용자 틱 훅 *)
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
   ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
+
+(* IRQ0-7 의 벡터(08h-0Fh). 쓰는 장치가 없는 줄의 기본 루틴은 EOI 를
+   보내고 IRET 한다 — SeaBIOS post.c 가 08h-0Fh 를 entry_hwpic1 로 채우고,
+   handle_hwpic1 은 pic_eoi1(20h 를 포트 20h 로)만 한다. IMR 은 건드리지
+   않는다. IRET 스텁이면 프로그램이 벡터를 걸기 전에 들어온 IRQ 가 ISR
+   비트를 남겨, 그 줄이 다시 들어오지 않는다(#110). *)
+let hw_irq_first_vector = 0x08
+let hw_irq_lines = 8
+
+let hw_irq_default =
+  "\x50"                            (* push ax *)
+  ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
+  ^ "\x58\xcf"                      (* pop ax; iret *)
+
+let is_hw_irq_vector v = v >= hw_irq_first_vector && v < hw_irq_first_vector + hw_irq_lines
+
+(* IRQ8-15 의 벡터(70h-77h). 두 번째 8259 의 줄이라 처리기는 두 칩 모두에
+   EOI 를 보낸다, 두 번째 칩 먼저(SeaBIOS src/hw/pic.h pic_eoi2,
+   28aa46349b97). 쓰는 장치가 없는 줄의 기본 루틴은 그것만 한다(SeaBIOS
+   handle_hwpic2). *)
+let slave_irq_first_vector = Dos_pic.vector Dos_pic.Rtc
+let is_slave_irq_vector v =
+  v >= slave_irq_first_vector && v < slave_irq_first_vector + hw_irq_lines
+
+let slave_eoi =
+  "\xb0\x20\xe6\xa0"              (* mov al,20h; out 0A0h,al (두 번째 칩 EOI) *)
+  ^ "\xe6\x20"                      (* out 20h,al (첫 칩 EOI) *)
+
+let hw_irq2_default = "\x50" ^ slave_eoi ^ "\x58\xcf"   (* push ax ... pop ax; iret *)
+
+
+(* The XMS control function goes on the first paragraph after the INT 8
+   routine, so a longer routine moves it instead of being overwritten. *)
+let paragraph = 16
+let xms_entry_off =
+  (bios_int8_off + String.length bios_int8 + paragraph - 1) / paragraph * paragraph
+
+let next_paragraph off = (off + paragraph - 1) / paragraph * paragraph
+
+(* IRQ9-15 루틴은 XMS 진입점 뒤 문단, 스텁 영역(0100h) 앞에 둔다. IRQ8 은
+   호스트가 받는다(INT 70h, [rtc_irq]). *)
+let hw_irq2_off = next_paragraph (xms_entry_off + String.length xms_control)
+let () = assert (hw_irq2_off + String.length hw_irq2_default <= stub_area)
 
 (* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
    3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
@@ -253,8 +320,18 @@ let install t =
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
   wr8 t ((rom_seg * 16) + model_byte_off) at_model_byte;
   String.iteri
-    (fun i c -> wr8 t ((rom_seg * 16) + case_map_off + i) (Char.code c))
-    (Dos_country.case_map_code ~at:case_map_off);
+    (fun i c -> wr8 t ((rom_seg * 16) + country_off + i) (Char.code c))
+    country_rom;
+  Bytes.blit_string xms_control 0 t.mem
+    ((rom_seg * 16) + xms_entry_off)
+    (String.length xms_control);
+  t.stubs <- (xms_control_id, xms_entry_off + xms_hook_bytes) :: t.stubs;
+  Bytes.blit_string hw_irq_default 0 t.mem
+    ((rom_seg * 16) + hw_irq_off)
+    (String.length hw_irq_default);
+  Bytes.blit_string hw_irq2_default 0 t.mem
+    ((rom_seg * 16) + hw_irq2_off)
+    (String.length hw_irq2_default);
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* POST 는 부팅 모드를 세우며 화면을 지운다: 공백, 속성 07h. 이게
      없으면 화면 메모리가 0(검정 위 검정)이라, 칸의 속성을 두는 teletype
@@ -264,7 +341,7 @@ let install t =
      [0x40:0x63](CRTC 베이스) + 6 으로 계산한다: 0 이면 포트 6 을 읽어
      영원히 갇힌다(실측). 컬러 80x25 텍스트 기준. *)
   wr16 t 0x410 equipment_word;
-  wr16 t 0x413 640;                 (* 기억용량 KB *)
+  wr16 t 0x413 Dos_cmos.base_memory_kb;  (* 기억용량 KB — CMOS 15h·16h 와 같다 *)
   set_ticks_from_clock t;
   wr8 t 0x417 0;                    (* 시프트 상태 *)
   wr8 t 0x418 0;
@@ -302,7 +379,7 @@ let install t =
     | Some Ems ->
       set_ivt t v emm_entry_off rom_seg;
       t.stubs <- (v, emm_entry_off) :: t.stubs
-    | Some (Bios _ | Dos_divide_overflow | Dos_terminate | Dos_call | Dos_keep) ->
+    | Some (Bios _ | Dos_divide_overflow | Dos_terminate | Dos_call | Dos_keep | Multiplex) ->
       let a = (rom_seg * 16) + !off in
       wr8 t a 0xCD;
       wr8 t (a + 1) (private_vector v);
@@ -310,7 +387,14 @@ let install t =
       set_ivt t v !off rom_seg;
       t.stubs <- (v, !off) :: t.stubs;
       off := !off + stub_stride
-    | None -> if v <> timer_vector then set_ivt t v iret_stub_off rom_seg
+    | None ->
+      (* 쓰는 장치가 없는 하드웨어 IRQ 줄은 EOI 루틴, 그 밖은 IRET 스텁 *)
+      if v <> timer_vector then
+        set_ivt t v
+          (if is_hw_irq_vector v then hw_irq_off
+           else if is_slave_irq_vector v then hw_irq2_off
+           else iret_stub_off)
+          rom_seg
   done;
   (* IBM PC BIOS(5150)는 8x8 글꼴 표를 F000:FA6E 에 둔다. 그래픽 모드에서
      글자를 직접 찍는 프로그램이 BIOS 를 안 거치고 이 표를 읽는다 —
@@ -350,6 +434,9 @@ let ivt_is_own_stub t v =
       && rd16 t (v * 4) = soff
       && rd16 t ((v * 4) + 2) = rom_seg)
     t.stubs
+
+let ivt_is_iret_stub t v =
+  rd16 t (v * 4) = iret_stub_off && rd16 t ((v * 4) + 2) = rom_seg
 
 let private_service_vector t raw =
   List.find_map
@@ -498,6 +585,10 @@ let video t =
   | 0x00 ->
     (* AL 의 최상위 비트는 "화면을 지우지 말라" 는 뜻이다. *)
     let mode = al land 0x7f in
+    (* 마우스 드라이버는 모드를 세우기 전에 커서를 숨긴다(CuteMouse
+       int10handler 가 INT 33h 02h 를 부른다). 화면을 지우지 않는 모드
+       세우기라도 커서 자국이 남지 않는다. *)
+    Dos_mouse_cursor.restore t;
     Dos_video.set_mode t.video mode ~clear:(al land 0x80 = 0);
     modeset_bda t ~screen_kept:(al land 0x80 <> 0);
     (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
@@ -511,6 +602,7 @@ let video t =
     end;
     wr8 t 0x449 mode;
     wr16 t 0x44A (cols t);
+    reset_pages t;
     wr8 t 0x484 (rows t - 1);
     wr16 t 0x485 (Dos_video.char_height t.video);
     set_font_vector t;
@@ -528,22 +620,23 @@ let video t =
     Dos_ports.port_out t.ports 0x3D5 (Cpu86.reg8 cpu 5);
     Dos_ports.port_out t.ports 0x3D4 0x0B;
     Dos_ports.port_out t.ports 0x3D5 (Cpu86.reg8 cpu 1)
-  | 0x02 -> set_cursor t (Cpu86.reg8 cpu 2) (Cpu86.reg8 cpu 6)
+  | 0x02 -> set_cursor_on t ~page:(Cpu86.reg8 cpu 7) (Cpu86.reg8 cpu 2) (Cpu86.reg8 cpu 6)
   | 0x03 ->
-    let col, row = get_cursor t in
+    let col, row = get_cursor_on t ~page:(Cpu86.reg8 cpu 7) in
     Cpu86.set_reg8 cpu 2 col;
     Cpu86.set_reg8 cpu 6 row;
     Cpu86.set_reg8 cpu 5 (rd8 t 0x461);
     Cpu86.set_reg8 cpu 1 (rd8 t 0x460)
-  | 0x05 -> wr8 t 0x462 al
+  | 0x05 -> select_page t al
   | 0x06 | 0x07 ->
     scroll_window t ~up:(ah = 0x06) ~lines:al
       ~top:(Cpu86.reg8 cpu 5) ~left:(Cpu86.reg8 cpu 1)
       ~bottom:(Cpu86.reg8 cpu 6) ~right:(Cpu86.reg8 cpu 2)
       ~attr:(Cpu86.reg8 cpu 7)
   | 0x08 ->
-    let col, row = get_cursor t in
-    Cpu86.set_reg16 cpu 0 (read_cell t row col)
+    let page = Cpu86.reg8 cpu 7 in
+    let col, row = get_cursor_on t ~page in
+    Cpu86.set_reg16 cpu 0 (read_cell_on t ~page row col)
   | (0x09 | 0x0A) when graphics t ->
     (* 그래픽 모드: 글꼴 표의 점을 CX 번 찍는다. AH=09h 는 BL 이 색이고
        bit7 이면 XOR 이다. AH=0Ah 는 모드의 기본색을 쓴다. 256색 모드의
@@ -560,18 +653,19 @@ let video t =
       end
     done
   | 0x09 | 0x0A ->
-    (* 커서 자리에 같은 글자를 CX 번. 커서는 움직이지 않는다.
+    (* BH 쪽의 커서 자리에 같은 글자를 CX 번. 커서는 움직이지 않는다.
        AH=09 는 BL 을 속성으로 쓰고, AH=0A 는 화면의 속성을 남긴다. *)
-    let col, row = get_cursor t in
+    let page = Cpu86.reg8 cpu 7 in
+    let col, row = get_cursor_on t ~page in
     let n = max 1 (Cpu86.reg16 cpu 1) in
     let r = ref row and c = ref col in
     for _ = 1 to n do
       if !r < rows t then begin
         let attr =
           if ah = 0x09 then Cpu86.reg8 cpu 3
-          else (read_cell t !r !c) lsr 8
+          else (read_cell_on t ~page !r !c) lsr 8
         in
-        write_cell t !r !c ((attr lsl 8) lor al);
+        write_cell_on t ~page !r !c ((attr lsl 8) lor al);
         incr c;
         if !c >= cols t then begin c := 0; incr r end
       end
@@ -581,7 +675,7 @@ let video t =
        전체다(256색 모드면 0~255). *)
     teletype t al (Cpu86.reg8 cpu 3)
   | 0x0C ->
-    (* 점 찍기: AL=색, CX=x, DX=y. BH 페이지는 한 장뿐이라 무시한다. *)
+    (* 점 찍기: AL=색, CX=x, DX=y. BH(쪽)는 무시하고 늘 0 쪽에 찍는다. *)
     Dos_video.put_pixel t.video ~x:(Cpu86.reg16 cpu 1) ~y:(Cpu86.reg16 cpu 2)
       ~color:al
   | 0x0D ->
@@ -741,14 +835,15 @@ let video t =
     let n = Cpu86.reg16 cpu 1 in
     let attr = Cpu86.reg8 cpu 3 in
     let col0 = Cpu86.reg8 cpu 2 and row0 = Cpu86.reg8 cpu 6 in
-    let saved = get_cursor t in
-    set_cursor t col0 row0;
+    let page = Cpu86.reg8 cpu 7 in
+    let saved = get_cursor_on t ~page in
+    set_cursor_on t ~page col0 row0;
     for i = 0 to n - 1 do
       if al land 0x02 <> 0 then
-        put_char t (rd8 t (src + (i * 2))) (rd8 t (src + (i * 2) + 1))
-      else put_char t (rd8 t (src + i)) attr
+        put_char_on t ~page (rd8 t (src + (i * 2))) (rd8 t (src + (i * 2) + 1))
+      else put_char_on t ~page (rd8 t (src + i)) attr
     done;
-    if al land 0x01 = 0 then set_cursor t (fst saved) (snd saved)
+    if al land 0x01 = 0 then set_cursor_on t ~page (fst saved) (snd saved)
   | 0x1A ->
     (* 디스플레이 조합 코드: BL = 지금 화면, BH = 다른 화면(00h = 없음) *)
     Cpu86.set_reg8 cpu 0 0x1A;
@@ -768,7 +863,7 @@ let video t =
      | 0x01 ->
        set ((old land lnot cga_palette_bit) lor (if bl land 1 = 0 then 0 else cga_palette_bit))
      | _ -> ())
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x10
 
 (* ---------- INT 16h 키보드 ---------- *)
 
@@ -807,7 +902,7 @@ let keyboard t =
     ring_push t (Cpu86.reg16 cpu 1);
     Cpu86.set_reg8 cpu 0 (if ring_tail t = before then 1 else 0)
   | 0x03 -> ()                      (* 타이프매틱 속도 — 모델 밖 *)
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x16
 
 (* ---------- INT 9 키보드 IRQ ---------- *)
 
@@ -870,7 +965,7 @@ let clock t =
     Cpu86.set_reg8 cpu 6 (to_bcd m);
     Cpu86.set_reg8 cpu 2 (to_bcd d);
     set_cf t false
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x1A
 
 (* ---------- INT 33h 마우스 ---------- *)
 
@@ -902,6 +997,7 @@ let double_speed_of dx = if dx = 0 then default_motion.double_speed else dx
    지우는 칸(ClearArea3)에 들고, DOSBox-X Mouse_Reset 도 지운다. *)
 let reset_mouse_driver t =
   let m = t.mouse in
+  Dos_mouse_cursor.restore t;
   m.mouse_cursor_flag <- cursor_flag_after_reset;
   m.mouse_graphics_cursor <- Default_arrow;
   m.mouse_text_cursor <- default_text_cursor;
@@ -946,8 +1042,11 @@ let mouse t =
   | 0x01 ->
     (* 깃발을 하나 올리되 0 에서 멈춘다. 02h 를 n 번 불렀으면 01h 도 n 번
        불러야 보인다(RBIL INT 33/0002, DOSBox-X mouse.cpp). *)
-    if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1
-  | 0x02 -> m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
+    if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1;
+    Dos_mouse_cursor.draw t
+  | 0x02 ->
+    Dos_mouse_cursor.restore t;
+    m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
   | 0x03 ->
     let space = Dos_mouse_space.current t.mem in
     Cpu86.set_reg16 cpu 1 (Dos_mouse_space.cell_x space m.mouse_x);
@@ -956,7 +1055,8 @@ let mouse t =
   | 0x04 ->
     m.mouse_x <- clamp_to m.mouse_range_x (Cpu86.reg16 cpu 1);
     m.mouse_y <- clamp_to m.mouse_range_y (Cpu86.reg16 cpu 2);
-    clear_mickey_carry m
+    clear_mickey_carry m;
+    Dos_mouse_cursor.draw t
   | 0x0F ->
     (* DEFINE MICKEY/PIXEL RATIO: CX·DX 는 8 화소당 미키. 하나라도 0 이면
        무시한다(CuteMouse sensitivity_0F, DOSBox-X Mouse_SetMickeyPixelRate). *)
@@ -1043,16 +1143,18 @@ let mouse t =
       Custom_cursor
         { hot_x = Cpu86.reg16 cpu 3; hot_y = Cpu86.reg16 cpu 1;
           screen_mask = Array.init cursor_rows row;
-          cursor_mask = Array.init cursor_rows (fun k -> row (cursor_rows + k)) }
+          cursor_mask = Array.init cursor_rows (fun k -> row (cursor_rows + k)) };
+    Dos_mouse_cursor.draw t
   | 0x0A ->
     (* 텍스트 커서: BX=0 이면 CX·DX 가 마스크, 아니면 스캔 줄이다. RBIL 은
-       BX 0·1 만 적는다. 그 밖의 값은 DOSBox-X 처럼 하드웨어로 본다. CRTC 의
-       커서 모양은 바꾸지 않는다 — 마우스 커서를 그리는 곳이 아직 없다. *)
+       BX 0·1 만 적는다. 그 밖의 값은 DOSBox-X 처럼 하드웨어로 본다. 하드웨어
+       커서는 그리지 않는다(Dos_mouse_cursor). *)
     let cx = Cpu86.reg16 cpu 1 and dx = Cpu86.reg16 cpu 2 in
     m.mouse_text_cursor <-
       (match Cpu86.reg16 cpu 3 with
        | 0 -> Software_text { screen_mask = cx; cursor_mask = dx }
-       | _ -> Hardware_text { first_line = cx; last_line = dx })
+       | _ -> Hardware_text { first_line = cx; last_line = dx });
+    Dos_mouse_cursor.draw t
   | 0x2A ->
     (* GET CURSOR HOT SPOT(RBIL INT 33/002A): AX 깃발, BX·CX 핫스폿, DX 종류.
        RBIL 은 깃발을 AX 로 적는다. DOSBox-X 는 AL 만 쓴다. *)
@@ -1095,7 +1197,7 @@ let mouse t =
     Cpu86.set_reg16 cpu 1 old_mask;
     Cpu86.set_seg cpu 0 old_seg;
     Cpu86.set_reg16 cpu 2 old_off
-  | _ -> ()
+  | _ -> report_unserved t No_function ~vector:0x33
 
 (* ---------- 묶음 ---------- *)
 
@@ -1108,17 +1210,144 @@ let mouse t =
 let extended_memory_kb = 0
 let unsupported_function = 0x86
 
+(* ---------- RTC 기다리기: INT 15h 83h·86h 와 INT 70h ----------
+
+   SeaBIOS src/clock.c(28aa46349b97)의 set_usertimer·clear_usertimer·
+   handle_1583·handle_1586·handle_70 을 따른다. 기다리기는 BDA 에 산다
+   (SeaBIOS src/std/bda.h): 40:98h 끝 깃발의 주소(오프셋, 세그먼트),
+   40:9Ch 남은 µs(dword), 40:A0h 대기 깃발(bit 0 대기 중). RTC 의 주기
+   인터럽트(IRQ8)마다 INT 70h 가 남은 시간을 977µs 씩 줄이고, 977µs 보다
+   적게 남았으면 끝 깃발 바이트의 bit 7 을 세우고 대기를 지운다.
+   기다리는 동안만 레지스터 B 의 PIE 를 켠다(SeaBIOS rtc_use·rtc_release.
+   그 사용자 수는 이 기다리기 하나뿐이라 세지 않는다). 알람(AIE, INT 4Ah)은
+   CMOS 가 AF 를 세우지 않아 오지 않는다.
+
+   AH=86h 는 SeaBIOS 가 자기 스택의 바이트를 끝 깃발로 쓴다. 게스트가 볼 수
+   있는 자리가 필요해서 DOSBox-staging src/ints/bios.h(a1b4dbbd8bbe)의
+   BIOS_WAIT_FLAG_TEMP, 40:A1h 를 쓴다. DOSBox 는 한 틱에 997µs 를 빼지만
+   여기는 SeaBIOS 의 977µs(1000000/1024 반올림)다. *)
+let bda_wait_flag_ptr = 0x498
+let bda_wait_timeout = 0x49C
+let bda_rtc_wait_flag = 0x4A0
+let bda_wait_temp = 0x4A1
+let rws_wait_pending = 0x01
+let wait_elapsed = 0x80
+let usec_per_rtc = 977
+let rtc_wait_function = 0x86
+let clock_in_use = 0x83           (* SeaBIOS RET_ECLOCKINUSE *)
+let set_interval = 0x00
+let cancel_interval = 0x01
+
+let cmos_index = 0x70
+let cmos_data = 0x71
+let cmos_status_b = 0x0B
+let cmos_status_c = 0x0C
+let rtc_b_pie = 0x40
+let rtc_b_aie = 0x20
+let rtc_c_pf = 0x40
+let eoi_command = 0x20
+
+let rd32 t a = rd16 t a lor (rd16 t (a + 2) lsl 16)
+let wr32 t a v = wr16 t a (v land 0xFFFF); wr16 t (a + 2) ((v lsr 16) land 0xFFFF)
+
+(* 포트로 읽고 쓴다 — 게스트의 IN·OUT 과 같은 길이라 IRQ8 줄도 따라간다. *)
+let cmos_read t reg =
+  Dos_ports.port_out t.ports cmos_index reg;
+  Dos_ports.port_in t.ports cmos_data
+
+let cmos_mask t reg ~off ~on =
+  let v = cmos_read t reg in
+  Dos_ports.port_out t.ports cmos_data ((v land lnot off) lor on)
+
+let wait_pending t = rd8 t bda_rtc_wait_flag land rws_wait_pending <> 0
+
+let set_usertimer t ~usecs ~seg ~off =
+  if wait_pending t then false
+  else begin
+    wr8 t bda_rtc_wait_flag rws_wait_pending;
+    wr16 t bda_wait_flag_ptr off;
+    wr16 t (bda_wait_flag_ptr + 2) seg;
+    wr32 t bda_wait_timeout usecs;
+    cmos_mask t cmos_status_b ~off:0 ~on:rtc_b_pie;
+    true
+  end
+
+let clear_usertimer t =
+  if wait_pending t then begin
+    wr8 t bda_rtc_wait_flag 0;
+    cmos_mask t cmos_status_b ~off:rtc_b_pie ~on:0
+  end
+
+let interval t = (Cpu86.reg16 t.cpu 1 lsl 16) lor Cpu86.reg16 t.cpu 2
+
+(* AH=83h: AL=00h 은 ES:BX 의 바이트를 끝 깃발로 걸고 바로 돌아온다,
+   AL=01h 은 건 것을 지운다. 그 밖의 AL 은 SeaBIOS handle_1583XX 처럼
+   AH=86h·CF 에 AL 을 하나 줄인다. *)
+let event_wait t =
+  let cpu = t.cpu in
+  match Cpu86.reg8 cpu 0 with
+  | al when al = set_interval ->
+    if set_usertimer t ~usecs:(interval t) ~seg:(Cpu86.seg cpu 0) ~off:(Cpu86.reg16 cpu 3)
+    then set_cf t false
+    else begin Cpu86.set_reg8 cpu 4 unsupported_function; set_cf t true end
+  | al when al = cancel_interval -> clear_usertimer t; set_cf t false
+  | al ->
+    Cpu86.set_reg8 cpu 4 unsupported_function;
+    set_cf t true;
+    Cpu86.set_reg8 cpu 0 ((al - 1) land 0xFF)
+
+let resume_wait t =
+  if rd8 t bda_wait_temp land wait_elapsed <> 0 then begin
+    set_cf t false;
+    Completed
+  end
+  else Awaiting_input Bios_wait
+
+(* AH=86h: CX:DX µs 를 기다린다. 기다리는 동안 IRQ 가 들어온다. *)
+let rtc_wait t =
+  wr8 t bda_wait_temp 0;
+  if set_usertimer t ~usecs:(interval t) ~seg:0 ~off:bda_wait_temp then resume_wait t
+  else begin
+    Cpu86.set_reg8 t.cpu 4 clock_in_use;
+    set_cf t true;
+    Completed
+  end
+
+(* INT 70h. 레지스터 C 를 읽으면 깃발이 지워지고 IRQ8 이 내려간다. *)
+let rtc_irq t =
+  let b = cmos_read t cmos_status_b in
+  let c = cmos_read t cmos_status_c in
+  if b land (rtc_b_pie lor rtc_b_aie) <> 0 && c land rtc_c_pf <> 0 && wait_pending t then begin
+    let left = rd32 t bda_wait_timeout in
+    if left < usec_per_rtc then begin
+      let a = (rd16 t (bda_wait_flag_ptr + 2) * 16) + rd16 t bda_wait_flag_ptr in
+      wr8 t a (rd8 t a lor wait_elapsed);
+      clear_usertimer t
+    end
+    else wr32 t bda_wait_timeout (left - usec_per_rtc)
+  end;
+  let pic = Dos_ports.pic t.ports in
+  Dos_pic.write_command pic Dos_pic.Slave eoi_command;
+  Dos_pic.write_command pic Dos_pic.Master eoi_command
+
 let system t =
   let cpu = t.cpu in
   match Cpu86.reg8 cpu 4 with
   | 0x88 -> Cpu86.set_reg16 cpu 0 extended_memory_kb; set_cf t false
   | 0x4F -> set_cf t true (* 키보드 가로채기: 그 스캔 코드를 그대로 쓰라 *)
   | 0x90 | 0x91 -> () (* 장치 바쁨·끝남 알림: SeaBIOS 도 아무것도 안 한다 *)
-  | _ -> Cpu86.set_reg8 cpu 4 unsupported_function; set_cf t true
+  | 0x83 -> event_wait t
+  | _ ->
+    (* 집계는 AX 가 바뀌기 전에 올린다 *)
+    report_unserved t No_function ~vector:0x15;
+    Cpu86.set_reg8 cpu 4 unsupported_function;
+    set_cf t true
 
 let service t s =
   match s with
   | Keyboard_irq -> keyboard_irq t; Completed
+  | Rtc_irq -> rtc_irq t; Completed
+  | System when Cpu86.reg8 t.cpu 4 = rtc_wait_function -> rtc_wait t
   | Keyboard when Cpu86.reg8 t.cpu 4 = 0x00 || Cpu86.reg8 t.cpu 4 = 0x10 -> read_key t
   | Keyboard -> keyboard t; Completed
   | Video -> video t; Completed
@@ -1127,5 +1356,3 @@ let service t s =
   | Time_of_day -> clock t; Completed
   | System -> system t; Completed
   | Mouse -> mouse t; Completed
-
-let case_map_entry = (rom_seg, case_map_off)

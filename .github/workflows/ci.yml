@@ -6,9 +6,13 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to a PR replaces its old run. Each push to main gets a group
+# of its own: a group holds one running and one pending run, and a push
+# whose event arrives late would otherwise cancel or replace the run of a
+# newer merge commit (#169).
 concurrency:
-  group: core-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: core-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   test:
     strategy:
