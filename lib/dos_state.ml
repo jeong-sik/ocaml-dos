@@ -185,7 +185,10 @@ type dos_input_request =
   | Read_buffered_line of { base : int; capacity : int; line : line_input }
   | Read_console_line of { destination : int; length : int; line : line_input }
 
-type input_request = Bios_key | Dos_input of dos_input_request
+(* 멈춘 BIOS·DOS 서비스가 기다리는 것. [Bios_wait] 은 입력이 아니라 INT 15h
+   AH=86h 가 RTC 의 끝 깃발(40:A1h bit 7)을 기다리는 것이다 — 기다리는 동안
+   IRQ 가 들어오는 길이 같아서 여기에 있다. *)
+type input_request = Bios_key | Bios_wait | Dos_input of dos_input_request
 
 type service_result = Completed | Control_transferred | Awaiting_input of input_request
 
@@ -365,7 +368,7 @@ let enter_call t =
 let set_input_continuations t waits =
   t.input_continuations <- waits;
   let in_dos = List.length (List.filter (fun w ->
-      match w.request with Dos_input _ -> true | Bios_key -> false) waits) in
+      match w.request with Dos_input _ -> true | Bios_key | Bios_wait -> false) waits) in
   wr8 t (physical sda_seg sda_in_dos) (min in_dos byte_max)
 
 let finish_service_return t = function
