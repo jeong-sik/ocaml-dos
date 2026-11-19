@@ -22,7 +22,7 @@ type model = I8086 | I80186 | I80286 | I80386
 (* 286 실모드의 MSW: 예약 비트 4-15 는 1, PE·MP·EM·TS 는 0. *)
 let msw_real_mode_286 = 0xFFF0
 
-(* 286 실모드의 기술자 표 레지스터를 SGDT·SIDT 가 6바이트로 쓴다: 한계(16비트),
+(* 실모드의 기술자 표 레지스터를 SGDT·SIDT 가 6바이트로 쓴다: 한계(16비트),
    기준의 하위 24비트, 마지막 바이트. 마지막 바이트는 286 이 FFh 를 쓰고
    386 은 16비트 피연산자에서 0 을 쓴다. 게임은 이 바이트로 286 과 386 을
    가른다(`push sp` 로 286 이상을 확인한 다음 단계: Charlie the Duck 은
@@ -35,13 +35,21 @@ let msw_real_mode_286 = 0xFFF0
    Reference Manual." 즉 FFh 는 286 매뉴얼이 정한 값이 아니라 칩이 보이는
    동작이다.
 
-   한계와 기준은 확인하지 못했다(확인 필요): IDTR 03FFh·기준 0 은 실모드 IVT
-   (0000:0000 부터 400h 바이트)와 맞추었고, GDTR 은 0 으로 돌려준다. 게임이
-   읽는 것은 마지막 바이트뿐이다. *)
-let gdtr_limit_286 = 0x0000
-let idtr_limit_286 = 0x03FF
-let descriptor_table_base_286 = 0
+   기준은 0 이다. IDTR 은 386 PRM 10.1 "Processor State After Reset" 이
+   "IDTR: base =0 limit =03FFH" 라고 적었다(실모드 IVT 와 같다). 286 도 같다고
+   보았다(확인 필요: 286 매뉴얼은 못 읽었다). GDTR 은 같은 절이 "All registers
+   not mentioned above are undefined" 라서 값이 정해져 있지 않다 — 0 을
+   돌려준다. 게임이 읽는 것은 마지막 바이트뿐이다. *)
+let gdtr_limit = 0x0000
+let idtr_limit = 0x03FF
+let descriptor_table_base = 0
 let descriptor_table_top_byte_286 = 0xFF
+let descriptor_table_top_byte_386 = 0x00
+
+(* 386 실모드의 MSW(CR0 의 하위 워드). 386 PRM 10.1: 리셋 뒤 CR0 의 ET 는
+   80387 이 있을 때만 켜진다. 이 기계에는 코프로세서가 없어 PE·MP·EM·TS·ET 가
+   모두 0 이다(확인 필요: 같은 절의 그림 10-2 는 못 읽었다). *)
+let msw_real_mode_386 = 0x0000
 
 let f_carry = 0x001
 let f_parity = 0x004

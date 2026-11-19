@@ -1044,6 +1044,74 @@ let test_bus_order () =
   order "mov ax,[3] reads 1003h then 1004h" (List.rev !reads) [ 0x1003; 0x1004 ];
   order "in ax,41h reads port 41h then 42h" (List.rev !ports) [ 0x41; 0x42 ]
 
+(* SGDT, SIDT and SMSW on the 386 (RFC 0001 stage 3). The 386 writes 0 in the
+   sixth byte where the 286 writes FFh, SMSW reads 0 (no coprocessor, so ET is
+   clear: 386 PRM 10.1), a register operand of SGDT/SIDT is INT 6, and six
+   bytes that run past FFFFh are a fault before any byte is written. *)
+let test_descriptor_tables_386 () =
+  let m386 = Cpu86.I80386 in
+  let bytes_at mem a n = List.init n (fun i -> Char.code (Bytes.get mem (a + i))) in
+  let set_ds = "\xb8\x00\x10\x8e\xd8" in            (* mov ax,1000h; mov ds,ax *)
+  let stored code =
+    let t, mem = cpu_mem m386 (set_ds ^ code) in
+    Bytes.fill mem 0x10200 6 '\xAA';
+    run t 3;
+    bytes_at mem 0x10200 6
+  in
+  let same name got want =
+    List.iteri (fun i (g, w) -> check (Printf.sprintf "%s: byte %d" name i) g w) (List.combine got want)
+  in
+  same "386 SGDT" (stored "\x0f\x01\x06\x00\x02") [ 0; 0; 0; 0; 0; 0 ];
+  same "386 SIDT" (stored "\x0f\x01\x0e\x00\x02") [ 0xFF; 0x03; 0; 0; 0; 0 ];
+  same "386 SGDT with 66h" (stored "\x66\x0f\x01\x06\x00\x02") [ 0; 0; 0; 0; 0; 0 ];
+  same "386 SIDT with 66h" (stored "\x66\x0f\x01\x0e\x00\x02") [ 0xFF; 0x03; 0; 0; 0; 0 ];
+  (* smsw ax with AX = FFFFh; smsw [0200h] over a sentinel *)
+  let t = cpu m386 "\xb8\xff\xff\x0f\x01\xe0" in
+  run t 2;
+  check "386 SMSW reads 0" (ax t) 0;
+  check "386 SMSW is three bytes" (Cpu86.dump_ip t) 6;
+  same "386 SMSW to memory" (List.filteri (fun i _ -> i < 2) (stored "\x0f\x01\x26\x00\x02")) [ 0; 0 ];
+  (* The same program as detect286 in test_descriptor_tables (sgdt onto the
+     stack, pop the sixth byte into BH, INC BH): 0 + 1 = 1 on a 386, FFh + 1 = 0
+     on a 286. *)
+  let detect_sixth_byte =
+    "\x83\xec\x06\x89\xe5\x0f\x01\x46\x00\x83\xc4\x04\x5b\xfe\xc7"
+  in
+  let t = cpu m386 detect_sixth_byte in
+  run t 6;
+  check "386: the sixth byte is 0, so INC BH gives 1" (Cpu86.reg16 t 3 lsr 8) 1;
+  (* a register operand is INT 6 on both SGDT and SIDT *)
+  let _, got = fault_of m386 "\x0f\x01\xc0" nothing_386 in
+  check_taken "386 SGDT with a register" got (Some (6, 0));
+  let _, got = fault_of m386 "\x0f\x01\xc8" nothing_386 in
+  check_taken "386 SIDT with a register" got (Some (6, 0));
+  (* six bytes at DS:FFFC run past FFFFh: INT 13 and nothing written; through
+     SS it is INT 12 *)
+  let crossing model code setup =
+    let t, mem = cpu_mem model code in
+    Bytes.fill mem 0xFFFC 4 '\xAA';
+    setup t;
+    let taken = ref None in
+    Cpu86.set_int_hook t (fun n -> if !taken = None then taken := Some (n, Cpu86.dump_ip t));
+    ignore (Cpu86.step t);
+    (!taken, bytes_at mem 0xFFFC 4)
+  in
+  let sentinel = [ 0xAA; 0xAA; 0xAA; 0xAA ] in
+  let taken, kept = crossing m386 "\x0f\x01\x06\xfc\xff" nothing_386 in
+  check_taken "386 SGDT at FFFC" taken (Some (13, 0));
+  same "386 SGDT at FFFC wrote nothing" kept sentinel;
+  let taken, _ =
+    crossing m386 "\x0f\x01\x46\x00" (fun t -> Cpu86.set_reg16 t 5 0xFFFC; Cpu86.set_seg t 2 0)
+  in
+  check_taken "386 SGDT through SS at FFFC" taken (Some (12, 0));
+  (* the 286 no longer wraps the third word to offset 0 *)
+  let taken, kept = crossing Cpu86.I80286 "\x0f\x01\x06\xfc\xff" nothing_386 in
+  check_taken "286 SGDT at FFFC" taken (Some (13, 0));
+  same "286 SGDT at FFFC wrote nothing" kept sentinel;
+  (* the last place six bytes fit: FFFA *)
+  let taken, _ = crossing m386 "\x0f\x01\x06\xfa\xff" nothing_386 in
+  check_taken "386 SGDT at FFFA fits" taken None
+
 let () =
   test_rep_kind ();
   test_386_operand32 ();
@@ -1060,6 +1128,7 @@ let () =
   test_push_sp ();
   test_0f ();
   test_descriptor_tables ();
+  test_descriptor_tables_386 ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;
     exit 1
