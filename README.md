@@ -523,6 +523,20 @@ dune build --root . --profile release
     남은 파일과 폴더를 지운다. DA1 에 답하지 않는 터미널이면 1초만
     기다린다.
   - 터미널 창을 닫거나(SIGHUP) SIGTERM 을 받아도 같은 정리를 거친다.
+- `--audio-cmd CMD` 는 소리(49716Hz, 16비트 모노 raw)를 `CMD` 의 표준
+  입력으로 흘린다. `CMD` 는 공백으로 나누고 셸을 거치지 않는다.
+  재생기의 stdout·stderr 는 버린다.
+
+  ```sh
+  --audio-cmd "ffplay -nodisp -autoexit -f s16le -ar 49716 -ch_layout mono -"
+  --audio-cmd "play -q -t raw -r 49716 -e signed -b 16 -c 1 -"
+  ```
+
+  - 쓰기는 막히지 않는다. 재생기가 늦으면 0.25초 몫까지 들고 있고,
+    넘치면 오래된 표본부터 버린다. 표본 짝(2바이트)은 어긋나지 않는다.
+  - 재생기가 끝나면 소리만 멈추고 게임은 계속 돈다.
+  - 끝날 때 버린 표본 수와 재생기가 닫은 까닭을 stderr 에 찍는다.
+  - Shift+F11 로 읽은 기계도 소리를 낸다. 스냅숏은 표본을 담지 않는다.
 - 끝날 때 stderr 에 게스트 시간, 벽시계 시간, 보낸 프레임 수(그중 임시
   파일로 보낸 수)를 찍는다. 임시 파일 길을 버렸으면 까닭도 찍는다.
   게스트 시간이 많이 짧으면 이 호스트가 에뮬레이션을 못 따라간 것이다.
@@ -632,8 +646,8 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
   프로그램은 이 둘이 늘 일치한다.
 - 8087 코프로세서가 없다.
 - 소리는 PC 스피커와 Sound Blaster 8비트 PCM(직접 DAC 10h, DMA)만 낸다
-  (`--audio-out`). SB ADPCM 은 해독하지 않고, OPL2 는 타이머만 있다.
-  `dosplay` 는 아직 소리를 내지 않는다. DAC 값은 스냅숏에 들지 않아서
+  (`dosboot --audio-out`, `dosplay --audio-cmd`). SB ADPCM 은 해독하지
+  않고, OPL2 는 타이머만 있다. DAC 값은 스냅숏에 들지 않아서
   되살린 DSP 는 80h(쉼)에서 시작한다.
 
 ## 구조
