@@ -1,0 +1,3 @@
+(test
+ (name dos_version_break_test)
+ (libraries dosmachine))
