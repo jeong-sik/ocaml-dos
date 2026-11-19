@@ -1,0 +1,3 @@
+(test
+ (name dos_ext_error_test)
+ (libraries dosmachine))

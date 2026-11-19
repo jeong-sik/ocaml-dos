@@ -1,5 +1,13 @@
 (executable
  (name dosboot)
  (public_name ocaml-dos.dosboot)
+ (modules dosboot)
  (package ocaml-dos)
- (libraries cpu86core dosmachine))
+ (libraries cpu86core dosmachine dosharness))
+
+(executable
+ (name dosplay)
+ (public_name ocaml-dos.dosplay)
+ (modules dosplay audio_pipe frame_out host_file quicksave save_dir terminal)
+ (package ocaml-dos)
+ (libraries dosmachine dosterm unix))
