@@ -24,9 +24,10 @@ val divide_overflow : Dos_state.t -> unit
 (** INT 0 — DOS 의 기본 처리. 콘솔에 "Divide overflow" 를 쓰고 프로그램을
     종료 코드 0 으로 끝낸다(MS-DOS 2.0 CTRLC.ASM 의 DIVOV). *)
 
-val init_memory : Dos_state.t -> psp_seg:int -> unit
-(** 적재 직후의 메모리 소유 상태. 실기처럼 프로그램이 남은 전부를
-    가진다 — AH=4Ah 로 줄여야 AH=48h 이 성공한다. *)
+val init_memory : Dos_state.t -> psp_seg:int -> block_end:int -> unit
+(** 적재 직후의 메모리 소유 상태. 프로그램이 [psp_seg] 부터 [block_end] 직전까지를
+    가진다. COM 과 EXE 는 실기처럼 남은 전부를 받으니 AH=4Ah 로 줄여야 AH=48h 이
+    성공한다. 헤더의 maxalloc 이 작은 EXE 는 그 위가 처음부터 비어 있다. *)
 
 val load_com : ?name:string -> ?tail:string -> Dos_state.t -> string -> unit
 (** COM 이미지를 루트 프로그램으로 PSP 세그 0x1000 에 싣는다. EXEC 자식은
