@@ -1,0 +1,3 @@
+(test
+ (name dos_audio_sb_test)
+ (libraries dosmachine))

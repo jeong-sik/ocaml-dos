@@ -1,0 +1,3 @@
+(test
+ (name dos_unserved_test)
+ (libraries dosmachine))

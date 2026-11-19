@@ -1,0 +1,3 @@
+(test
+ (name dos_open_mode_test)
+ (libraries dosmachine))

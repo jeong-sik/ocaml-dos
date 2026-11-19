@@ -1,0 +1,3 @@
+(test
+ (name dos_surface_test)
+ (libraries dosmachine))

@@ -1,0 +1,3 @@
+(test
+ (name dos_std_handles_test)
+ (libraries dosmachine))

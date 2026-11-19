@@ -1,0 +1,3 @@
+(test
+ (name dos_switch_verify_test)
+ (libraries dosmachine))
