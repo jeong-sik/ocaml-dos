@@ -57,8 +57,9 @@ SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst286.exe
 
 `I80386` 은 Intel 386EX 에서 뽑은
 [SingleStepTests/80386](https://github.com/SingleStepTests/80386) 실모드로
-잰다. 0Fh 확장은 아직 없어 0Fh 로 시작하지 않는 780 파일, 149만 8,600
-케이스를 돌린다. 66h·67h 가 없는 325 파일, 66h 194 파일, 67h 261 파일이다.
+잰다. 실모드 941 파일, 175만 8,700 케이스를 모두 돌린다. 0Fh 로 시작하지
+않는 780 파일(66h·67h 가 없는 325, 66h 194, 67h 261)과 0Fh 161 파일(66h
+없는 97, 660F·67660F 64)이다.
 fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문자열이
 칩이 이미 가져온 자기 코드를 덮는 경우라, 프리페치 큐가 없는 이 모델로는
 맞출 수 없다(#159). 포트 22h·23h 는 CPU 가 아니라
@@ -68,8 +69,21 @@ fail 은 baseline 의 4 건뿐이다. 67A5·67AB·6766A5·6766AB 에서 rep 문�
 
 ```sh
 # 저장소를 /tmp/sst80386 에 받아 두고(v1_ex_real_mode 약 580MB)
-ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | rg -v '^(66|67)*0F' | sed 's/\.MOO\.gz$//' | paste -sd, -)
+ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.MOO\.gz$//' | paste -sd, -)
 SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
+```
+
+보호 모드(RFC 0005)는 [test386.asm](https://github.com/barotto/test386.asm)
+ROM 으로 잰다. ROM 은 GPL-3.0 이라 저장소에 없고, `TEST386_BIN` 이 64KB
+빌드를 가리키면 `test/cpu86_test386` 이 돈다(없으면 건너뛴다). 러너는 맨
+`I80386` 에 1MB 를 붙이고 ROM 을 F0000h 에 둔 뒤 F000:FFF0 에서 시작한다.
+ROM 이 포트 190h 에 쓰는 POST 코드를 모은다. 지금은 실모드 POST 00h-06h 를
+지나 08h 의 32 비트 LGDT(`66 0F 01`)에서 멈추는 것이 기대값이다. 실패한
+시험은 ROM 의 error 자리에서 HLT 하므로 테스트가 깨진다.
+
+```sh
+# NASM 으로 빌드한 test386.bin 이 있을 때
+TEST386_BIN=/path/to/test386.bin dune build --root . @test/cpu86_test386/runtest --force
 ```
 
 ### 어느 칩을 흉내내는가
@@ -100,7 +114,7 @@ SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
 | LEA·LES·LDS·BOUND·CALL/JMP FAR 의 레지스터 피연산자, MOV CS, 8C·8E 의 reg 4-7, 8F·C6·C7 의 reg≠0 | 별칭으로 돌거나 Unsupported | INT 6 |
 | BOUND 범위 밖 | INT 5 가 다음 명령으로 돌아간다 | BOUND 자신으로 돌아간다 |
 
-기계(`Dos_machine`)는 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
+기계(`Dos_machine`)는 기본으로 `I80286` 으로 돈다. 1990년대 게임은 286 이상을
 요구하고 위 자리로 확인한다. 루카스아츠의 Monkey Island 2 와 Day of the
 Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으로 돈다.
 
@@ -141,8 +155,9 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 | 66h RET | FFFFh 위 EIP 는 INT 13 이다 |
 | 67h SIB 인덱스 없음(4) | 배율이 베이스에 곱해진다 |
 
-기계는 아직 `I80286` 으로 돈다. 0Fh 확장(RFC 0001 3 단계)과 스냅숏·
-`dosboot --cpu 386`(4 단계)이 있어야 386 을 요구하는 게임이 돈다.
+`dosboot --cpu 386` 이면 기계가 `I80386` 으로 돈다. 32 비트 레지스터·FS·GS·
+0Fh 명령을 쓰는 게임이 돌고, 스냅숏도 386 상태를 담는다. 보호 모드는 아직
+없다(RFC 0005).
 
 바이트 IDIV 는 286·386 모두 몫이 음수이고 |피젯수| >> 7 이 |젯수| + 80h
 이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도 INT 0 이 아니다.
@@ -163,12 +178,17 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 ## 기계가 주는 것
 
 - **BIOS**: INT 10h(모드·커서·스크롤·문자·CGA 팔레트·DAC·폰트·문자열), 11h 장비,
-  12h 메모리, 15h 시스템(88h 확장 메모리 0KB, 모르는 기능은 CF=1·AH=86h),
-  16h 키보드, 1Ah 시각, 33h 마우스(커서 깃발과 09h·0Ah
-  모양을 기억하지만 화면에 그리지는 않는다 — 이슈 #77). F000:FFFE 의 모델 바이트는 FCh(AT)다. ROM F000:FA6E 에 IBM
+  12h 메모리, 15h 시스템(88h 확장 메모리 0KB, 83h·86h 는 RTC 주기 인터럽트로
+  977µs 씩 세는 기다리기, 모르는 기능은 CF=1·AH=86h),
+  16h 키보드, 1Ah 시각, 33h 마우스(커서는 실기 드라이버처럼 화면 메모리에
+  그리고, 숨기거나 옮기기 전에 밑을 되돌린다. 기본 화살표와 그리는 방법은
+  DOSBox-X mouse.cpp 를 따른다. 하드웨어 텍스트 커서(0Ah BX≠0)는 그리지
+  않는다). F000:FFFE 의 모델 바이트는 FCh(AT)다. ROM F000:FA6E 에 IBM
   BIOS 표준 자리의 8x8 글꼴(0x20-0x7E)이 실려 있다 — 그래픽 모드에서
   글자를 직접 찍는 프로그램이 이 표를 읽는다(삼국지3 MAIN 실측). 바이트의
-  최상위 비트가 왼쪽 점인 IBM 순서다. 텍스트 화면 그림은 CP437 256자를
+  최상위 비트가 왼쪽 점인 IBM 순서다. 쓰는 장치가 없는 IRQ 줄(벡터
+  0Ah-0Fh)의 기본 루틴은 EOI 를 보내고 IRET 한다(SeaBIOS handle_hwpic1).
+  텍스트 화면 그림은 CP437 256자를
   모두 그린다 — 상자 선·블록·악센트 글자는 font8x8(Public Domain)에서,
   웃는 얼굴·카드 무늬·화살표 같은 40자는 이 저장소에서 그렸다
 - **그래픽 모드의 글자**: INT 10h AH=09h·0Ah·0Eh·13h 와 DOS 출력이
@@ -185,8 +205,16 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   색은 그대로 둔다. 마지막 줄에서 넘치면 새 줄은 커서 칸의 색으로
   채운다. AH=09h·13h 는 색을 쓴다. 부팅한 화면은 회색 공백(07h)이다
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
-  seek/close/dup), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
+  seek/close/dup, 6Ch 확장 열기, 0~4번 CON·AUX·PRN도 같은 표에 있어 46h로 파일에
+  돌리고 닫을 수 있다. AUX·PRN에 실제 바이트를 읽고 쓰면 포트와 INT 24h가 없어
+  `Unsupported`로 멈춘다. 위치는 32비트로 돈다. 0바이트 쓰기는 파일 길이를
+  위치에 맞춘다. 한 번의 쓰기가 36h가 말하는 빈 클러스터(8MB)보다 많이 늘리면
+  디스크가 찬 것으로 답한다. 3Dh의 접근 모드를 지켜 읽기 전용에 쓰거나
+  쓰기 전용을 읽으면 오류 5다. 공유 모드는 검사만 하고 SHARE가 없어 막지
+  않는다. AL 비트 7로 연 핸들은 EXEC 자식에게 넘기지 않는다), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
   쓴 바이트는 닫을 때 파일이 된다, 29h 이름 나누기), findfirst/findnext,
+  디렉터리(39h 만들기·3Ah 지우기·3Bh 옮기기·47h 현재 위치 — FCB 는 현재
+  디렉터리의 파일을 가리킨다),
   메모리 할당(48h/49h/4Ah, 58h first·best·last fit),
   EXEC(4Bh 불러 실행, 4Dh 종료 코드, 31h/INT 27h 상주 종료 — 자식은
   같은 기계 위에서 부모 프레임을 갈아끼우며 돈다. 4B03h 오버레이 싣기.
@@ -194,16 +222,20 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   환경 블록을 따로 받고 그 끝에 프로그램 이름이 붙는다),
   날짜·시각, InDOS 주소(34h), 확장 에러(59h), 국가 정보(38h·63h·65h·66h,
   미국 437만),
-  verify 플래그(2Eh/54h), 스위치 문자(37h), 벡터
-  읽기·쓰기, IOCTL, DOS 버전 5.0. PSP 에는 IVT 22h-24h 사본(0Ah),
+  verify 플래그(2Eh/54h), 스위치 문자(37h), 확장 Ctrl-Break 깃발(33h —
+  읽고 쓰기만 하고 Ctrl-C 검사는 하지 않는다), 부팅 드라이브 C:(3305h),
+  진짜 버전 5.00(3306h), 벡터
+  읽기·쓰기, IOCTL(4400h 장치 정보 — 부팅 때 여는 CON·AUX·PRN 포함,
+  4406h·4407h 입출력 상태, 4408h 고정 매체), DOS 버전 5.0. PSP 에는 IVT 22h-24h 사본(0Ah),
   부모(16h, 루트는 자기), 이전 PSP FFFFFFFFh(38h), INT 21h·RETF(50h)가
   있다. 자식이 끝나면 IVT 22h-24h 를 그 자식 PSP 의 사본으로 되돌린다
 - **XMS 3.0**: INT 2Fh AX=4300h·4310h 로 찾는 HIMEM 자리. 100000h 부터
   15MB 를 KB 단위 first fit 으로 나눠 주고, 핸들 32개, 잠금, 크기 바꾸기,
   이동(0Bh)을 받는다. 이동은 CPU 버스를 지나서 평면 그래픽 창도 게스트
   쓰기처럼 받는다. HMA·A20·UMB 는 없다
-- **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), 8259 PIC(IRR·
-  ISR·마스크, EOI 두 가지, OCW3 읽기 — IRQ0 이 IRQ1 보다 앞선다), 8042
+- **장치 포트**: PIT 타이머(분주비로 틱 속도가 바뀐다), 8259 PIC 두 개(20h·21h 와
+  A0h·A1h. IRR·ISR·마스크, EOI 두 가지, OCW3 읽기 — IRQ0 이 IRQ1 보다 앞서고,
+  두 번째 칩의 IRQ8-15 는 첫 칩의 IRQ2 자리에서 벡터 70h-77h 로 들어온다), 8042
   키보드 컨트롤러(0x60 데이터·0x64 상태, 바이트마다 IRQ1, 컨트롤러·키보드 명령), 8237 DMA
   (채널 0-3 의 주소·카운트·모드·마스크·TC 상태, 페이지 레지스터 81h-83h·87h
   — 장치가 한 바이트씩 당겨 간다), VGA DAC(0x3C8/0x3C9),
@@ -213,7 +245,15 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   OPL2(0x388/0x389) 타이머 둘과 상태 — 소리는 없다. 타이머는 레지스터
   값에서 256 까지 80µs·320µs 칸으로 세고, 마스크된 타이머는 플래그를
   세우지 않는다. 정지 상태는 06h, 타이머 1 이 넘친 뒤는 C6h 다(감지
-  루틴은 E0h 로 걸러 C0h 를 본다)
+  루틴은 E0h 로 걸러 C0h 를 본다),
+  CMOS 시계(0x70/0x71) — INT 1Ah 와 같은 시각을 BCD 24시간 꼴로 준다.
+  레지스터 B 로 이진·12시간 꼴을 고른다. 갱신 중 비트(UIP)는 초가 바뀌기
+  244µs 전에 켜지고 1984µs 뒤에 꺼진다. 기본 메모리 640KB, 확장 메모리 15MB(XMS 와 같다),
+  체크섬은 IBM AT 배치다. 레지스터 A 가 고른 주기(기본 1024Hz)가 끝나면
+  레지스터 C 에 PF 가 서고(PIE 면 IRQF 도), C 를 읽으면 지워진다. IRQF 가
+  서면 IRQ8 이 오르고, C 를 읽을 때까지 다시 오르지 않는다. BIOS 의 INT 70h 는
+  C 를 읽고, INT 15h 83h·86h 의 남은 시간을 줄이고, 두 칩에 EOI 를 보낸다
+  (71h-77h 는 EOI 만). 시각·RAM 쓰기는 버린다
 - **MPU-401**(`dosboot --mpu401`, 기본은 뺌): 330h·331h 의 UART 전용
   카드(Sound Blaster 16 의 종류). 리셋(FFh)과 UART 모드(3Fh)에 FEh 로 답하고,
   MIDI 바이트는 버린다. intelligent 모드 명령에는 답하지 않는다
@@ -222,6 +262,14 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   를 기다리는 지연 루프가 끝난다. 읽기-되돌림 명령(0x43, bit 7-6 = 11)
   은 채널 0·2 의 카운트와 상태 바이트(OUT, NULL COUNT, 쓴 그대로의
   제어 워드)를 잡는다
+- **Sound Blaster 2.0**(켤 때만, `--sound-blaster`): 220h 의 DSP 2.01 —
+  리셋 뒤 AAh, E1h 버전 2.01, 시간 상수(40h)에 맞춰 DMA 채널 1 에서
+  블록을 한 바이트씩 가져가고 블록 끝·F2h·80h 에 IRQ 7 을 올린다.
+  8비트 PCM(14h·1Ch·48h·90h·91h)과 ADPCM(74h~77h·16h·17h·7Dh·7Fh·1Fh)
+  블록을 받는다. ADPCM 한 바이트는 표본 2~4개 시간이 걸린다. 34h·35h 는
+  MIDI UART 모드로 들어간다. 228h·229h 는 OPL2 다. 소리는 내지 않는다.
+  DMA 입력(24h)과 E2h 는 없어서 그 명령을 쓰는 프로그램은 오지 않는 IRQ
+  나 DMA 를 기다리다 멈춘다 — 그래서 기본은 카드가 없는 기계다
 - **화면**: 아래 표의 모든 모드. RGB·PPM 으로 내보내고, 코드 페이지 437
   을 UTF-8 로 옮긴 텍스트도 준다
 
@@ -335,11 +383,17 @@ BDA 0x487·0x489 에서 뽑은 깃발, 256KB 다. 정적 표는 이 기계가 �
 ### 계약
 
 - **결정론**: 같은 이미지에 같은 키를 같은 순서로 넣으면 같은 화면이
-  나온다. 시각도 난수도 호스트에서 오지 않는다 — 날짜·시각은
-  `set_clock` 이 정한 기준시각에 CPU 사이클로 환산한 경과를 더해 만들고,
-  타이머 틱과 재주사 비트도 사이클에서 나온다. BIOS 틱(0x40:0x6C)은 부팅 때
-  기준시각으로 채우고, 하루치(0x1800B0)에 닿으면 0 으로 돌리며 0x40:0x70 을
-  올린다(SeaBIOS 와 같다). 라이브러리는 환경 변수를 읽지 않는다.
+  나온다. 시각도 난수도 호스트에서 오지 않는다. 시계는 셋이다.
+  - RTC(INT 1Ah 02h·04h)는 `set_clock` 이 정한 기준시각에 CPU 사이클로
+    환산한 경과를 더한다.
+  - BIOS 틱(0x40:0x6C)은 부팅 때 기준시각으로 채우고 IRQ0 마다 오른다.
+    하루치(0x1800B0)에 닿으면 0 으로 돌리며 0x40:0x70 을 올린다(SeaBIOS 와
+    같다). 타이머 틱과 재주사 비트도 사이클에서 나온다.
+  - DOS 의 시각(INT 21h 2Ch)은 BIOS 틱에서 계산해 1/100 초까지 준다. 날짜
+    (2Ah)는 부팅 때 RTC 날짜로 정하고, 0x40:0x70 을 보고 하루씩 넘긴다.
+    둘 다 MS-DOS 4.0 의 계산이다.
+
+  라이브러리는 환경 변수를 읽지 않는다.
 - **파일**: 하네스가 마운트한 것만 보인다. 게스트가 쓴 내용은 파일을
   닫을 때 마운트 표로 돌아가므로 같은 세션 안에서 저장하고 다시 열 수
   있다. 호스트 디스크에는 나가지 않는다.
@@ -377,6 +431,14 @@ dune exec --root . bin/dosboot.exe -- \
   --keys 256b,2e63,1c0d,1970,1c0d,3920,1c0d,1970,1c0d,1c0d,4d00@5000000
 ```
 
+`--mount` 의 이름은 DOS 경로다. `--mount DATA/LEVEL1.DAT=...` 는 `DATA`
+디렉터리 안에 파일을 두고, 디렉터리는 함께 생긴다. 게스트는
+`C:\DATA\LEVEL1.DAT`, `DATA\LEVEL1.DAT`, `CD DATA` 뒤의 `LEVEL1.DAT`
+어느 쪽으로도 연다. 드라이브는 C: 하나다. 이름은 DOS 가 읽듯 대문자로
+바꾸고 8.3 으로 자른다. 이름 사이에 구분자가 여럿 있으면 하나로 읽는다
+(`SAVE\\GAME.SAV` 는 `SAVE\GAME.SAV`). 앞의 두 구분자(`\\SERVER`)는
+네트워크 이름이라 경로 없음이다.
+
 `--keys` 의 한 항목은 `(스캔 코드 lsl 8) lor ASCII` 를 16진수로 쓴 것이고,
 `@STEP` 은 그 스텝 전에는 넣지 않는다는 예약이다. 키를 미리 다 밀어
 넣으면 앞선 메뉴의 "아무 키나" 루프가 전부 먹어 치우기 때문에, 게임이
@@ -409,6 +471,18 @@ dune exec --root . bin/dosboot.exe -- --com KOEI.COM --mount ... --steps 0 \
 
 진단은 `--trace N`(N 스텝마다 CS:IP), `--int-trace`(INT 명령),
 `--dump ADDR,LEN`(메모리), `--save NAME=PATH`(게스트가 쓴 파일 꺼내기).
+`--sound-blaster` 는 카드를 꽂는다 — 게임 설정에서 Sound Blaster
+(220h, IRQ 7, DMA 1)를 고를 때 쓴다.
+
+`--audio-out FILE` 은 PC 스피커와 Sound Blaster 8비트 DAC 소리를
+WAV(49716Hz, 16비트 모노)로 쓴다(RFC 0006). 표본 하나는 그 구간 CPU
+사이클의 평균값이라 같은 입력이면 같은 파일이 나온다. 소리를 켜도 기계가
+가는 길은 같다. 끝에 표본 수와 16비트를 넘어 자른 수를 찍는다. OPL2 와 SB
+ADPCM 은 아직 소리가 없다.
+
+```
+audio /tmp/tone.wav: 20491 samples, clipped 0
+```
 
 `--unserved` 는 이 기계가 받지 못한 INT 호출을 끝에 stderr 로 센다.
 `no-function` 은 호스트 서비스(21h·10h·15h·16h·1Ah·2Fh·33h)에 그 기능이 없을 때,
@@ -470,6 +544,20 @@ dune build --root . --profile release
     남은 파일과 폴더를 지운다. DA1 에 답하지 않는 터미널이면 1초만
     기다린다.
   - 터미널 창을 닫거나(SIGHUP) SIGTERM 을 받아도 같은 정리를 거친다.
+- `--audio-cmd CMD` 는 소리(49716Hz, 16비트 모노 raw)를 `CMD` 의 표준
+  입력으로 흘린다. `CMD` 는 공백으로 나누고 셸을 거치지 않는다.
+  재생기의 stdout·stderr 는 버린다.
+
+  ```sh
+  --audio-cmd "ffplay -nodisp -autoexit -f s16le -ar 49716 -ch_layout mono -"
+  --audio-cmd "play -q -t raw -r 49716 -e signed -b 16 -c 1 -"
+  ```
+
+  - 쓰기는 막히지 않는다. 재생기가 늦으면 0.25초 몫까지 들고 있고,
+    넘치면 오래된 표본부터 버린다. 표본 짝(2바이트)은 어긋나지 않는다.
+  - 재생기가 끝나면 소리만 멈추고 게임은 계속 돈다.
+  - 끝날 때 버린 표본 수와 재생기가 닫은 까닭을 stderr 에 찍는다.
+  - Shift+F11 로 읽은 기계도 소리를 낸다. 스냅숏은 표본을 담지 않는다.
 - 끝날 때 stderr 에 게스트 시간, 벽시계 시간, 보낸 프레임 수(그중 임시
   파일로 보낸 수)를 찍는다. 임시 파일 길을 버렸으면 까닭도 찍는다.
   게스트 시간이 많이 짧으면 이 호스트가 에뮬레이션을 못 따라간 것이다.
@@ -577,10 +665,11 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 - 그래픽 컨트롤러의 Misc 레지스터에 있는 메모리 창 선택 비트를 읽지
   않는다. 0xA0000 창의 주인은 모드가 정한다 — BIOS 로 모드를 세운
   프로그램은 이 둘이 늘 일치한다.
-- 8087 코프로세서가 없다. 소리도 내지 않는다 — 스피커 포트의 상태만
-  `speaker_on` 으로 보인다.
-- 디렉터리가 없다. `mkdir`/`chdir` 은 성공한 척하지 않고 "경로 없음" 으로
-  답한다.
+- 8087 코프로세서가 없다.
+- 소리는 PC 스피커와 Sound Blaster 8비트 PCM(직접 DAC 10h, DMA)만 낸다
+  (`dosboot --audio-out`, `dosplay --audio-cmd`). SB ADPCM 은 해독하지
+  않고, OPL2 는 타이머만 있다. DAC 값은 스냅숏에 들지 않아서
+  되살린 DSP 는 80h(쉼)에서 시작한다.
 
 ## 구조
 
@@ -590,14 +679,20 @@ DOS INT 21h AH=01/07/08, AH=0A, AH=0C의 입력 하위 기능과 console AH=3F�
 | `Dos_state` | 기계 상태와 기본기 — 화면·커서·키 링·인터럽트 전달·시계, 게스트 메모리의 DOS 데이터 영역(0070h: ErrorMode·InDOS·WPErr·EXTERR·USER_IN_AX, 그 앞의 VERFLG·chSwitch·AllocMethod) |
 | `Dos_error` | INT 21h 에러 코드의 class·action·locus 와 기능마다 돌려줄 수 있는 코드 (MS-DOS 4.0 `MS_TABLE.ASM`) |
 | `Dos_ports` | 하드웨어 포트 — PIT, DAC, 스피커. PIC·DMA·키보드 포트는 아래 셋에 넘긴다 |
-| `Dos_pic` | 8259 인터럽트 컨트롤러 — 어느 IRQ 를 언제 넣는가 |
+| `Dos_pic` | 8259 인터럽트 컨트롤러 두 개(AT 캐스케이드) — 어느 IRQ 를 언제 넣는가 |
 | `Dos_dma` | 8237 DMA 컨트롤러 — 장치가 메모리의 어느 바이트를 언제 가져가는가 |
+| `Dos_sb` | Sound Blaster 2.0 DSP — 포트 답, PCM·ADPCM 블록 시간, MIDI UART, IRQ, 8비트 DAC 값(ADPCM 해독 없음) |
+| `Dos_audio` | 소리 표본(RFC 0006) — 사이클 구간의 평균값을 16비트로, PC 스피커·SB DAC 원천, WAV 머리. 포트 42h·43h·61h 접근과 DSP 출력 변화 앞에서 그때까지를 표본으로 만든다 |
+| `Dos_opl` | OPL2 음색 레지스터(01h·08h·20h-F5h, RFC 0006 단계 4) — 기계 상태라 스냅숏에 든다. 아직 소리는 없다 |
 | `Dos_kbc` | 8042 키보드 컨트롤러 — make·break 바이트를 언제 0x60 에 올리는가, 컨트롤러·키보드 명령의 답 |
 | `Dos_keymap` | BIOS 키 워드 ↔ 키·수식키 표 |
 | `Dos_video` | 비디오 어댑터 — 모드, 평면 메모리, 그래픽 컨트롤러, 시퀀서, CRTC |
 | `Dos_bios` | ROM·IVT·BDA 와 INT 09h/10h/11h/12h/16h/1Ah/33h |
 | `Dos_mouse_space` | 마우스 가상 화면 — 비디오 모드마다 좌표 넓이와 한 칸의 크기(CuteMouse 표) |
-| `Dos_dos` | INT 21h/20h — 파일, 콘솔, 메모리, 날짜 |
+| `Dos_mouse_cursor` | 마우스 커서를 화면 메모리에 그리고 밑을 되돌린다(DOSBox-X 화살표·AND/XOR) |
+| `Dos_dos` | INT 21h/20h — 파일, 디렉터리, 콘솔, 메모리, 날짜 |
+| `Dos_clock` | MS-DOS 4.0 의 시각·날짜 계산 — 틱 ↔ 시각, 날 수 ↔ 날짜 |
+| `Dos_path` | 게스트가 넘긴 이름을 DOS 5 처럼 읽어 경로로 — 드라이브, `.`·`..`, 8.3 자르기 |
 | `Dos_xms` | XMS 3.0 드라이버 — 확장 메모리 블록, 잠금, 이동, INT 2Fh 답 |
 | `Dos_fcb_parse` | INT 21h AH=29h — 글자열을 FCB 의 드라이브·이름·확장자로 나눈다(MS-DOS 4.0 `MakeFcb`) |
 | `Dos_country` | 미국(국가 1) 437 의 대문자·정렬·파일 이름 글자·DBCS 표와 ROM 에 둘 바이트(MS-DOS 4.0 `DOSMES.ASM`) |

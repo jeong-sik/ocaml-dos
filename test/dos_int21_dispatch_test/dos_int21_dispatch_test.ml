@@ -67,22 +67,18 @@ let () =
   (* 빈 칸 *)
   List.iter (fun ax -> al_cleared "unused" ~ax) [ 0x1877; 0x1D01; 0x1EFF; 0x2042; 0x6199 ]
 
-(* 6Ch 는 마지막 기능($Extended_Open)이라 BADCALL 이 아니다. 이 DOS 는
-   아직 만들지 않았으니, 표 안의 다른 빈 기능처럼 그 INT 에서 멈춘다. *)
+(* 6Ch 는 마지막 기능($Extended_Open)이라 BADCALL 이 아니다. DX=3333h 는
+   파일이 있을 때 할 일이 3 이라 FILEMODE.INC 범위 밖이다 — 에러 1(잘못된
+   기능)에 CF=1 이다. BADCALL 이면 AL 만 0 이 되고 CF 는 그대로다. *)
+let error_invalid_function = 1
+
 let () =
-  let stopped =
-    match run [ (0x6C42, true) ] with
-    | _ -> None
-    | exception Cpu86.Unsupported msg -> Some msg
-  in
-  match stopped with
-  | Some msg when String.starts_with ~prefix:"INT 21h AH=6Ch AL=42h " msg -> ()
-  | Some msg ->
-    incr failed;
-    Printf.eprintf "FAIL 6Ch stopped with another message: %s\n%!" msg
-  | None ->
-    incr failed;
-    Printf.eprintf "FAIL 6Ch is not BADCALL: it ran on instead of stopping\n%!"
+  let results, _ = run [ (0x6C42, false) ] in
+  List.iter
+    (fun r ->
+      check "6Ch DX=3333h: AX" r.ax error_invalid_function;
+      check "6Ch DX=3333h: CF" r.carry cf)
+    results
 
 let () =
   let results, psp = run [ (0x5100, true); (0x5100, false); (0x6200, true) ] in

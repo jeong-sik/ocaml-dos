@@ -67,9 +67,40 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    25: a PIT counter writes its control word bits 5-0 as written (in place
    of mode, access and BCD), the tick its count reaches the counting
    element, and a status byte latched by the read-back command.
-   26: port 3D9h's value lives only in the video state; the ports no
+   26: whether a Sound Blaster is in the machine, and its DSP (reset,
+   answers, the command half written, the playing block, timers, the
+   IRQ line, rate, block length, speaker, test register), after the DMA
+   controller.
+   27: each DSP block, and the block queued behind it, carry their format
+   (8-bit PCM or one of three ADPCM sizes), and the DSP carries whether it
+   is in MIDI UART mode.
+   28: the CMOS carries register A's rate bits and register B after its
+   index (Dos_cmos).
+   29: directories — the table of directories and the current one after the
+   host files, and each find result says whether it is a file (by path key)
+   or a directory entry (by name). Host file keys are read back only in
+   their canonical Dos_path form.
+   30: the CMOS carries the periodic flag raised before its last register A
+   write and the cycle its count starts from, after register B.
+   31: the slave 8259 (mask, requests, in service, OCW3 read choice) after
+   the master's.
+   32: the CMOS carries whether its IRQ8 line is up and the cycle IRQF next
+   rises, after the periodic count start.
+   33: a suspended service may wait for INT 15h AH=86h (input request tag
+   4, no fields).
+   34: the OPL2's voice registers 00h-F5h after its timers (Dos_opl).
+   35: the mouse driver's drawn cursor after the mouse ranges: none, a text
+   cell (page, column, row, the word under it) or a graphics block (left,
+   top, width, height, the points under it).
+   36: DOS keeps its own day count (MS-DOS DAYCNT) after the clock fields;
+   the DOS time of day is the BIOS tick count in RAM.
+   37: the standard devices are handle records too: a record is a file
+   (name, buffer) or CON, AUX or PRN, then its position.
+   38: a handle record carries its access mode and whether EXEC's child
+   gets it, between the target and the position.
+   39: port 3D9h's value lives only in the video state; the ports no
    longer carry a copy. *)
-let format_version = 26
+let format_version = 39
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -104,6 +135,8 @@ let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
 let cursor_flag = C.range min_int 0
 (* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
 let cursor_kind = C.range 0 1
+let drawn_kind = C.range 0 2
+let drawn_side = C.range 1 cursor_rows
 let mouse_ratio = C.range 1 0xFFFF  (* 0Fh·13h·1Ah 는 0 을 두지 않는다 *)
 let mouse_speed = C.range lowest_speed highest_speed
 let mouse_carry = C.range 0 (pixels_per_ratio - 1)
@@ -149,7 +182,7 @@ let check_consistency t =
       && List.for_all (fun width -> width >= 1 && width <= 8) line.echo_widths
     in
     let request_ok = match wait.request with
-      | Bios_key | Dos_input (Read_character _) -> true
+      | Bios_key | Bios_wait | Dos_input (Read_character _) -> true
       | Dos_input (Read_buffered_line { capacity; line; _ }) -> line_ok capacity line
       | Dos_input (Read_console_line { line; _ }) -> line_ok console_line_capacity line
     in
@@ -209,10 +242,14 @@ let put_line_input w { text; echo_widths } =
   put_list w ~what:"input echo widths"
     (C.put w ~what:"input echo width" (C.range 1 8)) echo_widths
 
+(* 0 BIOS 키, 1-3 DOS 입력, 4 INT 15h AH=86h 기다리기 *)
+let input_request_tags = C.range 0 4
+
 let put_input_request w request =
-  let tag n = C.put w ~what:"input request" (C.range 0 3) n in
+  let tag n = C.put w ~what:"input request" input_request_tags n in
   match request with
   | Bios_key -> tag 0
+  | Bios_wait -> tag 4
   | Dos_input (Read_character { echo }) -> tag 1; C.put_bool w echo
   | Dos_input (Read_buffered_line { base; capacity; line }) ->
     tag 2;
@@ -238,7 +275,7 @@ let put_input_continuation w wait =
    record under two numbers, position included, and an EXEC frame keeps
    the parent's records dormant while a child runs -- either way, a read
    or write through any of those numbers moves the one record. Two names
-   opened separately (AH=3Dh twice, Dos_dos.open_handle) instead share
+   opened separately (AH=3Dh twice, Dos_dos.open_file) instead share
    only the underlying bytes: each keeps its own position, but a write
    through one is a read through the other because [handle.data] is the
    same [Bytes.t ref].
@@ -250,6 +287,10 @@ let put_input_continuation w wait =
    restored ref, not two copies of the same bytes. Pool order is first
    appearance in the sorted live table, then in the frames, so the bytes
    are deterministic. *)
+type saved_target =
+  | Saved_file of string * int        (* name, buffer pool index *)
+  | Saved_device of standard_device
+
 let handle_pool t =
   let buffers = ref [] and buffer_count = ref 0 in
   let buffer_index buf =
@@ -276,15 +317,34 @@ let handle_pool t =
     List.map (fun f -> List.map (fun (n, h) -> (n, index h)) f.parent_handles)
       t.exec_frames
   in
-  let handles = List.rev_map fst !pool in
-  let handles_with_buffers = List.map (fun h -> (h, buffer_index h.data)) handles in
-  (handles_with_buffers, List.rev_map fst !buffers, live, frames)
+  let saved h =
+    let target =
+      match h.target with
+      | File { hname; data } -> Saved_file (hname, buffer_index data)
+      | Device d -> Saved_device d
+    in
+    (target, h.access, h.inheritable, h.pos)
+  in
+  let handles = List.map saved (List.rev_map fst !pool) in
+  (handles, List.rev_map fst !buffers, live, frames)
 
 let put_buffer w buf = C.put_bytes w !buf
 
-let put_handle w (h, buffer_idx) =
-  let { hname; data = _; pos } = h in
-  C.put_string w hname; C.put w ~what:"handle buffer" C.count buffer_idx;
+let target_tag = C.range 0 3
+
+let access_tag = C.range 0 2
+
+let put_handle w (target, access, inheritable, pos) =
+  let tag = C.put w ~what:"handle target" target_tag in
+  (match target with
+   | Saved_file (hname, buffer_idx) ->
+     tag 0; C.put_string w hname; C.put w ~what:"handle buffer" C.count buffer_idx
+   | Saved_device Con -> tag 1
+   | Saved_device Aux -> tag 2
+   | Saved_device Prn -> tag 3);
+  C.put w ~what:"handle access" access_tag
+    (match access with Read_only -> 0 | Write_only -> 1 | Read_write -> 2);
+  C.put_bool w inheritable;
   C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
@@ -323,7 +383,7 @@ let model_of_code = function
    build here until the snapshot carries it or says why not. [read_payload]
    reads in exactly this order with the same ranges. *)
 let write_payload w t =
-  let { mem; cpu; ports; exited; exit_code; video; host_files;
+  let { mem; cpu; ports; exited; exit_code; video; host_files; dirs; cwd;
         handles = _; fcbs; dta; psp_seg; kbd_wait;
         ext_scan_pending; input_continuations; console_pending; kbd_requests; free_base;
         free_top; blocks; find_queue; stubs;
@@ -331,7 +391,7 @@ let write_payload w t =
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved; ems_names;
+        epoch_min; epoch_sec; dos_days; ems_pages; ems_mapped; ems_saved; ems_names;
         mouse; xms;
         on_unserved = _ (* a host observer, not machine state *) } = t
   in
@@ -359,6 +419,8 @@ let write_payload w t =
   put "exit code" C.byte exit_code;
   put_list w ~what:"host file" (fun (k, v) -> C.put_string w k; C.put_bytes w v)
     (sorted_bindings host_files);
+  put_list w ~what:"directory" (fun (k, ()) -> C.put_string w k) (sorted_bindings dirs);
+  C.put_string w (Dos_path.key cwd);
   let pool, buffers, live, frames = handle_pool t in
   put_list w ~what:"handle buffer" (put_buffer w) buffers;
   put_list w ~what:"handle record" (put_handle w) pool;
@@ -377,7 +439,11 @@ let write_payload w t =
   put "free base" C.word free_base;
   put "free top" C.word free_top;
   put_pairs w ~what:"block" ~a:C.word ~b:C.word blocks;
-  put_list w ~what:"find queue" (C.put_string w) find_queue;
+  put_list w ~what:"find queue"
+    (function
+      | File_hit k -> C.put_bool w true; C.put_string w k
+      | Dir_hit name -> C.put_bool w false; C.put_string w name)
+    find_queue;
   put_pairs w ~what:"stub" ~a:vector ~b:C.word stubs;
   put "EXEC frame count" C.count (List.length frames);
   List.iter2 (put_frame w) t.exec_frames frames;
@@ -385,6 +451,7 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  put "DOS days" C.count dos_days;
   Dos_xms.write_state w xms;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
@@ -407,7 +474,7 @@ let write_payload w t =
         mouse_dx; mouse_dy; mouse_motion; mouse_carry_x; mouse_carry_y;
         mouse_handler_mask; mouse_handler_seg;
         mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
-        mouse_range_y } = mouse
+        mouse_range_y; mouse_drawn } = mouse
   in
   C.put_bool w mouse_present;
   put "mouse x" C.any mouse_x;
@@ -454,7 +521,22 @@ let write_payload w t =
     (fun (lo, hi) ->
       put "mouse range low" C.word lo;
       put "mouse range high" C.word hi)
-    [ mouse_range_x; mouse_range_y ]
+    [ mouse_range_x; mouse_range_y ];
+  match mouse_drawn with
+  | Not_drawn -> put "drawn cursor" drawn_kind 0
+  | Drawn_text { page; col; row; under } ->
+    put "drawn cursor" drawn_kind 1;
+    put "drawn cursor page" C.byte page;
+    put "drawn cursor column" C.word col;
+    put "drawn cursor row" C.word row;
+    put "drawn cursor cell" C.word under
+  | Drawn_graphics { left; top; width; height; under } ->
+    put "drawn cursor" drawn_kind 2;
+    put "drawn cursor left" C.word left;
+    put "drawn cursor top" C.word top;
+    put "drawn cursor width" drawn_side width;
+    put "drawn cursor height" drawn_side height;
+    C.put_int_array w ~what:"drawn cursor pixels" C.byte under
 
 let save t =
   match check_consistency t with
@@ -481,6 +563,14 @@ let get_list r ~what get =
 
 let get_pairs r ~what ~a ~b =
   get_list r ~what (fun () -> let x = C.get r ~what a in let y = C.get r ~what b in (x, y))
+
+(* A path key, refused unless it is one Dos_path.key gives. *)
+let get_path r =
+  match Dos_path.of_key (C.get_string r) with
+  | Some p -> p
+  | None -> C.fail "a path key that is not a DOS path"
+
+let get_key r = Dos_path.key (get_path r)
 
 let get_shown r =
   if C.get_bool r then begin
@@ -524,8 +614,9 @@ let get_line_input r =
   { text; echo_widths }
 
 let get_input_request r =
-  match C.get r ~what:"input request" (C.range 0 3) with
+  match C.get r ~what:"input request" input_request_tags with
   | 0 -> Bios_key
+  | 4 -> Bios_wait
   | 1 -> Dos_input (Read_character { echo = C.get_bool r })
   | 2 ->
     let base = C.get r ~what:"input buffer address" C.physical in
@@ -573,18 +664,36 @@ let read_payload r =
   t.exited <- C.get_bool r;
   t.exit_code <- get "exit code" C.byte;
   fill_table t.host_files
-    (get_list r ~what:"host file" (fun () -> let k = C.get_string r in (k, C.get_bytes r)));
+    (get_list r ~what:"host file" (fun () -> let k = get_key r in (k, C.get_bytes r)));
+  fill_table t.dirs (get_list r ~what:"directory" (fun () -> (get_key r, ())));
+  t.cwd <- get_path r;
   let buffers =
     Array.of_list (get_list r ~what:"handle buffer" (fun () -> ref (C.get_bytes r)))
   in
   let pool =
     Array.of_list
       (get_list r ~what:"handle record" (fun () ->
-           let hname = C.get_string r in
-           let buffer_idx = get "handle buffer" C.count in
-           if buffer_idx >= Array.length buffers then C.fail "a handle names no buffer"
-           else
-             { hname; data = buffers.(buffer_idx); pos = get "handle position" file_pos }))
+           let target =
+             match get "handle target" target_tag with
+             | 0 ->
+               let hname = C.get_string r in
+               let buffer_idx = get "handle buffer" C.count in
+               if buffer_idx >= Array.length buffers then C.fail "a handle names no buffer"
+               else File { hname; data = buffers.(buffer_idx) }
+             | 1 -> Device Con
+             | 2 -> Device Aux
+             | 3 -> Device Prn
+             | _ -> C.fail "invalid handle target"
+           in
+           let access =
+             match get "handle access" access_tag with
+             | 0 -> Read_only
+             | 1 -> Write_only
+             | 2 -> Read_write
+             | _ -> C.fail "invalid handle access"
+           in
+           let inheritable = C.get_bool r in
+           { target; access; inheritable; pos = get "handle position" file_pos }))
   in
   let resolve = List.map (fun (n, i) ->
       if i >= Array.length pool then C.fail "a handle names no record" else (n, pool.(i)))
@@ -593,12 +702,15 @@ let read_payload r =
      needs to know is already in [pool], each with the one buffer every
      record sharing that name points at (by construction: [handle_pool]
      never puts two different buffers under the same live name). Rebuild
-     it here so the next [Dos_dos.open_handle] on a name already open
+     it here so the next [Dos_dos.open_file] on a name already open
      joins the restored buffer instead of starting a fresh, disconnected
      one. *)
   Hashtbl.reset t.open_files;
   Array.iter
-    (fun h -> if h.hname <> "" then Hashtbl.replace t.open_files h.hname h.data)
+    (fun h ->
+       match h.target with
+       | File { hname; data } -> if hname <> "" then Hashtbl.replace t.open_files hname data
+       | Device _ -> ())
     pool;
   fill_table t.handles (resolve (get_pairs r ~what:"handle" ~a:handle_number ~b:C.count));
   fill_table t.fcbs
@@ -625,7 +737,9 @@ let read_payload r =
   t.free_base <- get "free base" C.word;
   t.free_top <- get "free top" C.word;
   t.blocks <- get_pairs r ~what:"block" ~a:C.word ~b:C.word;
-  t.find_queue <- get_list r ~what:"find queue" (fun () -> C.get_string r);
+  t.find_queue <-
+    get_list r ~what:"find queue" (fun () ->
+        if C.get_bool r then File_hit (get_key r) else Dir_hit (C.get_string r));
   t.stubs <- get_pairs r ~what:"stub" ~a:vector ~b:C.word;
   let frame_count = get "EXEC frame count" (C.range 0 (C.remaining r)) in
   t.exec_frames <-
@@ -654,6 +768,7 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  t.dos_days <- get "DOS days" C.count;
   Dos_xms.read_state r t.xms;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
@@ -722,6 +837,22 @@ let read_payload r =
   in
   m.mouse_range_x <- get_range ();
   m.mouse_range_y <- get_range ();
+  m.mouse_drawn <-
+    (match get "drawn cursor" drawn_kind with
+     | 0 -> Not_drawn
+     | 1 ->
+       let page = get "drawn cursor page" C.byte in
+       let col = get "drawn cursor column" C.word in
+       let row = get "drawn cursor row" C.word in
+       let under = get "drawn cursor cell" C.word in
+       Drawn_text { page; col; row; under }
+     | _ ->
+       let left = get "drawn cursor left" C.word in
+       let top = get "drawn cursor top" C.word in
+       let width = get "drawn cursor width" drawn_side in
+       let height = get "drawn cursor height" drawn_side in
+       let under = get_int_array r ~what:"drawn cursor pixels" ~len:(width * height) C.byte in
+       Drawn_graphics { left; top; width; height; under });
   C.end_of_input r;
   (match check_consistency t with
    | Ok () -> ()

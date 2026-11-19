@@ -2,6 +2,11 @@
    GetRecSize, $FCB_Open), FCBIO.ASM($Get_FCB_Position 24h,
    $Get_FCB_File_Length 23h). 확장 FCB(FFh 머리 7 바이트)도 같은 길로 간다. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let check name got want =
   if got <> want then begin
@@ -107,7 +112,7 @@ let program =
 
 let () =
   let m = Dos_machine.create () in
-  let mount = Dos_machine.mount_file m in
+  let mount = mount m in
   mount "REC.DAT" (String.init rec_size (fun i -> Char.chr (rec_byte i)));
   mount "BIG.DAT" (String.make big_size 'x');
   Dos_machine.load_com m program;

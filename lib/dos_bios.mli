@@ -3,7 +3,8 @@
     33h(마우스) 서비스. *)
 
 type bios_service =
-  | Keyboard_irq | Video | Equipment | Memory_size | System | Keyboard | Time_of_day | Mouse
+  | Keyboard_irq | Rtc_irq | Video | Equipment | Memory_size | System | Keyboard | Time_of_day
+  | Mouse
 type host_vector =
   | Bios of bios_service
   | Dos_divide_overflow
@@ -49,6 +50,10 @@ val private_service_vector : Dos_state.t -> int -> int option
 val read_key : Dos_state.t -> Dos_state.service_result
 (** Complete a blocking BIOS key read, or retain the request without
     changing AX when the ring is empty. *)
+
+val resume_wait : Dos_state.t -> Dos_state.service_result
+(** INT 15h AH=86h 를 다시 본다: 끝 깃발(40:A1h bit 7)이 섰으면 CF 를 지우고
+    끝, 아니면 계속 기다린다. 기계가 [Bios_wait] 을 이어 갈 때 부른다. *)
 
 val service : Dos_state.t -> bios_service -> Dos_state.service_result
 (** BIOS 서비스 하나를 실행한다. *)

@@ -9,6 +9,11 @@
    The game round trip runs only when SAMGUK3_DIR names a 삼국지3 directory
    (KOEI.COM and its files); the game is not in the repository. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 
 let check name cond =
@@ -197,7 +202,7 @@ let separate_opens_com =
 
 let boot_separate_opens () =
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "F.DAT" "";
+  mount t "F.DAT" "";
   Dos_machine.load_com t separate_opens_com;
   t
 
@@ -282,11 +287,11 @@ let rich_child2 =
 
 let boot_rich () =
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "C1.COM" rich_child1;
-  Dos_machine.mount_file t "C2.COM" rich_child2;
-  Dos_machine.mount_file t "F1.DAT" (String.init 200 (fun i -> Char.chr (i land 0xff)));
-  Dos_machine.mount_file t "F2.DAT" "second";
-  Dos_machine.mount_file t "F3.DAT" "third";
+  mount t "C1.COM" rich_child1;
+  mount t "C2.COM" rich_child2;
+  mount t "F1.DAT" (String.init 200 (fun i -> Char.chr (i land 0xff)));
+  mount t "F2.DAT" "second";
+  mount t "F3.DAT" "third";
   Dos_machine.attach_mouse t;
   Dos_machine.set_mouse t ~x:123 ~y:45 ~buttons:1;
   Dos_machine.load_com t rich_parent;
@@ -325,8 +330,8 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
   c "DTA" (a.dta = b.dta);
   c "find queue" (a.find_queue = b.find_queue);
   c "handles"
-    (List.map (fun (n, h) -> (n, h.hname, h.data, h.pos)) (sorted_bindings a.handles)
-     = List.map (fun (n, h) -> (n, h.hname, h.data, h.pos)) (sorted_bindings b.handles));
+    (List.map (fun (n, h) -> (n, h.target, h.access, h.inheritable, h.pos)) (sorted_bindings a.handles)
+     = List.map (fun (n, h) -> (n, h.target, h.access, h.inheritable, h.pos)) (sorted_bindings b.handles));
   c "psp" (a.psp_seg = b.psp_seg);
   c "blocks" (a.blocks = b.blocks)
 
@@ -400,7 +405,7 @@ let () =
   in
   let com = code ^ String.make (0x200 - String.length code) '\000' ^ "F.DAT\000" in
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "F.DAT" "x";
+  mount t "F.DAT" "x";
   Dos_machine.load_com t com;
   run t 2_000;
   let word i = Dos_machine.mem_read t (0x10200 + (2 * i))
@@ -410,7 +415,7 @@ let () =
   check "a closed number is reused" (word 16 = 7);
   ignore (restore_exn (save_exn t));
   Hashtbl.replace t.Dos_state.handles Dos_state.max_handles
-    { Dos_state.hname = "F.DAT"; data = ref Bytes.empty; pos = 0 };
+    { Dos_state.target = File { hname = "F.DAT"; data = ref Bytes.empty }; access = Read_write; inheritable = true; pos = 0 };
   refused_at_save "a handle number past the table" t
 
 (* 255 EMS allocations: handles 1..254, then 85h. Freeing 3 and allocating
@@ -436,14 +441,17 @@ let () =
   ignore (restore_exn (save_exn t))
 
 (* The payload ends with the two mouse ranges, each a low and a high
-   word of eight bytes. A low end above the high end is refused at restore,
-   even with the checksum fixed. *)
+   word of eight bytes, then the drawn cursor's kind (eight bytes: none
+   drawn). A low end above the high end is refused at restore, even with
+   the checksum fixed. *)
+let drawn_none_len = 8
+
 let () =
   let t = Dos_machine.create () in
   let saved = save_exn t in
   let header_len = magic_len + 8 + 32 + 16 in
   let b = Bytes.of_string saved in
-  let x_low_at = Bytes.length b - (4 * 8) in
+  let x_low_at = Bytes.length b - (4 * 8) - drawn_none_len in
   check "the crafted bytes see the x range 0..639"
     (Bytes.get_int64_be b x_low_at = 0L && Bytes.get_int64_be b (x_low_at + 8) = 639L);
   Bytes.set_int64_be b x_low_at 640L;
@@ -487,7 +495,8 @@ let () =
      its callback registration (the default cursors take a flag, two kinds
      and two text masks; the motion counters are followed by five motion
      settings and two carries), then three ints for each of six button
-     logs, then two ranges of two ints each. The mapping is a count, then
+     logs, then two ranges of two ints each, then the drawn cursor's kind
+     (one int: none drawn). The mapping is a count, then
      per frame page a shown flag byte and, when shown, the handle and the
      page. Pages 2 and 3 are empty. Point page 1 at handle 9, which does
      not exist, and fix the checksum so only the consistency check can
@@ -501,6 +510,7 @@ let () =
   let motion_len = 7 * 8 in
   let mouse_len =
     1 + (3 * 8) + cursors_len + (5 * 8) + motion_len + (button_logs * 3 * 8) + (2 * 2 * 8)
+    + drawn_none_len
   in
   let empty_len = 1 and shown_len = 1 + (2 * 8) in
   let at = String.length saved - mouse_len - (2 * empty_len) - shown_len + 1 in
@@ -539,7 +549,7 @@ let () =
     let n = steps "SNAPSHOT_N" 30_000_000 and m = steps "SNAPSHOT_M" 20_000_000 in
     let boot () =
       let t = Dos_machine.create () in
-      List.iter (fun (f, d) -> Dos_machine.mount_file t f d) files;
+      List.iter (fun (f, d) -> mount t f d) files;
       Dos_machine.load_com t (List.assoc "KOEI.COM" files);
       t
     in

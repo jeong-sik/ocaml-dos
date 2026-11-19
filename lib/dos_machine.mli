@@ -5,9 +5,10 @@
     [Dos_ports], BIOS 는 [Dos_bios], DOS 는 [Dos_dos] 가 맡는다.
 
     결정론: 같은 이미지에 같은 키를 같은 순서로 넣으면 같은 화면이
-    나온다. 시각도 난수도 호스트에서 오지 않는다 — 날짜·시각은
-    [set_clock] 이 정한 기준시각에 CPU 사이클로 환산한 경과를 더해
-    만들고, 타이머 틱도 사이클에서 나온다.
+    나온다. 시각도 난수도 호스트에서 오지 않는다 — RTC 는 [set_clock] 이
+    정한 기준시각에 CPU 사이클로 환산한 경과를 더해 만들고, 타이머 틱도
+    사이클에서 나온다. DOS 의 시각은 BIOS 틱에서, 날짜는 부팅 때 RTC 에서
+    정한 날 수에서 나온다([Dos_clock]).
 
     파일 계약: 하네스가 마운트한 것만 보인다. 게스트가 쓴 내용은 파일을
     닫을 때 마운트 표로 돌아가므로 같은 세션 안에서 저장하고 다시 열 수
@@ -15,7 +16,8 @@
 
 type t = Dos_state.t
 
-val create : ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> unit -> t
+val create :
+  ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> ?sound_blaster:bool -> unit -> t
 (** [model] 은 기본이 [I80286] 이다. [I80386] 이면 게스트가 32 비트 레지스터,
     FS·GS, 0Fh 명령을 쓰고, CPU 판별이 386 을 본다. [speed] 를 주지 않으면
     IBM PC 의 4.77MHz 다.
@@ -23,7 +25,11 @@ val create : ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> uni
     640KB 기계. [mpu401] 이면(기본 아님) 330h 에 UART 전용 MPU-401 을
     꽂는다([Dos_mpu401]). MIDI 바이트는 버린다 — 소리 장치가 없다. 기본으로
     꺼 둔다. 카드를 찾은 게임이 intelligent 모드 명령을 쓰면, 이 카드는
-    답하지 않으므로 그 게임은 답을 기다린다. *)
+    답하지 않으므로 그 게임은 답을 기다린다.
+
+    [sound_blaster] 이면(기본 아님) 220h·IRQ 7·DMA 1 에 Sound Blaster 2.0 을
+    꽂는다. 기본으로 꺼 둔다 — 카드를 찾은 게임이 모델에 없는 전송(ADPCM 등)을
+    고르면 IRQ 를 기다리다 멈추기 때문이다. *)
 
 (** {1 적재} *)
 
@@ -40,11 +46,16 @@ val load_exe : ?name:string -> ?tail:string -> t -> string -> unit
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
     MZ 서명이 아니면 [Invalid_argument]. [name]·[tail] 은 [load_com] 과 같다. *)
 
-val mount_file : t -> string -> string -> unit
-(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)
+val mount_file : t -> string -> string -> (unit, string) result
+(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 루트에서 시작하는 DOS
+    경로다 — [DATA\X.DAT] 나 [DATA/X.DAT] 처럼 쓰고, DOS 가 읽듯
+    대문자로 바꾸고 8.3 으로 자른다({!Dos_path}). 위 디렉터리는 함께
+    생긴다. DOS 이름이 될 수 없는 이름이나 디렉터리와 같은 이름은
+    [Error] 다. *)
 
 val read_mounted : t -> string -> string option
-(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다. *)
+(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다.
+    이름은 [mount_file] 과 같이 읽는다. *)
 
 val mounted_names : t -> string list
 
@@ -238,7 +249,19 @@ val tick_count : t -> int
     돌아간다. *)
 
 val speaker_on : t -> bool
-(** 스피커의 게이트와 데이터가 둘 다 열렸다. 소리는 내지 않는다. *)
+(** 스피커의 게이트와 데이터가 둘 다 열렸다. *)
+
+val start_audio : t -> rate:int -> unit
+(** 지금부터 PC 스피커 소리를 초당 [rate] 개의 표본으로 만든다(RFC 0006).
+    표본은 기계가 간 길을 바꾸지 않는다. 스냅숏은 표본을 담지 않으므로
+    되살린 기계는 다시 불러야 한다. *)
+
+val take_audio : t -> Bytes.t option
+(** 지금까지 만든 표본 가운데 아직 가져가지 않은 것. 16비트 부호 있는
+    리틀 엔디언 모노다. {!start_audio} 를 부르지 않았으면 [None] 이다. *)
+
+val audio_clipped : t -> int option
+(** 16비트 범위를 넘어 자른 표본 수. *)
 
 val free_paras : t -> int
 (** INT 21h AH=48h 이 지금 줄 수 있는 가장 큰 덩어리. *)
@@ -247,5 +270,6 @@ val set_clock :
   t -> year:int -> month:int -> day:int -> hour:int -> minute:int ->
   second:int -> unit
 (** 게스트가 보는 기준시각. 기본은 1990-01-01 08:00:00. BIOS 틱
-    (0x40:0x6C)도 이 시각으로 다시 채운다 — 실기 BIOS 가 부팅 때 RTC 를
-    읽어 틱을 채우는 것과 같다. *)
+    (0x40:0x6C)과 DOS 날짜도 이 시각으로 다시 채운다 — 실기 BIOS 와 DOS 가
+    부팅 때 RTC 를 읽어 하는 일이다. DOS 날짜는 1980-01-01..2099-12-31 만
+    받는다. 그 밖이면 [Invalid_argument]. *)

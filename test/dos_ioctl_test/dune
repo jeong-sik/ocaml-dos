@@ -1,0 +1,3 @@
+(test
+ (name dos_ioctl_test)
+ (libraries dosmachine))

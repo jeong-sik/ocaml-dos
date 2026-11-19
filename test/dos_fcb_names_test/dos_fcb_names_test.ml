@@ -2,6 +2,11 @@
    $FCB_Rename, DELETE.ASM, RENAME.ASM(NEW_RENAME, BAD_ACC), MACRO2.ASM
    TransFCB, DIR.ASM 의 볼륨 레이블 검색. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 let check name got want =
   if got <> want then begin
@@ -73,7 +78,7 @@ let files =
 
 let () =
   let m = Dos_machine.create () in
-  List.iter (fun (n, d) -> Dos_machine.mount_file m n d) files;
+  List.iter (fun (n, d) -> mount m n d) files;
   Dos_machine.load_com m program;
   let put a v = Dos_state.wr8 m (psp + a) v in
   let put_s a s = String.iteri (fun i c -> put (a + i) (Char.code c)) s in

@@ -2,6 +2,11 @@
    50h(INT 21h; RETF). 자식이 끝나면 IVT 22h-24h 를 그 자식 PSP 의 사본으로
    되돌린다(MS-DOS 4.0 PROC.ASM $ABORT). *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 
 let checki name got want =
@@ -44,7 +49,7 @@ let check_ivt name m =
 let run_root ?(files = []) code ~steps =
   let m = Dos_machine.create () in
   plant m;
-  List.iter (fun (n, c) -> Dos_machine.mount_file m n c) files;
+  List.iter (fun (n, c) -> mount m n c) files;
   Dos_machine.load_com m code;
   Dos_machine.run m ~max_steps:steps;
   checki "program exited" (if Dos_machine.exited m then 1 else 0) 1;

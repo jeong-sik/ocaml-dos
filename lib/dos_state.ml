@@ -14,22 +14,59 @@ let vram_base = 0xB8000
    밖이면 AX=6 (invalid handle). 출처: Ralf Brown's Interrupt List,
    INT 21h AH=3Ch/3Dh/45h/46h, 그리고 PSP 형식 표. AH=67h(표 늘리기)는 아직
    모델 밖이라 표는 20칸 고정이다. *)
-let first_file_handle = 5
 let max_handles = 20
 
-(* [data] is shared: every handle opened on the same [hname] (through
-   [Dos_dos.open_handle], not [dup]) points at the same ref, so a write
-   through one is a read through the other -- real DOS keeps one file on
-   disk regardless of how many times it is open. [pos] is each handle's
-   own, since two independent opens read and write at their own offsets.
-   [dup] (AH=45h/46h) instead shares the whole record under a second
-   number, [pos] included -- that is a different number naming the same
-   open file, not a second open. *)
+(* 이 기계의 드라이브는 C: 하나다(0 = A:). *)
+let default_drive = 2
+
+(* The devices SYSINIT opens at boot (MS-DOS 4.0 BIOS/SYSINIT1.ASM). *)
+type standard_device =
+  | Con
+  | Aux
+  | Prn
+
+let device_name = function Con -> "CON" | Aux -> "AUX" | Prn -> "PRN"
+
+(* What a handle names. A file's [data] is shared: every handle opened on
+   the same [hname] (through [Dos_dos.open_file], not [dup]) points at
+   the same ref, so a write through one is a read through the other --
+   real DOS keeps one file on disk regardless of how many times it is
+   open. *)
+type target =
+  | File of { hname : string; data : Bytes.t ref }
+  | Device of standard_device
+
+(* One open, as DOS keeps it in a system file table entry. [pos] is each
+   open's own, since two independent opens read and write at their own
+   offsets; a device has one too, which only AH=42h moves. [dup]
+   (AH=45h/46h) instead shares the whole record under a second number,
+   [pos] included -- that is a different number naming the same open,
+   not a second open.
+   [access] is what the open allows (the low nibble of AH=3Dh's AL,
+   DOS/FILEMODE.INC). [inheritable] is false for an open made with AL
+   bit 7: EXEC's child does not get it ($Dup_PDB skips sf_no_inherit,
+   DOS/MISC.ASM). *)
+type access =
+  | Read_only
+  | Write_only
+  | Read_write
+
 type handle = {
-  hname : string;
-  data : Bytes.t ref;
+  target : target;
+  access : access;
+  inheritable : bool;
   mutable pos : int;
 }
+
+(* The table a program starts with. SYSINIT opens CON once for reading
+   and writing and duplicates it to 1 and 2, so the three share one
+   record; it opens AUX for reading and writing as 3 and PRN write-only
+   as 4. Without these, C runtimes stop at their first write with
+   invalid handle (6). *)
+let standard_handles () =
+  let device target access = { target = Device target; access; inheritable = true; pos = 0 } in
+  let con = device Con Read_write in
+  [ (0, con); (1, con); (2, con); (3, device Aux Read_write); (4, device Prn Write_only) ]
 
 (* INT 33h AX=0x0C 로 건 마우스 이벤트 핸들러의 등록. [mouse_handler_mask]
    0 은 미등록 — 마스크가 0 이면 주소가 남아 있어도 부르지 않는다. 세 값은
@@ -59,8 +96,8 @@ let cursor_rows = 16
 
 type graphics_cursor =
   | Default_arrow
-      (** 리셋 뒤 드라이버에 든 화살표다. 이 기계는 그 비트맵을 지어내지
-          않는다. 무엇을 그릴지는 커서를 그리는 쪽이 정한다(이슈 #77). *)
+      (** 리셋 뒤 드라이버에 든 화살표다. 비트맵은 Dos_mouse_cursor 의
+          default_screen_mask·default_cursor_mask(DOSBox-X mouse.cpp)다. *)
   | Custom_cursor of {
       hot_x : int;  (** BX 그대로 *)
       hot_y : int;  (** CX 그대로 *)
@@ -82,6 +119,15 @@ type text_cursor =
 (* 리셋 뒤 텍스트 커서는 속성 바이트만 뒤집는 소프트웨어 커서다(DOSBox-X
    mouse.cpp defaultTextAndMask 77FFh·defaultTextXorMask 7700h). *)
 let default_text_cursor = Software_text { screen_mask = 0x77FF; cursor_mask = 0x7700 }
+
+(* 드라이버가 화면에 그려 둔 커서와 그 밑에 있던 것. 숨기거나 옮기기 전에
+   되돌린다(DOSBox-X mouse.cpp backData·backposx·backposy). *)
+type drawn_cursor =
+  | Not_drawn
+  | Drawn_text of { page : int; col : int; row : int; under : int }
+      (** 칸 하나, [under] 는 그 칸의 글자·속성 워드 *)
+  | Drawn_graphics of { left : int; top : int; width : int; height : int; under : int array }
+      (** 화면 안으로 자른 사각형. [under] 는 위 줄부터 줄마다 [width] 점 *)
 
 (* 움직임 설정 — AX=0Fh 미키/화소 비율, 1Ah 감도, 13h·1Ah 두 배 속도 문턱
    (RBIL INT 33/000F, 001A, 0013). *)
@@ -139,6 +185,7 @@ type mouse = {
   mouse_releases : button_log array;
   mutable mouse_range_x : int * int;
   mutable mouse_range_y : int * int;
+  mutable mouse_drawn : drawn_cursor;  (** {!Dos_mouse_cursor} 가 쓴다 *)
 }
 
 (* ---------- AH=4Bh EXEC 의 부모 프레임 ----------
@@ -185,7 +232,10 @@ type dos_input_request =
   | Read_buffered_line of { base : int; capacity : int; line : line_input }
   | Read_console_line of { destination : int; length : int; line : line_input }
 
-type input_request = Bios_key | Dos_input of dos_input_request
+(* 멈춘 BIOS·DOS 서비스가 기다리는 것. [Bios_wait] 은 입력이 아니라 INT 15h
+   AH=86h 가 RTC 의 끝 깃발(40:A1h bit 7)을 기다리는 것이다 — 기다리는 동안
+   IRQ 가 들어오는 길이 같아서 여기에 있다. *)
+type input_request = Bios_key | Bios_wait | Dos_input of dos_input_request
 
 type service_result = Completed | Control_transferred | Awaiting_input of input_request
 
@@ -198,6 +248,10 @@ type input_continuation = {
   return_control_flags : int;  (* caller IF/TF, before the service's wait loop *)
   service_return : service_return;
 }
+
+(* What AH=4Eh found and AH=4Fh still has to give: a file by its path key,
+   or a directory entry by the name it shows ([.], [..] or its name). *)
+type find_hit = File_hit of string | Dir_hit of string
 
 (* 이 기계가 받지 못한 INT 호출의 갈래. 기계 동작은 바꾸지 않고 관찰자에게만
    알린다 — 게임을 돌려 무엇이 빠졌는지 찾는 진단용이다. *)
@@ -212,9 +266,14 @@ type t = {
   mutable exited : bool;
   mutable exit_code : int;
   video : Dos_video.t;
-  host_files : (string, Bytes.t) Hashtbl.t;   (** 하네스가 마운트한 파일 *)
+  host_files : (string, Bytes.t) Hashtbl.t;
+        (** 하네스가 마운트한 파일 — 키는 {!Dos_path.key} *)
+  dirs : (string, unit) Hashtbl.t;
+        (** 루트 밖의 디렉터리 — 키는 {!Dos_path.key}. 마운트한 파일의 위
+            디렉터리와 게스트가 AH=39h 로 만든 것 *)
+  mutable cwd : Dos_path.t;                   (** C: 의 현재 디렉터리 *)
   handles : (int, handle) Hashtbl.t;
-        (** 핸들 번호 [first_file_handle] .. [max_handles - 1] 만 쓴다 *)
+        (** 핸들 번호 0 .. [max_handles - 1]. [standard_handles] 로 시작한다 *)
   open_files : (string, Bytes.t ref) Hashtbl.t;
         (** 이름 하나가 지금 열려 있는 동안의 공유 버퍼. [handles] 의 어떤
             항목도, [exec_frames] 의 어떤 부모 핸들도 그 이름을 더는 물지
@@ -230,17 +289,21 @@ type t = {
   mutable free_base : int;                    (** 할당 가능 첫 세그먼트 *)
   mutable free_top : int;                     (** 할당 가능 상한 세그먼트 *)
   mutable blocks : (int * int) list;          (** (세그먼트, paras) *)
-  mutable find_queue : string list;           (** findnext 가 남긴 이름 *)
+  mutable find_queue : find_hit list;         (** findnext 가 남긴 것 *)
   mutable stubs : (int * int) list;           (** (벡터, ROM 스텁 오프셋) *)
   mutable exec_frames : exec_frame list;      (** EXEC 로 띄운 자식의 부모 프레임 *)
   mutable last_child_code : int;              (** AH=4Dh 가 돌려줄 마지막 자식 코드 *)
-  (* 기준 시각 — 여기에 경과를 더해 날짜·시각을 만든다 *)
+  (* 기준 시각 — RTC(INT 1Ah 02h·04h)는 여기에 경과를 더해 만든다. 부팅
+     때 BIOS 틱과 DOS 날짜도 이 시각에서 채운다. *)
   mutable epoch_year : int;
   mutable epoch_month : int;
   mutable epoch_day : int;
   mutable epoch_hour : int;
   mutable epoch_min : int;
   mutable epoch_sec : int;
+  mutable dos_days : int;
+      (** DOS 의 날짜: 1980-01-01 부터 센 날 수(MS-DOS DAYCNT). 시각은 BIOS
+          틱에서 읽는다(Dos_clock). *)
   (* EMS 4.0 스텁(Dos_ems)의 상태 *)
   ems_pages : (int, Bytes.t array) Hashtbl.t;
         (** 핸들(0 .. [Dos_ems.max_handle]) → 논리 페이지 배열(각 16KB).
@@ -298,8 +361,9 @@ let physical seg off = ((seg lsl 4) + off) land phys_mask
    ErrorMode 는 늘 0 이다.
 
    그 뒤는 확장 에러(AH=59h)다: WPErr, EXTERR_LOCUS, EXTERR, EXTERR_ACTION,
-   EXTERR_CLASS, EXTERRPT. 0x0C..0x19(DTA, 현재 PSP 등)는 호스트 상태에
-   있어 비워 두고, Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
+   EXTERR_CLASS, EXTERRPT. 0x0C..0x16(DTA, 현재 PSP 등)는 호스트 상태에
+   있어 비워 둔다. 0x17 은 CNTCFLAG(AH=33h 확장 Ctrl-Break 깃발)다.
+   Swap_Always 의 USER_IN_AX(0x1A)에 기능을 기억한다. *)
 let sda_seg = 0x0070
 let sda_error_mode = 0
 let sda_in_dos = 1
@@ -309,6 +373,7 @@ let sda_exterr = 4
 let sda_exterr_action = 6
 let sda_exterr_class = 7
 let sda_exterr_pointer = 8
+let sda_cntc_flag = 0x17
 let sda_user_in_ax = 0x1A
 let byte_max = 0xFF
 let sda off = physical sda_seg off
@@ -354,7 +419,7 @@ let enter_call t =
 let set_input_continuations t waits =
   t.input_continuations <- waits;
   let in_dos = List.length (List.filter (fun w ->
-      match w.request with Dos_input _ -> true | Bios_key -> false) waits) in
+      match w.request with Dos_input _ -> true | Bios_key | Bios_wait -> false) waits) in
   wr8 t (physical sda_seg sda_in_dos) (min in_dos byte_max)
 
 let finish_service_return t = function
@@ -453,17 +518,13 @@ let now_fields t =
   done;
   (!y, !m, !d, rest / 3600, rest mod 3600 / 60, rest mod 60)
 
-(* 1980-01-01 부터의 요일 계산용 — DOS AH=2Ah 가 AL 에 요일을 준다.
-   1980-01-01 은 화요일이므로 2 에서 시작한다. *)
-let day_of_week (y, m, d) =
-  let days = ref 0 in
-  for yy = 1980 to y - 1 do
-    days := !days + if (yy mod 4 = 0 && yy mod 100 <> 0) || yy mod 400 = 0
-                    then 366 else 365
-  done;
-  for mm = 1 to m - 1 do days := !days + days_in_month y mm done;
-  days := !days + d - 1;
-  (!days + 2) mod 7
+(* BIOS 데이터 영역의 틱(0x40:0x6C, 32 비트)과 자정 넘김(0x40:0x70). *)
+let bda_ticks = 0x46C
+let bda_midnight = 0x470
+let read_ticks t = rd16 t bda_ticks lor (rd16 t (bda_ticks + 2) lsl 16)
+let write_ticks t v =
+  wr16 t bda_ticks (v land 0xFFFF);
+  wr16 t (bda_ticks + 2) ((v lsr 16) land 0xFFFF)
 
 (* ---------- 쪽·커서·화면 ---------- *)
 
@@ -773,5 +834,12 @@ let deliver_call t seg off =
 let starve t =
   t.kbd_wait <- true;
   t.kbd_requests <- t.kbd_requests + 1
+
+(* 콘솔에 읽을 글자가 있는가(INT 21h AH=0Bh, IOCTL 4406h). 없으면 게스트가
+   키를 기다리는 중이다 — [starve] 로 알린다. *)
+let console_ready t =
+  let available = t.ext_scan_pending <> 0 || key_pending t in
+  if available then t.kbd_wait <- false else starve t;
+  available
 
 let interrupts_enabled t = Cpu86.flags t.cpu land Cpu86.f_interrupt <> 0
