@@ -73,6 +73,19 @@ ALL=$(ls /tmp/sst80386/v1_ex_real_mode/*.MOO.gz | xargs -n1 basename | sed 's/\.
 SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
 ```
 
+보호 모드(RFC 0005)는 [test386.asm](https://github.com/barotto/test386.asm)
+ROM 으로 잰다. ROM 은 GPL-3.0 이라 저장소에 없고, `TEST386_BIN` 이 64KB
+빌드를 가리키면 `test/cpu86_test386` 이 돈다(없으면 건너뛴다). 러너는 맨
+`I80386` 에 1MB 를 붙이고 ROM 을 F0000h 에 둔 뒤 F000:FFF0 에서 시작한다.
+ROM 이 포트 190h 에 쓰는 POST 코드를 모은다. 지금은 실모드 POST 00h-06h 를
+지나 08h 의 32 비트 LGDT(`66 0F 01`)에서 멈추는 것이 기대값이다. 실패한
+시험은 ROM 의 error 자리에서 HLT 하므로 테스트가 깨진다.
+
+```sh
+# NASM 으로 빌드한 test386.bin 이 있을 때
+TEST386_BIN=/path/to/test386.bin dune build --root . @test/cpu86_test386/runtest --force
+```
+
 ### 어느 칩을 흉내내는가
 
 8086 과 80186 은 같은 opcode 자리에 다른 명령을 놓았다. `Cpu86.create`
