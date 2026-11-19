@@ -233,6 +233,56 @@ let next_rise t ~tick =
        if (not (out_at t seg (r.at - 1))) && out_at t next 0 then Some s'
        else Option.map (tick_of s' 0) (rise_in t next 0))
 
+(* 이 구간이 끝없이 이어진다고 볼 때, 지나간 펄스 [k] 뒤로 OUT 이 오르든
+   내리든 바뀌는 첫 펄스 수. 갈래마다 [out_at] 의 식을 풀었다. *)
+let change_in t seg k =
+  let n = seg.n in
+  match t.mode with
+  | Interrupt_on_terminal_count | Hardware_one_shot ->
+    (* 한 번 오르면 다음 사건까지 높다 *)
+    rise_in t seg k
+  | Rate_generator ->
+    (* 카운트 1 이면 늘 낮다. 아니면 p = n-1 인 한 펄스만 낮다. *)
+    if n < 2 then None
+    else
+      let p = k mod n in
+      if p = n - 1 then Some (k + 1) else Some (k - p + n - 1)
+  | Square_wave ->
+    (* 카운트 1 이면 늘 높다. 아니면 반주기가 끝날 때마다 바뀐다. *)
+    if n < 2 then None
+    else
+      let _, j, len = square seg k in
+      Some (k - j + len)
+  | Software_strobe | Hardware_strobe ->
+    (* 펄스 n 하나만 낮다 *)
+    if k < n then Some n else if k = n then Some (n + 1) else None
+
+let next_change t ~tick =
+  settle t ~tick;
+  match t.run with
+  | Stopped _ | Counting { seg = { since = None; _ }; _ } -> None
+  | Counting { seg = { since = Some s; _ } as seg; reload } ->
+    let tick_of seg_since seg_base k' = seg_since + (k' - seg_base) in
+    let in_segments () =
+      let k = pulses seg tick in
+      match reload, change_in t seg k with
+      | None, here -> Option.map (tick_of s seg.base) here
+      | Some r, Some k' when k' < r.at -> Some (tick_of s seg.base k')
+      | Some r, (Some _ | None) ->
+        (* [next_rise] 처럼 새 카운트가 실린 구간으로 넘어간다. 경계에서
+           바뀌는지는 옛 구간의 마지막 펄스와 새 구간의 첫 펄스로 본다. *)
+        let s' = tick_of s seg.base r.at in
+        let next = { n = r.next_n; low_first = r.next_low_first; base = 0; since = Some s' } in
+        if out_at t seg (r.at - 1) <> out_at t next 0 then Some s'
+        else Option.map (tick_of s' 0) (change_in t next 0)
+    in
+    (match t.mode with
+     | Hardware_one_shot when tick < s ->
+       (* 트리거 뒤 첫 펄스 전까지 [out] 은 높고, 그 펄스에 낮아진다 *)
+       Some s
+     | Hardware_one_shot | Interrupt_on_terminal_count | Rate_generator | Square_wave
+     | Software_strobe | Hardware_strobe -> in_segments ())
+
 let fresh_segment ~tick ~gate n =
   { n; low_first = false; base = 0; since = (if gate then Some (tick + 1) else None) }
 

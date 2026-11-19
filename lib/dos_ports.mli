@@ -77,6 +77,11 @@ val irq0_due : t -> bool
     게임이 음악·부드러운 이동을 위해 모드와 카운트를 바꾼다. 상승 간격과
     시점은 {!Dos_pit} 가 그 카운트를 실은 때부터 센다. *)
 
+val rtc_irq_due : t -> bool
+(** RTC 의 IRQF 가 [set_now] 의 시각까지 0 에서 1 로 바뀌었다 — IRQ8
+    요청이다. 레지스터 C 를 읽기 전에는 다시 참이 되지 않는다. 기계가 매
+    스텝 [set_now] 뒤에 부른다. *)
+
 val pic : t -> Dos_pic.t
 (** 포트 0x20·0x21 의 인터럽트 컨트롤러. 기계가 IRQ 를 올리고 고른다. *)
 
@@ -87,6 +92,10 @@ val sound_blaster : t -> Dos_sb.t option
 (** 꽂힌 Sound Blaster. 기계가 때가 되면 {!Dos_sb.advance} 를 부르고 IRQ 7 을
     올린다. 22Eh 읽기·리셋·새 전송으로 DSP 가 선을 내리면, CPU 가 아직 안
     받은 PIC 요청은 이 모듈이 거둔다. *)
+
+val opl : t -> Dos_opl.t
+(** OPL2 의 음색 레지스터. 389h 로 쓴다. Sound Blaster 를 꽂으면 229h 로도
+    쓴다. *)
 
 val kbc : t -> Dos_kbc.t
 (** 포트 0x60·0x64 의 키보드 컨트롤러. *)
@@ -103,6 +112,23 @@ val reset_dac : t -> unit
 val speaker_on : t -> bool
 (** 포트 0x61 의 bit0·bit1 이 둘 다 켜졌다 — 게이트와 데이터가 열렸다.
     소리를 내지는 않고, 하네스가 관측만 한다. *)
+
+(** {1 Sound (RFC 0006)} *)
+
+val start_audio : t -> rate:int -> unit
+(** Samples the PC speaker and the Sound Blaster's DAC from now on,
+    [rate] samples a second. A port access that changes the speaker, and
+    a DSP change at its own cycle, first turn the time before it into
+    samples. *)
+
+val take_audio : t -> Bytes.t option
+(** The samples not taken yet, signed 16-bit little endian mono, up to
+    now — or up to the DSP's next event when that is earlier, since the
+    next step runs it at its own cycle. [None] when {!start_audio} was
+    not called. *)
+
+val audio_clipped : t -> int option
+(** How many samples were clipped to the 16-bit range. *)
 
 (** {1 Snapshot} *)
 

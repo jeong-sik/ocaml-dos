@@ -65,7 +65,7 @@ let service_status_mask t v =
   | Some Dos_call ->
     let fn = if ah = 0x0C then Cpu86.reg8 t.cpu 0 else ah in
     if fn = 0x06 then Cpu86.f_zero else Cpu86.f_carry
-  | Some (Bios (Keyboard_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
+  | Some (Bios (Keyboard_irq | Rtc_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
 let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false)
@@ -251,6 +251,7 @@ let step_result t =
     (* 채널 0 의 OUT 이 오르면 IRQ0 을 요청한다. 그 사이 여러 번 올랐어도
        IRR 은 한 비트다. *)
     if Dos_ports.irq0_due t.ports then Dos_pic.raise_irq pic Dos_pic.Timer;
+    if Dos_ports.rtc_irq_due t.ports then Dos_pic.raise_irq pic Dos_pic.Rtc;
     let kbc = Dos_ports.kbc t.ports in
     if cyc >= Dos_kbc.ready_at kbc && Dos_kbc.latch kbc ~hz:(Dos_ports.cpu_hz t.ports) ~now:cyc then
       Dos_pic.raise_irq pic Dos_pic.Keyboard;
@@ -281,6 +282,7 @@ let step_result t =
            && Cpu86.seg t.cpu 2 = wait.return_ss && Cpu86.reg16 t.cpu 4 = wait.return_sp ->
       let result = match wait.request with
         | Bios_key -> Dos_bios.read_key t
+        | Bios_wait -> Dos_bios.resume_wait t
         | Dos_input request -> Dos_dos.resume_input t request
       in
       (match result with
@@ -497,6 +499,18 @@ let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
 
 let on_unserved t f = t.on_unserved <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
+
+(* 포트 쪽 시각은 스텝 처음에 맞춘다. 스텝 밖에서 부르면 지금 사이클로
+   먼저 맞춘다 — 다음 스텝이 하는 일과 같다. *)
+let start_audio t ~rate =
+  Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
+  Dos_ports.start_audio t.ports ~rate
+
+let take_audio t =
+  Dos_ports.set_now t.ports (Cpu86.cycles t.cpu);
+  Dos_ports.take_audio t.ports
+
+let audio_clipped t = Dos_ports.audio_clipped t.ports
 let video_mode t = Dos_video.mode t.video
 let screen_digest t = Dos_video.screen_digest t.video
 

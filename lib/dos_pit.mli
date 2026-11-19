@@ -46,6 +46,13 @@ val next_rise : t -> tick:int -> int option
     [None] 이다 — 멈춘 카운터, GATE 가 낮은 셈, 끝난 원숏이 그렇다. 채널 0 의
     OUT 상승이 IRQ0 이다. *)
 
+val next_change : t -> tick:int -> int option
+(** [tick] 뒤로 {!out} 이 [tick] 의 값과 달라지는 첫 틱. 오름과 내림을 모두
+    본다. {!next_rise} 처럼 다음 사건이 없다고 볼 때의 값이고, OUT 이 더는
+    바뀌지 않으면 [None] 이다. 소리 표본을 만드는 쪽이 두 사건 사이의 OUT
+    파형을 이것으로 걷는다. [tick] 은 이 카운터를 마지막으로 부른 틱보다
+    앞서면 안 된다 — 지난 구간은 남아 있지 않다. *)
+
 (** {1 Snapshot} *)
 
 val write_state : Dos_snap_codec.writer -> t -> unit

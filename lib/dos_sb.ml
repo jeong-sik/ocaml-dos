@@ -41,6 +41,9 @@ let speaker_on_answer = 0xFF
 let speaker_off_answer = 0x00
 let undocumented_answer = 0x00
 
+(* An 8-bit sample is unsigned: 80h is the DAC at rest. *)
+let dac_rest = 0x80
+
 let length_of lo hi = 1 + lo + (hi lsl 8)
 
 (* What one DMA byte holds: one 8-bit sample, or the ADPCM codes of 2, 3
@@ -55,7 +58,7 @@ let samples_per_byte = function Pcm8 -> 1 | Adpcm4 -> 2 | Adpcm26 -> 3 | Adpcm2 
 
 (* What a command asks of the DSP once its parameter bytes are in. *)
 type request =
-  | Direct_dac            (* 10h: the sample goes nowhere *)
+  | Direct_dac of int     (* 10h: one sample straight to the DAC *)
   | Dma_once of format * int  (* 14h, 74h-77h, 16h, 17h: a block of this many bytes *)
   | High_speed_once       (* 91h: one block of the 48h length *)
   | Dma_auto of format    (* 1Ch, 90h, 7Dh, 7Fh, 1Fh: blocks of the 48h length *)
@@ -87,7 +90,7 @@ type decoder =
 
 let decode b =
   match b with
-  | 0x10 -> Needs_one (fun _ -> Direct_dac)
+  | 0x10 -> Needs_one (fun v -> Direct_dac v)
   (* 15h: DOSBox plays it as 14h ("Wari hack"). *)
   | 0x14 | 0x15 -> Needs_two (fun lo hi -> Dma_once (Pcm8, length_of lo hi))
   | 0x74 | 0x75 -> Needs_two (fun lo hi -> Dma_once (Adpcm4, length_of lo hi))
@@ -152,13 +155,29 @@ type t = {
   mutable speaker : bool;
   mutable test_register : int;
   mutable uart : bool;                 (* MIDI UART: 22Ch bytes are MIDI out *)
+  mutable dac : int;                   (* the last 8-bit sample out *)
+  mutable before_output : int -> unit;
+  (* Told the cycle just before [dac] or [speaker] changes, so a listener
+     can turn the time up to it into sound (RFC 0006). *)
 }
 
 let create () =
   { reset = Running; answers = []; last_answer = ready_byte; pending = No_command;
     playback = Idle; timers = []; irq_high = false; time_constant = default_time_constant;
     block_length = default_block; speaker = false; test_register = 0;
-    uart = false }
+    uart = false; dac = dac_rest; before_output = ignore }
+
+let on_output t f = t.before_output <- f
+
+let output t = if t.speaker then t.dac - dac_rest else 0
+
+let set_dac t ~at v =
+  t.before_output at;
+  t.dac <- v
+
+let set_speaker t ~at on =
+  t.before_output at;
+  t.speaker <- on
 
 let sample_us t = 256 - t.time_constant
 let byte_cycles t ~hz format = cycles_of_us ~hz (sample_us t * samples_per_byte format)
@@ -172,8 +191,9 @@ let answer_alone t b = t.answers <- [ b land 0xFF ]
 
 let add_timer t at = t.timers <- List.merge compare [ at ] t.timers
 
-(* DOSBox dsp_reset: the DSP stops and forgets; the test register stays. *)
-let reset_dsp t =
+(* DOSBox dsp_reset: the DSP stops and forgets; the test register stays.
+   The speaker goes off (DOSBox init_speaker_state, SB Pro and before). *)
+let reset_dsp t ~now =
   t.answers <- [];
   t.pending <- No_command;
   t.playback <- Idle;
@@ -181,7 +201,7 @@ let reset_dsp t =
   t.irq_high <- false;
   t.time_constant <- default_time_constant;
   t.block_length <- default_block;
-  t.speaker <- false;
+  set_speaker t ~at:now false;
   t.uart <- false
 
 (* A new transfer drops an unacknowledged IRQ (DOSBox dsp_do_dma_transfer). *)
@@ -205,7 +225,8 @@ let start_auto t ~hz ~now format =
 
 let run t ~hz ~now req =
   match req with
-  | Direct_dac | Unmodelled -> ()
+  | Direct_dac v -> set_dac t ~at:now v
+  | Unmodelled -> ()
   | Dma_once (format, length) -> start_single t ~hz ~now format length
   | High_speed_once -> start_single t ~hz ~now Pcm8 t.block_length
   | Dma_auto format -> start_auto t ~hz ~now format
@@ -222,8 +243,8 @@ let run t ~hz ~now req =
     (match t.playback with
      | Paused b -> t.playback <- Playing (b, now + byte_cycles t ~hz b.format)
      | Idle | Playing _ -> ())
-  | Speaker_on -> t.speaker <- true
-  | Speaker_off -> t.speaker <- false
+  | Speaker_on -> set_speaker t ~at:now true
+  | Speaker_off -> set_speaker t ~at:now false
   | Speaker_status -> answer_alone t (if t.speaker then speaker_on_answer else speaker_off_answer)
   | Exit_auto ->
     (match t.playback with
@@ -257,7 +278,7 @@ let write t ~hz ~now b =
 let reset_write t ~hz ~now v =
   let held = v land 1 <> 0 in
   match t.reset, held with
-  | (Running | Releasing _), true -> reset_dsp t; t.reset <- Held
+  | (Running | Releasing _), true -> reset_dsp t ~now; t.reset <- Held
   | Held, false -> t.reset <- Releasing (now + cycles_of_us ~hz reset_delay_us)
   | Held, true | (Running | Releasing _), false -> ()
 
@@ -331,7 +352,15 @@ let advance t ~hz ~now ~dma ~mem =
          (* The DSP holds its request until the channel opens; the next
             byte goes the moment it does, not in a burst for the wait. *)
          t.playback <- Playing (b, now)
-       | Dos_dma.Byte _ | Dos_dma.No_data _ ->
+       | (Dos_dma.Byte _ | Dos_dma.No_data _) as pulled ->
+         (* An 8-bit sample goes to the DAC at its own time. ADPCM is not
+            decoded yet: the DAC keeps its value. *)
+         (match pulled with
+          | Dos_dma.Byte { value; _ } ->
+            (match b.format with
+             | Pcm8 -> set_dac t ~at:next value
+             | Adpcm4 | Adpcm26 | Adpcm2 -> ())
+          | Dos_dma.No_data _ | Dos_dma.Masked -> ());
          (* The next byte's time is its own block's byte time. *)
          let left = b.left - 1 in
          if left > 0 then t.playback <- Playing ({ b with left }, next + byte_cycles t ~hz b.format)
@@ -426,7 +455,9 @@ let playback_tag = C.range 0 2
    snapshot carries it. *)
 let write_state w
     { reset; answers; last_answer; pending; playback; timers; irq_high; time_constant;
-      block_length; speaker; test_register; uart } =
+      block_length; speaker; test_register; uart;
+      dac = _ (* sound, not machine state: a restored DSP starts at rest *);
+      before_output = _ } =
   (match reset with
    | Running -> C.put w ~what:"SB reset" reset_tag 0
    | Held -> C.put w ~what:"SB reset" reset_tag 1

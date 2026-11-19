@@ -248,7 +248,19 @@ val tick_count : t -> int
     돌아간다. *)
 
 val speaker_on : t -> bool
-(** 스피커의 게이트와 데이터가 둘 다 열렸다. 소리는 내지 않는다. *)
+(** 스피커의 게이트와 데이터가 둘 다 열렸다. *)
+
+val start_audio : t -> rate:int -> unit
+(** 지금부터 PC 스피커 소리를 초당 [rate] 개의 표본으로 만든다(RFC 0006).
+    표본은 기계가 간 길을 바꾸지 않는다. 스냅숏은 표본을 담지 않으므로
+    되살린 기계는 다시 불러야 한다. *)
+
+val take_audio : t -> Bytes.t option
+(** 지금까지 만든 표본 가운데 아직 가져가지 않은 것. 16비트 부호 있는
+    리틀 엔디언 모노다. {!start_audio} 를 부르지 않았으면 [None] 이다. *)
+
+val audio_clipped : t -> int option
+(** 16비트 범위를 넘어 자른 표본 수. *)
 
 val free_paras : t -> int
 (** INT 21h AH=48h 이 지금 줄 수 있는 가장 큰 덩어리. *)
