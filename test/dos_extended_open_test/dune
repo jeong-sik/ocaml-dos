@@ -1,0 +1,3 @@
+(test
+ (name dos_extended_open_test)
+ (libraries dosmachine))
