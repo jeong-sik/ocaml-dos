@@ -9,6 +9,11 @@
    The game round trip runs only when SAMGUK3_DIR names a 삼국지3 directory
    (KOEI.COM and its files); the game is not in the repository. *)
 
+let mount m name data =
+  match Dos_machine.mount_file m name data with
+  | Ok () -> ()
+  | Error e -> failwith ("mount " ^ e)
+
 let failed = ref 0
 
 let check name cond =
@@ -58,6 +63,60 @@ let with_byte s i f =
   let b = Bytes.of_string s in
   Bytes.set b i (f s.[i]);
   Bytes.to_string b
+
+(* A 386 machine: after POPF sets IOPL 3, each turn adds 10000h to EAX and
+   puts EAX >> 12 in GS and EAX >> 16 in FS. A snapshot that dropped or
+   swapped the upper halves, FS, GS or IOPL would resume a different machine. *)
+let regs386_com =
+  "\x9C\x58\x0D\x00\x30\x50\x9D"            (* pushf; pop ax; or ax,3000h; push ax; popf *)
+  ^ "\x66\xB8\x01\x00\x00\x00"              (* mov eax,1 *)
+  ^ "\x66\xBB\x00\x00\x01\x00"              (* mov ebx,10000h *)
+  ^ "\x66\x01\xD8"                          (* loop: add eax,ebx *)
+  ^ "\x66\x89\xC1\x66\xC1\xE9\x0C\x8E\xE9"  (* mov ecx,eax; shr ecx,12; mov gs,cx *)
+  ^ "\x66\xC1\xE9\x04\x8E\xE1"              (* shr ecx,4; mov fs,cx *)
+  ^ "\xEB\xEC"                              (* jmp loop *)
+
+let iopl_3 = 0x3000
+
+let boot_386 () =
+  let t = Dos_machine.create ~model:Cpu86.I80386 () in
+  Dos_machine.load_com t regs386_com;
+  t
+
+let () =
+  let saved = round_trip ~name:"386" ~boot:boot_386 ~n:1_001 ~m:2_000 in
+  let cpu = (restore_exn saved).Dos_state.cpu in
+  check "386: the restored machine is a 386" (Cpu86.model cpu = Cpu86.I80386);
+  check "386: EAX keeps its upper half" (Cpu86.reg32 cpu 0 lsr 16 > 0);
+  check "386: FS and GS come back apart" (Cpu86.seg cpu 4 > 0 && Cpu86.seg cpu 5 <> Cpu86.seg cpu 4);
+  check "386: IOPL comes back" (Cpu86.flags cpu land iopl_3 = iopl_3);
+  let default = (restore_exn (save_exn (Dos_machine.create ()))).Dos_state.cpu in
+  check "a default machine restores as a 286" (Cpu86.model default = Cpu86.I80286)
+
+(* The CPU refuses a saved state of the other kind before writing anything. *)
+let () =
+  let cpu model =
+    Cpu86.create ~model ~read:(fun _ -> 0) ~write:(fun _ _ -> ())
+      ~port_in:(fun _ -> 0) ~port_out:(fun _ _ -> ()) ()
+  in
+  let c386 = cpu Cpu86.I80386 and c286 = cpu Cpu86.I80286 in
+  Cpu86.set_reg32 c386 0 0x12345678;
+  Cpu86.set_seg c386 4 0x1111;
+  let s386 = Cpu86.save_state c386 and s286 = Cpu86.save_state c286 in
+  let refused c s =
+    match Cpu86.load_state c s with () -> false | exception Invalid_argument _ -> true
+  in
+  check "386 state into a 286 is refused" (refused c286 s386);
+  check "286 state into a 386 is refused" (refused c386 s286);
+  check "the refused load left the 386 as it was" (Cpu86.reg32 c386 0 = 0x12345678);
+  (match s386.Cpu86.saved_386 with
+   | Some x ->
+     check "seven upper halves are refused"
+       (refused c386 { s386 with saved_386 = Some { x with saved_regs_hi = Array.make 7 0 } })
+   | None -> check "a 386 saves its upper halves" false);
+  let c = cpu Cpu86.I80386 in
+  Cpu86.load_state c s386;
+  check "386 state loads into a 386" (Cpu86.reg32 c 0 = 0x12345678 && Cpu86.seg c 4 = 0x1111)
 
 (* Creates A.TXT, dups the handle, then writes one byte through each handle
    in turn, forever. After dup the two numbers share one record, so a
@@ -143,7 +202,7 @@ let separate_opens_com =
 
 let boot_separate_opens () =
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "F.DAT" "";
+  mount t "F.DAT" "";
   Dos_machine.load_com t separate_opens_com;
   t
 
@@ -176,7 +235,9 @@ let () =
    FCB and reads one record, opens a handle, allocates two EMS pages and
    leaves both mapped with a byte written through the frame, latches PIT
    counter 0, then CLI and spins, so the next timer tick stays pending.
-   The host attaches the mouse at (123, 45) with the left button down.
+   The host attaches the mouse at (123, 45) with the left button down; the
+   press is logged at (120, 40), its 8x8 cell in mode 3. Setting mode 12h
+   then moves the cursor to the middle of 640x480 and keeps the log.
 
    Its round trip also compares the restored fields to the original's one by
    one, so a reader that drops or swaps a field fails by name even where the
@@ -226,11 +287,11 @@ let rich_child2 =
 
 let boot_rich () =
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "C1.COM" rich_child1;
-  Dos_machine.mount_file t "C2.COM" rich_child2;
-  Dos_machine.mount_file t "F1.DAT" (String.init 200 (fun i -> Char.chr (i land 0xff)));
-  Dos_machine.mount_file t "F2.DAT" "second";
-  Dos_machine.mount_file t "F3.DAT" "third";
+  mount t "C1.COM" rich_child1;
+  mount t "C2.COM" rich_child2;
+  mount t "F1.DAT" (String.init 200 (fun i -> Char.chr (i land 0xff)));
+  mount t "F2.DAT" "second";
+  mount t "F3.DAT" "third";
   Dos_machine.attach_mouse t;
   Dos_machine.set_mouse t ~x:123 ~y:45 ~buttons:1;
   Dos_machine.load_com t rich_parent;
@@ -258,10 +319,9 @@ let same_fields name (a : Dos_machine.t) (b : Dos_machine.t) =
                       && List.map fst fa.parent_handles = List.map fst fb.parent_handles))
     a.exec_frames b.exec_frames;
   c "last child code" (a.last_child_code = b.last_child_code);
-  c "pending IRQ0" (a.pending_irq0 = b.pending_irq0);
-  c "last tick" (a.last_tick = b.last_tick);
   c "EMS mapping" (a.ems_mapped = b.ems_mapped);
   c "EMS pages" (sorted_bindings a.ems_pages = sorted_bindings b.ems_pages);
+  c "EMS saved maps" (sorted_bindings a.ems_saved = sorted_bindings b.ems_saved);
   c "mouse x" (a.mouse.mouse_x = b.mouse.mouse_x);
   c "mouse y" (a.mouse.mouse_y = b.mouse.mouse_y);
   c "mouse buttons" (a.mouse.mouse_buttons = b.mouse.mouse_buttons);
@@ -285,19 +345,24 @@ let () =
   let pre what cond = check ("rich machine has " ^ what) cond in
   pre "one open EXEC frame" (List.length a.exec_frames = 1);
   pre "last child code 42h" (a.last_child_code = 0x42);
-  pre "a pending timer tick" a.pending_irq0;
+  pre "a pending timer tick" (Dos_pic.requested (Dos_ports.pic a.ports) Dos_pic.Timer);
   pre "mode 12h" (Dos_video.mode a.video = 0x12);
   pre "a planar byte" (Bytes.get (Dos_video.planes a.video).(0) 0 = '\x5a');
   pre "DAC entry 5" ((Dos_ports.palette a.ports).(5) = (10, 20, 30));
   pre "two EMS pages mapped"
-    (match a.ems_mapped with [| (h, 0); (h', 1); (0, 0); (0, 0) |] -> h = h' && h > 0 | _ -> false);
+    (match a.ems_mapped with
+     | [| Some (h, 0); Some (h', 1); None; None |] -> h = h' && h > 0
+     | _ -> false);
   pre "the EMS byte in page 1"
-    (Hashtbl.fold (fun _ pages acc -> acc || Bytes.get pages.(1) 0 = '\x77') a.ems_pages false);
+    (Hashtbl.fold
+       (fun _ pages acc -> acc || (Array.length pages > 1 && Bytes.get pages.(1) 0 = '\x77'))
+       a.ems_pages false);
   pre "an FCB one record in" (List.map (fun (_, (_, p)) -> p) (sorted_bindings a.fcbs) = [ 128 ]);
   pre "two names left in the find queue" (List.length a.find_queue = 2);
   pre "handle 5 open" (Hashtbl.mem a.handles 5);
-  pre "the mouse at (123, 45), button 1"
-    (a.mouse.mouse_x = 123 && a.mouse.mouse_y = 45 && a.mouse.mouse_buttons = 1);
+  pre "the mouse at (320, 240) after mode 12h, button 1, press logged at (120, 40)"
+    (a.mouse.mouse_x = 320 && a.mouse.mouse_y = 240 && a.mouse.mouse_buttons = 1
+     && a.mouse.mouse_presses.(0).last_x = 120 && a.mouse.mouse_presses.(0).last_y = 40);
   let saved = save_exn a in
   let b = restore_exn saved in
   same_fields "rich" a b;
@@ -340,7 +405,7 @@ let () =
   in
   let com = code ^ String.make (0x200 - String.length code) '\000' ^ "F.DAT\000" in
   let t = Dos_machine.create () in
-  Dos_machine.mount_file t "F.DAT" "x";
+  mount t "F.DAT" "x";
   Dos_machine.load_com t com;
   run t 2_000;
   let word i = Dos_machine.mem_read t (0x10200 + (2 * i))
@@ -372,8 +437,31 @@ let () =
   check "EMS: the 255th allocation is 85h" (rd 1 = 0x85);
   check "EMS: allocation after a free succeeds" (rd 3 = 0);
   check "EMS: the freed number is reused" (rd 4 = 3 && rd 5 = 0);
-  check "EMS: 254 handles" (Hashtbl.length t.Dos_state.ems_pages = 254);
+  check "EMS: 254 handles and the OS handle" (Hashtbl.length t.Dos_state.ems_pages = 255);
   ignore (restore_exn (save_exn t))
+
+(* The payload ends with the two mouse ranges, each a low and a high
+   word of eight bytes, then the drawn cursor's kind (eight bytes: none
+   drawn). A low end above the high end is refused at restore, even with
+   the checksum fixed. *)
+let drawn_none_len = 8
+
+let () =
+  let t = Dos_machine.create () in
+  let saved = save_exn t in
+  let header_len = magic_len + 8 + 32 + 16 in
+  let b = Bytes.of_string saved in
+  let x_low_at = Bytes.length b - (4 * 8) - drawn_none_len in
+  check "the crafted bytes see the x range 0..639"
+    (Bytes.get_int64_be b x_low_at = 0L && Bytes.get_int64_be b (x_low_at + 8) = 639L);
+  Bytes.set_int64_be b x_low_at 640L;
+  let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
+  Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
+  match Dos_snapshot.restore (Bytes.to_string b) with
+  | Error (Dos_snapshot.Corrupt m) ->
+    check "a mouse range with its ends crossed is refused" (m = "mouse range low above high")
+  | Ok _ -> check "a mouse range with its ends crossed is refused at restore" false
+  | Error e -> check ("crossed mouse range: " ^ Dos_snapshot.error_to_string e) false
 
 (* Inconsistent EMS state: refused by save, and by restore when the bytes
    are crafted past save. *)
@@ -383,27 +471,58 @@ let () =
   let saved = save_exn t in
   let open Dos_state in
   let mapped = Array.copy t.ems_mapped in
-  t.ems_mapped.(2) <- (9, 0);
+  t.ems_mapped.(2) <- Some (9, 0);
   refused_at_save "an EMS frame mapping a handle that does not exist" t;
+  (match mapped.(0) with
+   | Some (h, _) -> t.ems_mapped.(2) <- Some (h, 99)
+   | None -> check "the rich machine shows an EMS page" false);
+  refused_at_save "an EMS frame mapping a page past its handle's pages" t;
   Array.blit mapped 0 t.ems_mapped 0 (Array.length mapped);
-  let h, _ = t.ems_mapped.(0) in
+  Hashtbl.replace t.ems_saved Dos_ems.os_handle [| None; Some (9, 0); None; None |];
+  refused_at_save "an EMS saved map naming a handle that does not exist" t;
+  Hashtbl.reset t.ems_saved;
+  let os_pages = Hashtbl.find t.ems_pages Dos_ems.os_handle in
+  Hashtbl.remove t.ems_pages Dos_ems.os_handle;
+  refused_at_save "EMS without its OS handle" t;
+  Hashtbl.replace t.ems_pages Dos_ems.os_handle os_pages;
+  let h = match t.ems_mapped.(0) with Some (h, _) -> h | None -> -1 in
   let pages = Hashtbl.find t.ems_pages h in
   let page = pages.(0) in
   pages.(0) <- Bytes.make 3 '\000';
   refused_at_save "an EMS page that is not 16KB" t;
   pages.(0) <- page;
-  (* The payload ends with the frame mapping (count, then four pairs) and
-     the mouse: 66 bytes up to its callback registration, then three ints
-     for each of six button logs, then two ranges of one byte each while
-     unset. Point frame page 2 at handle 9, which does not exist, and fix
-     the checksum so only the consistency check can refuse. *)
-  check "the crafted bytes assume no mouse range"
-    (t.mouse.mouse_range_x = None && t.mouse.mouse_range_y = None);
+  (* The payload ends with the frame mapping and the mouse: 105 bytes up to
+     its callback registration (the default cursors take a flag, two kinds
+     and two text masks; the motion counters are followed by five motion
+     settings and two carries), then three ints for each of six button
+     logs, then two ranges of two ints each, then the drawn cursor's kind
+     (one int: none drawn). The mapping is a count, then
+     per frame page a shown flag byte and, when shown, the handle and the
+     page. Pages 2 and 3 are empty. Point page 1 at handle 9, which does
+     not exist, and fix the checksum so only the consistency check can
+     refuse. *)
+  check "the crafted bytes assume the default cursors"
+    (t.mouse.mouse_graphics_cursor = Dos_state.Default_arrow
+     && t.mouse.mouse_text_cursor = Dos_state.default_text_cursor);
   let header_len = magic_len + 8 + 32 + 16 in
   let button_logs = 2 * Dos_state.mouse_button_count in
-  let mouse_len = 1 + (3 * 8) + 1 + (5 * 8) + (button_logs * 3 * 8) + 2 in
-  let at = String.length saved - mouse_len - (4 * 16) + (2 * 16) in
+  let cursors_len = 8 + 8 + 8 + (2 * 8) in
+  let motion_len = 7 * 8 in
+  let mouse_len =
+    1 + (3 * 8) + cursors_len + (5 * 8) + motion_len + (button_logs * 3 * 8) + (2 * 2 * 8)
+    + drawn_none_len
+  in
+  let empty_len = 1 and shown_len = 1 + (2 * 8) in
+  let at = String.length saved - mouse_len - (2 * empty_len) - shown_len + 1 in
   let b = Bytes.of_string saved in
+  (match mapped.(1) with
+   | Some (h, page) ->
+     let shown = Bytes.get_uint8 b (at - 1) = 1 in
+     let handle = Int64.to_int (Bytes.get_int64_be b at) in
+     let page' = Int64.to_int (Bytes.get_int64_be b (at + 8)) in
+     check (Printf.sprintf "the crafted offset holds frame page 1 (shown, %d, %d)" h page)
+       (shown && handle = h && page' = page)
+   | None -> check "the rich machine shows frame page 1" false);
   Bytes.set_int64_be b at 9L;
   let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
   Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
@@ -430,7 +549,7 @@ let () =
     let n = steps "SNAPSHOT_N" 30_000_000 and m = steps "SNAPSHOT_M" 20_000_000 in
     let boot () =
       let t = Dos_machine.create () in
-      List.iter (fun (f, d) -> Dos_machine.mount_file t f d) files;
+      List.iter (fun (f, d) -> mount t f d) files;
       Dos_machine.load_com t (List.assoc "KOEI.COM" files);
       t
     in

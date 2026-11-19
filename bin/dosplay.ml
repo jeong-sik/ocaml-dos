@@ -8,11 +8,18 @@
    프레임을 건너뛸 뿐 게스트 시간은 밀리지 않는다. 호스트가 에뮬레이션
    자체를 못 따라가면 느려질 뿐 빨라지지는 않는다. 바뀐 프레임만 보낸다. *)
 
-(* PIT 입력 클록(Hz). CPU 클록은 그 [Dos_ports.cpu_cycles_per_pit_tick] 배다. *)
-let pit_hz = 1_193_182
-let cpu_hz = pit_hz * Dos_ports.cpu_cycles_per_pit_tick
+(* 이 프로그램은 기본 속도(IBM PC 4.77MHz)로 기계를 만든다
+   ([Dos_machine.create ()]). 사이클을 초로 바꿀 때 그 클록을 쓴다. *)
+let cpu_hz = Dos_ports.speed_hz Dos_ports.pc_speed
 
 let default_fps = 30
+
+(* RFC 0006 의 추천 표본률. 재생기 명령에도 같은 값을 준다. *)
+let audio_rate = Dos_audio.opl2_rate
+
+(* 재생기가 못 따라올 때 들고 있는 표본: 0.25초. 넘치면 오래된 것부터
+   버린다. 소리가 화면보다 이만큼 넘게 늦지 않는다. *)
+let audio_queue_samples = audio_rate / 4
 
 (* 게스트가 벽시계보다 이만큼(초) 넘게 뒤처지면 그 빚은 버린다. 호스트가
    잠깐 멈춘 뒤 게스트를 한꺼번에 몰아 돌리지 않기 위해서다. *)
@@ -48,7 +55,17 @@ type state = {
   mutable quit : bool;
   mutable unmapped : int;
   mutable guest_cycles : int;  (** 돌린 CPU 사이클의 합 *)
+  audio : Audio_pipe.t option;  (** [--audio-cmd] *)
 }
+
+(* 기계를 바꾸면(Shift+F11) 새 기계도 소리를 낸다. 스냅숏은 표본을
+   담지 않는다. *)
+let listen st = if Option.is_some st.audio then Dos_machine.start_audio st.m ~rate:audio_rate
+
+let pump_audio st =
+  match st.audio with
+  | None -> ()
+  | Some a -> Option.iter (Audio_pipe.push a) (Dos_machine.take_audio st.m)
 
 let cell st =
   match st.area with
@@ -67,7 +84,7 @@ let apply st = function
     match st.state_file with
     | Some q ->
       (* 화면이 다르면 프레임 지문이 달라 다시 그린다. *)
-      Option.iter (fun m -> st.m <- m) (Quicksave.load q)
+      Option.iter (fun m -> st.m <- m; listen st) (Quicksave.load q)
     | None -> st.unmapped <- st.unmapped + 1)
   | Dosterm.Text_area { width; height } ->
     st.area <- Some (width, height);
@@ -147,6 +164,7 @@ let play st =
     let behind = float_of_int (cycles_at now - st.guest_cycles) /. float_of_int cpu_hz in
     if behind > max_lag then origin := !origin +. (behind -. max_lag);
     run_to st (cycles_at now);
+    pump_audio st;
     let now = Unix.gettimeofday () in
     if now >= !next_draw then begin
       draw st;
@@ -169,12 +187,15 @@ let mount_dir m dir =
     (fun name ->
       let path = Filename.concat dir name in
       if Sys.file_exists path && not (Sys.is_directory path) then
-        Dos_machine.mount_file m (String.uppercase_ascii name) (Host_file.read path))
+        match Dos_machine.mount_file m name (Host_file.read path) with
+        | Ok () -> ()
+        | Error e -> prerr_endline ("skipped " ^ path ^ ": " ^ e))
     (Sys.readdir dir)
 
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
   let fps = ref default_fps and mouse = ref true and state = ref "" and save_dir = ref "" in
+  let audio_cmd = ref "" in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
@@ -186,7 +207,11 @@ let () =
       ("--state", Arg.Set_string state,
        "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다");
       ("--save-dir", Arg.Set_string save_dir,
-       "DIR  게임이 바꾼 파일을 끝날 때 여기에 쓴다. 시작할 때 여기 파일을 --dir 위에 싣는다") ]
+       "DIR  게임이 바꾼 파일을 끝날 때 여기에 쓴다. 시작할 때 여기 파일을 --dir 위에 싣는다");
+      ("--audio-cmd", Arg.Set_string audio_cmd,
+       "CMD  소리(49716Hz 16비트 모노 raw)를 이 프로그램의 표준 입력으로 흘린다. \
+        공백으로 나누고 셸을 거치지 않는다. 예: \"ffplay -nodisp -autoexit -f s16le \
+        -ar 49716 -ch_layout mono -\"") ]
   in
   Arg.parse specs (fun a -> raise (Arg.Bad ("unexpected " ^ a)))
     "dosplay [--dir DIR] (--com PATH | --exe PATH | --state FILE) — Kitty 그래픽 터미널에서 실행, F12 로 끝";
@@ -211,8 +236,12 @@ let () =
       (fun spec ->
         match String.index_opt spec '=' with
         | Some i ->
-          Dos_machine.mount_file m (String.sub spec 0 i)
-            (Host_file.read (String.sub spec (i + 1) (String.length spec - i - 1)))
+          (match
+             Dos_machine.mount_file m (String.sub spec 0 i)
+               (Host_file.read (String.sub spec (i + 1) (String.length spec - i - 1)))
+           with
+           | Ok () -> ()
+           | Error e -> prerr_endline ("bad --mount " ^ e); exit 2)
         | None -> prerr_endline ("bad --mount (want NAME=PATH): " ^ spec))
       (List.rev !mounts);
     originals := Dos_machine.mounted_names m;
@@ -236,12 +265,22 @@ let () =
     end
   in
   let state_file = if !state = "" then None else Some (Quicksave.create !state) in
+  let audio =
+    if !audio_cmd = "" then None
+    else
+      match Audio_pipe.start ~cmd:!audio_cmd ~max_queue_samples:audio_queue_samples with
+      | Ok a -> Some a
+      | Error e ->
+        prerr_endline ("cannot start --audio-cmd: " ^ e);
+        exit 2
+  in
   let o = Frame_out.create () in
   let st =
     { m; out = o; state_file; fps = max 1 !fps; cols = default_cols; rows = default_rows; area = None;
       tail = ""; tail_age = 0; buttons = 0; box = (0, 0); last = ""; last_digest = 0;
-      redraw = true; quit = false; unmapped = 0; guest_cycles = 0 }
+      redraw = true; quit = false; unmapped = 0; guest_cycles = 0; audio }
   in
+  listen st;
   watch_signals ();
   (* 이어 할 때(--state 만)는 상태 파일이 기준이라 DIR 을 덮어 싣지 않는다.
      비교는 어느 쪽이든 시작한 기계와 한다. *)
@@ -268,5 +307,10 @@ let () =
     (float_of_int st.guest_cycles /. float_of_int cpu_hz) wall o.sent o.via_files;
   Option.iter (Printf.eprintf "temp-file frames not used: %s\n") o.gave_up;
   Option.iter Quicksave.report st.state_file;
+  Option.iter
+    (fun a ->
+      Audio_pipe.close a;
+      Audio_pipe.report a)
+    st.audio;
   if st.unmapped > 0 then
     Printf.eprintf "%d key(s) had no BIOS word and were dropped\n" st.unmapped

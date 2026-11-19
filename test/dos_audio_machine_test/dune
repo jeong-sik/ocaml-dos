@@ -1,0 +1,3 @@
+(test
+ (name dos_audio_machine_test)
+ (libraries dosmachine cpu86core))

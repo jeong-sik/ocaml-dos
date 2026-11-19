@@ -421,25 +421,36 @@ let reference_planar planes ~w ~h ~attr ~pal =
   done;
   Bytes.to_string img
 
+(* 16색 화면은 평면 넷의 같은 비트로 색 번호를 만들고, 속성 팔레트가 그것을
+   DAC 자리로 옮긴다. 모드를 세운 어댑터에 무작위 평면과 팔레트를 넣고
+   screen16 → rgb_indexed 가 점 단위 정의와 같은지 본다. *)
 let test_planar_render_matches_reference () =
   let rng = Random.State.make [| 0x3c0 |] in
-  let plane_size = 0x10000 in
   List.iter
-    (fun (w, h) ->
-      let planes =
-        Array.init 4 (fun _ ->
-            Bytes.init plane_size (fun _ -> Char.chr (Random.State.int rng 256)))
-      in
-      let attr = Array.init 21 (fun _ -> Random.State.int rng 256) in
+    (fun (mode, w, h) ->
+      let mem = Bytes.make (1024 * 1024) '\000' in
+      let v = Dos_video.create ~mem in
+      Dos_video.set_mode v mode ~clear:true;
+      let planes = Dos_video.planes v in
+      Array.iter
+        (fun p ->
+          for i = 0 to Bytes.length p - 1 do
+            Bytes.set p i (Char.chr (Random.State.int rng 256))
+          done)
+        planes;
+      for i = 0 to 15 do
+        Dos_video.set_attr_palette v i (Random.State.int rng 256)
+      done;
+      let attr = Dos_video.attr_palette v in
       let pal =
         Array.init 256 (fun _ ->
             (Random.State.int rng 64, Random.State.int rng 64, Random.State.int rng 64))
       in
       check_true
-        (Printf.sprintf "평면 렌더가 점 단위 정의와 같다 (%dx%d)" w h)
-        (Dos_render.rgb_planar planes ~w ~h ~attr ~pal
+        (Printf.sprintf "16색 화면 렌더가 점 단위 정의와 같다 (%02Xh, %dx%d)" mode w h)
+        (Dos_render.rgb_indexed (Dos_video.screen16 v) pal
          = reference_planar planes ~w ~h ~attr ~pal))
-    [ (640, 480); (320, 200); (20, 3) ]
+    [ (0x12, 640, 480); (0x0D, 320, 200) ]
 
 let test_vga13_render_matches_reference () =
   let rng = Random.State.make [| 0x13 |] in
@@ -454,7 +465,8 @@ let test_vga13_render_matches_reference () =
         let r, g, b = pal.(Char.code (Bytes.get mem (0xA0000 + (i / 3)))) in
         Char.chr (dac8 (match i mod 3 with 0 -> r | 1 -> g | _ -> b)))
   in
-  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_vga13 mem pal = expected)
+  let screen = Bytes.sub mem 0xA0000 (320 * 200) in
+  check_true "13h 렌더가 점 단위 정의와 같다" (Dos_render.rgb_indexed screen pal = expected)
 
 let () =
   test_planar_render_matches_reference ();

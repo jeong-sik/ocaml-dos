@@ -74,6 +74,54 @@ let free_handle t =
 
 let too_many_open_files = 4
 let invalid_handle = 6
+let file_not_found = 2
+let path_not_found = 3
+let access_denied = 5
+let invalid_function = 1
+let error_file_exists = 0x50
+let invalid_drive = 15
+let removing_current_directory = 16
+let no_more_files = 18
+
+(* ---------- 경로 ----------
+
+   게스트가 넘긴 이름은 여기서 한 번 {!Dos_path} 로 읽고, 그 뒤로는 경로
+   키만 쓴다. 이름을 못 읽거나 위 디렉터리가 없으면 DOS 처럼 "경로 없음"
+   이다. *)
+
+let attr_directory = 0x10
+let attr_archive = 0x20
+
+let dir_exists t p = p = Dos_path.root || Hashtbl.mem t.dirs (Dos_path.key p)
+let file_exists t p = Hashtbl.mem t.host_files (Dos_path.key p)
+
+let guest_path t addr =
+  Result.map_error (fun (_ : Dos_path.error) -> path_not_found)
+    (Dos_path.parse ~cwd:t.cwd (asciiz_at t addr))
+
+(* A name for a file: its directory exists, and it is not the root. *)
+let guest_file t addr =
+  match guest_path t addr with
+  | Error e -> Error e
+  | Ok p ->
+    (match Dos_path.parent p with
+     | Some dir when dir_exists t dir -> Ok p
+     | Some _ | None -> Error path_not_found)
+
+(* What a directory directly holds, by the name each shows. *)
+let entries_of t dir =
+  let under tbl hit =
+    Hashtbl.fold
+      (fun k _ acc ->
+        match Dos_path.of_key k with
+        | Some p when Dos_path.parent p = Some dir ->
+          (match Dos_path.base p with Some name -> (name, hit k name) :: acc | None -> acc)
+        | Some _ | None -> acc)
+      tbl []
+  in
+  under t.host_files (fun k _ -> File_hit k) @ under t.dirs (fun _ name -> Dir_hit name)
+
+let is_empty_dir t dir = entries_of t dir = []
 
 (* [name]을 아직 물고 있는 핸들이 있는지 — 살아있는 [t.handles] 뿐 아니라
    EXEC 로 잠든 부모 핸들(자식이 실행되는 동안은 [t.handles] 밖에 있다)도
@@ -124,35 +172,60 @@ let close_handle t h =
 
 let block_end (seg, paras) = seg + paras
 
-let largest_free t =
-  let sorted = List.sort compare t.blocks in
-  let best = ref 0 and cursor = ref t.free_base in
-  List.iter
-    (fun b ->
-      let seg, _ = b in
-      if seg - !cursor > !best then best := seg - !cursor;
-      if block_end b > !cursor then cursor := block_end b)
-    sorted;
-  if t.free_top - !cursor > !best then best := t.free_top - !cursor;
-  max 0 !best
+(* 블록 사이의 빈 틈 (시작, 크기)을 주소 순으로. 마지막은 맨 위 블록에서
+   [free_top] 까지다. 블록이 겹치면 크기가 0 이하일 수 있다. *)
+let free_gaps t =
+  let cursor = ref t.free_base in
+  let gaps =
+    List.map
+      (fun b ->
+        let seg, _ = b in
+        let gap = (!cursor, seg - !cursor) in
+        if block_end b > !cursor then cursor := block_end b;
+        gap)
+      (List.sort compare t.blocks)
+  in
+  gaps @ [ (!cursor, t.free_top - !cursor) ]
+
+let largest_free t = List.fold_left (fun acc (_, size) -> max acc size) 0 (free_gaps t)
+
+(* ALLOC.ASM alloc_do_split: AllocMethod 를 1 과 견줘 작으면 first, 같으면
+   best, 크면 last. 4.0 은 BL 을 무엇이든 받으니 80h 도 last 다. *)
+type fit = First_fit | Best_fit | Last_fit
+
+let best_fit_method = 1
+
+let fit_of_method m =
+  if m < best_fit_method then First_fit
+  else if m = best_fit_method then Best_fit
+  else Last_fit
+
+(* 들어가는 틈 가운데 first 는 맨 앞, best 는 가장 작은 것(크기가 같으면
+   앞의 것 — alloc_best 의 JBE), last 는 맨 뒤 틈의 위쪽 끝
+   (alloc_do_split_high). *)
+let place fit paras gaps =
+  match List.filter (fun (_, size) -> size >= paras) gaps with
+  | [] -> None
+  | first :: rest ->
+    let start, size =
+      match fit with
+      | First_fit -> first
+      | Best_fit ->
+        List.fold_left (fun best g -> if snd best <= snd g then best else g) first rest
+      | Last_fit -> List.fold_left (fun _ g -> g) first rest
+    in
+    (match fit with
+     | First_fit | Best_fit -> Some start
+     | Last_fit -> Some (start + size - paras))
 
 (* 자리를 찾기만 한다 — 블록 표를 고치지 않는다. EXEC 는 배치를 정한
    뒤에야 부모 프레임(블록 표 포함)을 찍는다. [allocate] 를 그대로 쓰면
    자식 몫이 프레임에 새어 들어가, 자식이 죽어도 블록이 남는다. *)
-let find_free t paras =
-  let sorted = List.sort compare t.blocks in
-  let cursor = ref t.free_base and placed = ref None in
-  List.iter
-    (fun b ->
-      let seg, _ = b in
-      if !placed = None && seg - !cursor >= paras then placed := Some !cursor;
-      if block_end b > !cursor then cursor := block_end b)
-    sorted;
-  if !placed = None && t.free_top - !cursor >= paras then placed := Some !cursor;
-  !placed
+let find_free t paras = place First_fit paras (free_gaps t)
 
 let allocate t paras =
-  match find_free t paras with
+  let fit = fit_of_method (rd8 t (sda pre_swap_alloc_method)) in
+  match place fit paras (free_gaps t) with
   | Some seg -> t.blocks <- (seg, paras) :: t.blocks; Some seg
   | None -> None
 
@@ -196,6 +269,17 @@ let init_memory t ~psp_seg =
   t.free_base <- psp_seg;
   t.free_top <- conv_mem_top;
   t.blocks <- [ (psp_seg, conv_mem_top - psp_seg) ]
+
+(* PSP 칸(RBIL INT 21/AH=26h 표 01378). 값은 MS-DOS 4.0 MISC.ASM SETMEM·
+   $Dup_PDB 가 적는 것이다. *)
+let psp_saved_vectors = 0x0A   (* IVT 22h·23h·24h 사본: 종료, Ctrl-Break, 치명 오류 *)
+let psp_parent = 0x16
+let psp_previous = 0x38        (* 이전 PSP. SHARE 가 쓰고 기본은 FFFFFFFFh *)
+let psp_dos_call = 0x50        (* INT 21h; RETF — far call 로 부르는 DOS 입구 *)
+let dos_call_code = [ 0xCD; 0x21; 0xCB ]
+let no_previous_psp = 0xFFFF
+let saved_vectors_ivt = 0x22 * 4
+let saved_vectors_len = 3 * 4
 
 (* ---------- 로더 ----------
 
@@ -287,8 +371,15 @@ let write_psp ?(init = true) ~env t psp_seg =
   wr8 t psp 0xCD;                      (* int 20h *)
   wr8 t (psp + 1) 0x20;
   wr16 t (psp + 2) conv_mem_top;       (* 가진 메모리의 끝 *)
-  wr16 t (psp + 0x0A) 0;               (* 종료 주소 *)
-  wr16 t (psp + 0x0C) 0;
+  for i = 0 to saved_vectors_len - 1 do
+    wr8 t (psp + psp_saved_vectors + i) (rd8 t (saved_vectors_ivt + i))
+  done;
+  (* 자식은 부른 쪽, 루트는 자기 자신이 부모다. COMMAND.COM 처럼 사슬의
+     끝이 저를 가리켜, 부모를 따라가는 프로그램이 여기서 멈춘다. *)
+  wr16 t (psp + psp_parent) (if init then psp_seg else t.psp_seg);
+  wr16 t (psp + psp_previous) no_previous_psp;
+  wr16 t (psp + psp_previous + 2) no_previous_psp;
+  List.iteri (fun i b -> wr8 t (psp + psp_dos_call + i) b) dos_call_code;
   wr16 t (psp + 0x2C) env;             (* 환경 세그먼트 *)
   wr8 t (psp + 0x80) 0;                (* 커맨드라인 길이 0 *)
   wr8 t (psp + 0x81) 0x0D;
@@ -514,6 +605,14 @@ let restore_cpu t s =
 let exe_child_psp t ~img_paras ~minalloc =
   find_free t (0x10 + img_paras + minalloc)
 
+(* 끝나는 프로세스의 PSP 사본을 IVT 22h-24h 로 되돌린다(MS-DOS 4.0
+   PROC.ASM $ABORT). 자식이 건 Ctrl-Break·치명 오류 처리기가 부모에게
+   남지 않는다. *)
+let restore_saved_vectors t psp_seg =
+  for i = 0 to saved_vectors_len - 1 do
+    wr8 t (saved_vectors_ivt + i) (rd8 t ((psp_seg * 16) + psp_saved_vectors + i))
+  done
+
 (* 자식 종료. 프레임이 없으면(루트) 기계가 멈춘다. 있으면 부모를
    되살린다 — [keep] 은 TSR(AH=31h·INT 27h) 이 자기 블록을 남기는
    크기다. 자식이 연 핸들은 닫는다(쓴 데이터는 마운트 표로 돌아간다),
@@ -559,6 +658,7 @@ let child_exit t ~code ~keep =
      | None -> t.blocks <- f.parent_blocks);
     t.free_base <- f.parent_free_base;
     t.free_top <- f.parent_free_top;
+    restore_saved_vectors t t.psp_seg;
     t.psp_seg <- f.parent_psp;
     t.dta <- f.parent_dta;
     restore_cpu t f.parent;
@@ -601,12 +701,14 @@ let exec_load_overlay = 0x03
 let exec_program t ~return_to =
   let cpu = t.cpu in
   let raw_name = asciiz_at t (seg_off t 3 2) in
-  let name = String.uppercase_ascii raw_name in
   let al = Cpu86.reg8 cpu 0 in
   if al <> exec_load_and_run && al <> exec_load_overlay then begin fail t 1; Completed end
   else
-    match Hashtbl.find_opt t.host_files name with
-    | None -> fail t 2; Completed              (* 파일이 없다 *)
+    match guest_file t (seg_off t 3 2) with
+    | Error e -> fail t e; Completed
+    | Ok p ->
+    match Hashtbl.find_opt t.host_files (Dos_path.key p) with
+    | None -> fail t file_not_found; Completed
     | Some img_bytes when al = exec_load_overlay ->
       load_overlay t (Bytes.to_string img_bytes);
       Completed
@@ -694,14 +796,16 @@ let int27 t =
 
 (* ---------- findfirst / findnext ---------- *)
 
-let fill_find_block t name =
-  let data =
-    match Hashtbl.find_opt t.host_files name with
-    | Some d -> d
-    | None -> Bytes.empty
+let fill_find_block t hit =
+  let name, attr, size =
+    match hit with
+    | File_hit k ->
+      let size = match Hashtbl.find_opt t.host_files k with Some d -> Bytes.length d | None -> 0 in
+      let name = match Option.bind (Dos_path.of_key k) Dos_path.base with Some n -> n | None -> k in
+      (name, attr_archive, size)
+    | Dir_hit name -> (name, attr_directory, 0)
   in
-  let size = Bytes.length data in
-  wr8 t (t.dta + 0x15) 0x20;                 (* 속성: 보관 *)
+  wr8 t (t.dta + 0x15) attr;
   wr16 t (t.dta + 0x16) 0;                   (* 시각 *)
   (* DOS 날짜 워드: 상위 7비트 연도-1980, 다음 4비트 월, 하위 5비트 일.
      0x2821 은 2000-01-01 이다. 마운트 표에는 시각이 없어 고정값을 준다. *)
@@ -741,59 +845,329 @@ let parse_fcb_service t =
   Cpu86.set_reg8 cpu 0 al;
   Cpu86.set_reg16 cpu 6 next
 
-let fcb_service t ah =
-  let cpu = t.cpu in
-  let fcb = seg_off t 3 2 in
-  match ah with
-  | 0x0F ->
-    let name = String.uppercase_ascii (fcb_name t fcb) in
-    (match Hashtbl.find_opt t.host_files name with
-     | Some data ->
-       Hashtbl.replace t.fcbs fcb (data, 0);
-       wr16 t (fcb + 0x0E) 128;
-       wr16 t (fcb + 0x10) (Bytes.length data land 0xffff);
-       wr16 t (fcb + 0x12) ((Bytes.length data lsr 16) land 0xffff);
-       for i = 0 to 3 do wr8 t (fcb + 0x20 + i) 0 done;
-       Cpu86.set_reg8 cpu 0 0
-     | None -> Cpu86.set_reg8 cpu 0 0xFF)
-  | 0x10 -> Hashtbl.remove t.fcbs fcb; Cpu86.set_reg8 cpu 0 0
-  | 0x14 ->
-    let recsize = max 1 (rd16 t (fcb + 0x0E)) in
-    (match Hashtbl.find_opt t.fcbs fcb with
-     | Some (data, pos) ->
-       let avail = Bytes.length data - pos in
-       if avail <= 0 then Cpu86.set_reg8 cpu 0 1
-       else begin
-         let take = min recsize avail in
-         blit_to_mem t data pos t.dta take;
-         Hashtbl.replace t.fcbs fcb (data, pos + take);
-         let recno = rd8 t (fcb + 0x20) + 1 in
-         if recno >= 128 then begin
-           wr16 t (fcb + 0x0C) (rd16 t (fcb + 0x0C) + 1);
-           wr8 t (fcb + 0x20) 0
-         end
-         else wr8 t (fcb + 0x20) recno;
-         Cpu86.set_reg8 cpu 0 (if take < recsize then 1 else 0)
-       end
-     | None -> Cpu86.set_reg8 cpu 0 0xFF)
-  | 0x21 ->
-    let recsize = max 1 (rd16 t (fcb + 0x0E)) in
-    let recno =
-      rd8 t (fcb + 0x21) lor (rd8 t (fcb + 0x22) lsl 8)
-      lor (rd8 t (fcb + 0x23) lsl 16)
+(* FCB 결과 바이트 — MS_CODE.ASM FCB_Ret_OK·FCB_Ret_Err *)
+let fcb_ok = 0
+let fcb_error = 0xFF
+
+(* FCBIO 의 결과 — FEOF 1, FTRIM 2. 레코드 일부만 읽으면 둘 다다. *)
+type fcb_result = Done | End_of_file | Partial_record
+
+let fcb_result_code = function Done -> 0 | End_of_file -> 1 | Partial_record -> 3
+
+(* FCBIO2.ASM 의 FCBOp 비트를 나눈 것 *)
+type fcb_where =
+  | Sequential      (* 14h·15h: 블록과 다음 레코드에서, 나아간다 *)
+  | Random_record   (* 21h·22h: 랜덤 레코드에서, 나아가지 않는다 *)
+  | Random_block    (* 27h·28h: 랜덤 레코드에서 CX 개, 랜덤 레코드도 나아간다 *)
+
+type fcb_dir = Fcb_read | Fcb_write
+
+let fcb_at t = Dos_fcb.locate t (seg_off t 3 2)
+
+(* An FCB names a file in the current directory: the key of [name] there,
+   or [None] when [name] is not one DOS can hold. The machine looks the
+   name up again at each call, in the directory current then; DOS keeps the
+   directory entry's place in the FCB's reserved bytes instead. *)
+let fcb_key t name =
+  match Dos_path.parse ~cwd:t.cwd name with
+  | Ok p -> Some (Dos_path.key p)
+  | Error (Dos_path.Bad_drive | Dos_path.Bad_name | Dos_path.Above_root) -> None
+
+let fcb_file t fcb =
+  match fcb_key t (fcb_name t fcb) with
+  | Some k -> Option.map (fun data -> (k, data)) (Hashtbl.find_opt t.host_files k)
+  | None -> None
+
+(* DOS 날짜·시각 워드 (Date16): 연도-1980 7비트·월 4·일 5, 시 5·분 6·초/2 5 *)
+let dos_date_epoch = 1980
+let date16 t =
+  let y, m, d, h, mi, s = now_fields t in
+  (((y - dos_date_epoch) lsl 9) lor (m lsl 5) lor d, (h lsl 11) lor (mi lsl 5) lor (s / 2))
+
+let set_fcb_size t fcb n =
+  wr16 t (fcb + Dos_fcb.file_size) (n land 0xffff);
+  wr16 t (fcb + Dos_fcb.file_size + 2) ((n lsr 16) land 0xffff)
+
+let fcb_size t fcb =
+  rd16 t (fcb + Dos_fcb.file_size) lor (rd16 t (fcb + Dos_fcb.file_size + 2) lsl 16)
+
+let stamp_fcb t fcb =
+  let date, time = date16 t in
+  wr16 t (fcb + Dos_fcb.date) date;
+  wr16 t (fcb + Dos_fcb.time) time
+
+(* [off] 부터 [count] 레코드를 DTA 로. 마지막 레코드가 덜 찼으면 나머지를
+   0 으로 채우고 한 레코드로 센다 (FCBIO 의 TryBlank). *)
+let fcb_read_records t data ~off ~record_size ~count =
+  let take = max 0 (min (count * record_size) (Bytes.length data - off)) in
+  if take > 0 then blit_to_mem t data off t.dta take;
+  let whole = take / record_size in
+  if take mod record_size <> 0 then begin
+    for i = take to ((whole + 1) * record_size) - 1 do wr8 t (t.dta + i) 0 done;
+    (whole + 1, Partial_record)
+  end
+  else (whole, if whole < count then End_of_file else Done)
+
+(* DTA 의 [count] 레코드를 [off] 에 쓴 새 버퍼. 0 레코드면 파일 길이를
+   [off] 로 맞춘다 (DOS_Write 의 0 바이트 쓰기). 열 때 받은 버퍼는 마운트
+   표의 것과 같으므로 고치지 않고 새로 만든다. *)
+let fcb_write_records t data ~off ~record_size ~count =
+  let n = count * record_size in
+  let len = if n = 0 then off else max (Bytes.length data) (off + n) in
+  let out = Bytes.make len '\000' in
+  Bytes.blit data 0 out 0 (min len (Bytes.length data));
+  for i = 0 to n - 1 do Bytes.set out (off + i) (Char.chr (rd8 t (t.dta + i))) done;
+  out
+
+(* FCBIO2.ASM FCBIO. 순차 위치는 [fcbs] 의 바이트 위치에서 읽고, 블록과
+   다음 레코드는 그와 맞춰 쓴다. *)
+let fcb_io t ~dir ~where =
+  let fcb = fcb_at t in
+  let record_size = Dos_fcb.record_size_of t fcb in
+  let count =
+    match where with
+    | Random_block -> Cpu86.reg16 t.cpu 1
+    | Sequential | Random_record -> 1
+  in
+  let start =
+    match where with
+    | Sequential -> Dos_fcb.current t fcb
+    | Random_record | Random_block -> Dos_fcb.random t fcb ~record_size
+  in
+  Dos_fcb.set_current t fcb start;
+  let report_count n =
+    match where with
+    | Random_block -> Cpu86.set_reg16 t.cpu 1 n
+    | Sequential | Random_record -> ()
+  in
+  match Hashtbl.find_opt t.fcbs fcb with
+  | None ->
+    report_count 0;
+    Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some (data, pos) ->
+    let off =
+      match where with
+      | Sequential -> pos
+      | Random_record | Random_block -> start * record_size
     in
-    (match Hashtbl.find_opt t.fcbs fcb with
-     | Some (data, _) ->
-       let off = recno * recsize in
-       if off >= Bytes.length data then Cpu86.set_reg8 cpu 0 1
-       else begin
-         let take = min recsize (Bytes.length data - off) in
-         blit_to_mem t data off t.dta take;
-         Hashtbl.replace t.fcbs fcb (data, off + take);
-         Cpu86.set_reg8 cpu 0 (if take < recsize then 1 else 0)
-       end
-     | None -> Cpu86.set_reg8 cpu 0 0xFF)
-  | _ -> Cpu86.set_reg8 cpu 0 0
+    let moved, result, data =
+      match dir with
+      | Fcb_read ->
+        let moved, result = fcb_read_records t data ~off ~record_size ~count in
+        (moved, result, data)
+      | Fcb_write ->
+        let out = fcb_write_records t data ~off ~record_size ~count in
+        set_fcb_size t fcb (Bytes.length out);
+        stamp_fcb t fcb;
+        (count, Done, out)
+    in
+    let next = start + moved in
+    (match where with
+     | Sequential ->
+       Hashtbl.replace t.fcbs fcb (data, off + (moved * record_size));
+       Dos_fcb.set_current t fcb next
+     | Random_record -> Hashtbl.replace t.fcbs fcb (data, off)
+     | Random_block ->
+       Hashtbl.replace t.fcbs fcb (data, next * record_size);
+       Dos_fcb.set_current t fcb next;
+       Dos_fcb.store_random t fcb next
+         ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit));
+    report_count moved;
+    Cpu86.set_reg8 t.cpu 0 (fcb_result_code result)
+
+
+(* 0Fh. DOS 는 블록만 0 으로 지우고 다음 레코드는 건드리지 않는다. 이
+   기계는 순차 위치를 [fcbs] 에 따로 두므로, 둘이 어긋나지 않게 다음
+   레코드도 0 으로 지운다. *)
+let fcb_open t =
+  let fcb = fcb_at t in
+  match fcb_file t fcb with
+  | Some (_, data) ->
+    Hashtbl.replace t.fcbs fcb (data, 0);
+    wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
+    wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
+    set_fcb_size t fcb (Bytes.length data);
+    Dos_fcb.set_current t fcb 0;
+    Cpu86.set_reg8 t.cpu 0 fcb_ok
+  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
+
+(* 10h. 쓴 FCB 면 바이트를 FCB 의 파일 크기까지 마운트 표에 되돌린다.
+   열 때 받은 버퍼 그대로면(쓰지 않았으면) 표를 건드리지 않는다 — DOS 도
+   쓰지 않은 파일의 디렉터리 항목은 고치지 않는다. 그사이 파일이
+   지워졌으면 AL=FF 다 ($FCB_Close: 파일을 찾지 못함). *)
+let fcb_close t =
+  let fcb = fcb_at t in
+  let code =
+    match Hashtbl.find_opt t.fcbs fcb with
+    | None -> fcb_ok
+    | Some (data, _) ->
+      Hashtbl.remove t.fcbs fcb;
+      (match fcb_file t fcb with
+       | None -> fcb_error
+       | Some (_, current) when current == data -> fcb_ok
+       | Some (name, _) ->
+         Hashtbl.replace t.host_files name
+           (Bytes.sub data 0 (min (Bytes.length data) (fcb_size t fcb)));
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 23h. 레코드 크기 0 은 128 로 셈하되 고쳐 쓰지 않는다. *)
+let fcb_file_size t =
+  let fcb = fcb_at t in
+  match fcb_file t fcb with
+  | None -> Cpu86.set_reg8 t.cpu 0 fcb_error
+  | Some (_, data) ->
+    let record_size =
+      match rd16 t (fcb + Dos_fcb.record_size) with
+      | 0 -> Dos_fcb.default_record_size
+      | n -> n
+    in
+    let records = Dos_fcb.records_for ~record_size (Bytes.length data) in
+    Dos_fcb.store_random t fcb records ~fourth:((records lsr 24) land 0xFF <> 0);
+    Cpu86.set_reg8 t.cpu 0 fcb_ok
+
+(* 24h. 레코드 크기를 GetRecSize 로 고치지 않고 그대로 비교한다. *)
+let fcb_set_random t =
+  let fcb = fcb_at t in
+  Dos_fcb.store_random t fcb (Dos_fcb.current t fcb)
+    ~fourth:(rd16 t (fcb + Dos_fcb.record_size) < Dos_fcb.wide_record_limit);
+  Cpu86.set_reg8 t.cpu 0 fcb_ok
+
+(* ---------- FCB 지우기·이름 바꾸기 ---------- *)
+
+(* TransFCB 가 거절하는 글자 — FCB.ASM CharType 에서 fFCB 가 꺼진 것.
+   20h 아래 제어 문자도 거절한다. *)
+let fcb_bad_chars = "\"/\\[]:<|>+=;,"
+let fcb_first_name_char = 0x20
+let fcb_name_len = 8
+let fcb_fields_len = 11
+
+(* 이름 8 칸 + 확장자 3 칸을 대문자로 읽는다. 쓸 수 없는 글자가 있거나
+   이름 칸이 비었으면 None 이다 (TransFCB → BadPack). '*' 는 그 칸의 남은
+   자리를 '?' 로 채운다 (NameTrans). *)
+let fcb_pattern_at t field =
+  let raw =
+    String.init fcb_fields_len (fun i -> Char.uppercase_ascii (Char.chr (rd8 t (field + i))))
+  in
+  let bad c = Char.code c < fcb_first_name_char || String.contains fcb_bad_chars c in
+  let name = String.sub raw 0 fcb_name_len
+  and ext = String.sub raw fcb_name_len (fcb_fields_len - fcb_name_len) in
+  if String.exists bad raw || String.trim name = "" then None
+  else Some (expand_stars name ^ expand_stars ext)
+
+let fcb_fields name = let base, ext = to_8_3 name in base ^ ext
+
+let fcb_matches pattern name =
+  let n = fcb_fields name in
+  let rec go i = i = fcb_fields_len || ((pattern.[i] = '?' || pattern.[i] = n.[i]) && go (i + 1)) in
+  go 0
+
+let name_of_fcb_fields f =
+  let trim_right s =
+    let n = ref (String.length s) in
+    while !n > 0 && s.[!n - 1] = ' ' do decr n done;
+    String.sub s 0 !n
+  in
+  let base = trim_right (String.sub f 0 fcb_name_len)
+  and ext = trim_right (String.sub f fcb_name_len (fcb_fields_len - fcb_name_len)) in
+  if ext = "" then base else base ^ "." ^ ext
+
+(* DIR.ASM: 무시하는 비트(읽기 전용·보관·장치)를 뺀 검색 속성이 볼륨 비트
+   하나뿐이면 볼륨 레이블만 찾는다. 이 기계에는 볼륨 레이블이 없다. *)
+let attr_ignore = 0x61
+let attr_volume_id = 0x08
+
+(* 현재 디렉터리에서 패턴에 맞는 파일을 디렉터리 순서(이름순 — 4Eh 와
+   같다)로: (키, 이름, 바이트) *)
+let fcb_sources t addr pattern =
+  if Dos_fcb.search_attribute t addr land lnot attr_ignore = attr_volume_id then []
+  else
+    List.sort compare
+      (List.filter_map
+         (fun (name, hit) ->
+           match hit with
+           | File_hit k when fcb_matches pattern name ->
+             Option.map (fun data -> (k, name, data)) (Hashtbl.find_opt t.host_files k)
+           | File_hit _ | Dir_hit _ -> None)
+         (entries_of t t.cwd))
+
+(* 13h. 하나라도 지우면 성공이다 (DELETE.ASM). *)
+let fcb_delete t =
+  let addr = seg_off t 3 2 in
+  let code =
+    match fcb_pattern_at t (Dos_fcb.locate t addr + Dos_fcb.name) with
+    | None -> fcb_error
+    | Some pattern ->
+      (match fcb_sources t addr pattern with
+       | [] -> fcb_error
+       | found ->
+         List.iter (fun (k, _, _) -> Hashtbl.remove t.host_files k) found;
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 17h. 새 이름의 '?' 자리에는 원래 이름의 글자가 들어간다 (NEW_RENAME).
+   새 이름이 이미 있으면 거기서 멈추고, 앞에서 바꾼 것은 그대로 둔다
+   (RENAME.ASM BAD_ACC). *)
+let fcb_rename t =
+  let addr = seg_off t 3 2 in
+  let fcb = Dos_fcb.locate t addr in
+  let code =
+    match
+      ( fcb_pattern_at t (fcb + Dos_fcb.name),
+        fcb_pattern_at t (fcb + Dos_fcb.rename_target) )
+    with
+    | None, _ | _, None -> fcb_error
+    | Some pattern, Some target ->
+      let rec go = function
+        | [] -> fcb_ok
+        | (old, name, data) :: rest ->
+          let source = fcb_fields name in
+          let fresh =
+            fcb_key t
+              (name_of_fcb_fields
+                 (String.mapi (fun i c -> if c = '?' then source.[i] else c) target))
+          in
+          (match fresh with
+           | Some k when not (Hashtbl.mem t.host_files k || Hashtbl.mem t.dirs k) ->
+             Hashtbl.remove t.host_files old;
+             Hashtbl.replace t.host_files k data;
+             go rest
+           | Some _ | None -> fcb_error)
+      in
+      (match fcb_sources t addr pattern with
+       | [] -> fcb_error
+       | found -> go found)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 16h. 있으면 비우고 없으면 만든다. '?' 가 든 이름은 만들 수 없다
+   (MKNODE: 이름이 없고 메타 문자가 있으면 경로 에러). 볼륨 레이블을 만드는
+   확장 FCB 는 이 기계에 레이블이 없어 거절한다. *)
+let fcb_create t =
+  let addr = seg_off t 3 2 in
+  let fcb = Dos_fcb.locate t addr in
+  let code =
+    match fcb_pattern_at t (fcb + Dos_fcb.name) with
+    | Some fields
+      when (not (String.contains fields '?'))
+           && Dos_fcb.search_attribute t addr land attr_volume_id = 0 ->
+      (match fcb_key t (name_of_fcb_fields fields) with
+       | Some k when not (Hashtbl.mem t.dirs k) ->
+      let empty = Bytes.empty in
+      Hashtbl.replace t.host_files k empty;
+      Hashtbl.replace t.fcbs fcb (empty, 0);
+      wr8 t (fcb + Dos_fcb.drive) (default_drive + 1);
+      wr16 t (fcb + Dos_fcb.record_size) Dos_fcb.default_record_size;
+      set_fcb_size t fcb 0;
+      stamp_fcb t fcb;
+      Dos_fcb.set_current t fcb 0;
+      fcb_ok
+       | Some _ | None -> fcb_error)
+    | Some _ | None -> fcb_error
+  in
+  Cpu86.set_reg8 t.cpu 0 code
 
 (* ---------- 콘솔 입력 ---------- *)
 
@@ -836,26 +1210,30 @@ let ext_read t =
 
 type line_result = Line_complete of string | Line_waiting of line_input
 
+(* DOS 의 콘솔 출력은 BIOS teletype 으로 간다. 텍스트 모드에서는 칸의
+   속성을 그대로 두고, 그래픽 모드에서는 이 색(밝은 회색)으로 그린다. *)
+let dos_output_color = 0x07
+
 let echo_line_character t c =
   if c = 0x09 then begin
     let col, _ = get_cursor t in
     let width = 8 - (col mod 8) in
-    for _ = 1 to width do put_char t 0x20 0x07 done;
+    for _ = 1 to width do teletype t 0x20 dos_output_color done;
     width
   end
   else if c < 0x20 then begin
-    put_char t 0x5e 0x07;
-    put_char t (c + 0x40) 0x07;
+    teletype t 0x5e dos_output_color;
+    teletype t (c + 0x40) dos_output_color;
     2
   end
-  else begin put_char t c 0x07; 1 end
+  else begin teletype t c dos_output_color; 1 end
 
 let erase_line_character t width =
   for _ = 1 to width do
     let col, row = get_cursor t in
     let col, row = if col > 0 then col - 1, row
       else if row > 0 then cols t - 1, row - 1 else 0, 0 in
-    write_cell t row col 0x0720;
+    write_char_only t ~page:(active_page t) ~col ~row 0x20 ~color:dos_output_color;
     set_cursor t col row
   done
 
@@ -865,17 +1243,20 @@ let rec read_line t ~capacity line =
   | Some w ->
     let c = ascii_of_key w in
     match c, line.echo_widths with
-    | 0x0d, _ -> put_char t 0x0d 0x07; Line_complete line.text
+    | 0x0d, _ -> teletype t 0x0d dos_output_color; Line_complete line.text
     | (0x08 | 0x7f), width :: widths ->
       erase_line_character t width;
       read_line t ~capacity
         { text = String.sub line.text 0 (String.length line.text - 1); echo_widths = widths }
     | (0x00 | 0x08 | 0x7f), _ -> read_line t ~capacity line
     | 0x0a, _ ->
-      if line.text <> "" then begin put_char t 0x0d 0x07; put_char t 0x0a 0x07 end;
+      if line.text <> "" then begin
+        teletype t 0x0d dos_output_color;
+        teletype t 0x0a dos_output_color
+      end;
       read_line t ~capacity line
     | _, _ when String.length line.text >= capacity - 1 ->
-      put_char t 0x07 0x07; (* Full buffers still wait for CR or an editing key. *)
+      teletype t 0x07 dos_output_color; (* Full buffers still wait for CR or an editing key. *)
       read_line t ~capacity line
     | _, _ ->
       let width = echo_line_character t c in
@@ -898,7 +1279,7 @@ let resume_input t request =
      | None -> Awaiting_input (Dos_input request)
      | Some c ->
        Cpu86.set_reg8 t.cpu 0 c;
-       if echo && c <> 0 then put_char t c 0x07;
+       if echo && c <> 0 then teletype t c dos_output_color;
        Completed)
   | Read_buffered_line ({ base; capacity; line } as input) ->
     (match read_line t ~capacity line with
@@ -911,15 +1292,245 @@ let resume_input t request =
     (match read_line t ~capacity:console_line_capacity line with
      | Line_waiting line -> Awaiting_input (Dos_input (Read_console_line { input with line }))
      | Line_complete text ->
-       put_char t 0x0a 0x07;
+       teletype t 0x0a dos_output_color;
        t.console_pending <-
          if String.length text > 0 && text.[0] = '\026' then "" else text ^ "\r\n";
        return_console_bytes t ~destination ~length)
 
+(* ---------- 시각과 날짜: MS-DOS 4.0 MSCLOCK.ASM·TIME.ASM ---------- *)
+
+(* $SET_DATE·$SET_TIME 이 거절할 때 AL *)
+let bad_clock_value = 0xFF
+
+(* TIM$READ 가 INT 1Ah AH=00h 로 하는 일: 틱을 읽고 자정 넘김 표시를
+   지운다. 표시가 있으면 날짜를 하루 넘긴다(표시가 2 여도 하루다). *)
+let read_clock t =
+  if rd8 t bda_midnight <> 0 then t.dos_days <- Dos_clock.next_day t.dos_days;
+  wr8 t bda_midnight 0;
+  read_ticks t
+
+(* TIM$WRIT 가 INT 1Ah AH=01h 로 하는 일: 틱을 쓴다. AH=01h 는 자정 넘김
+   표시도 지우지만, 부르는 쪽(2Bh·2Dh)이 바로 앞에서 read_clock 으로 이미
+   지웠다. *)
+let write_clock t ~days ~ticks =
+  write_ticks t ticks;
+  t.dos_days <- days
+
+(* 부팅 때 DOS 가 RTC 날짜를 읽어 날 수를 정한다(READCLOC.INC
+   read_real_date). read_real_date 는 그 전에 자정 넘김을 버리는데, 이
+   기계에서는 Dos_bios.set_ticks_from_clock 이 먼저 지운다. *)
+let set_date_from_clock t =
+  let year, month, day, _, _, _ = now_fields t in
+  match Dos_clock.date_of_fields ~year ~month ~day with
+  | Some d -> t.dos_days <- Dos_clock.days_of_date d
+  | None ->
+    invalid_arg
+      (Printf.sprintf "DOS date %04d-%02d-%02d is outside 1980-01-01..2099-12-31"
+         year month day)
+
 (* ---------- INT 21h ---------- *)
 
-(* 이 DOS 에 없는 기능은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로
-   멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
+(* 3Ch·5Bh·6Ch 의 몸통: [name] 을 비우거나 새로 만들고 핸들을 연다.
+   핸들이 모자라면 [None]. *)
+let create_file t name =
+  match open_handle t name Bytes.empty with
+  | None -> None
+  | Some h ->
+    Hashtbl.replace t.host_files name Bytes.empty;
+    (* [open_handle] joins a buffer already shared by another live
+       handle on [name] instead of seeding a fresh empty one -- create
+       truncates regardless, so force it empty here too, visible to
+       whoever else already has [name] open. *)
+    (match Hashtbl.find_opt t.handles h with
+     | Some hd -> hd.data := Bytes.empty
+     | None -> ());
+    Some h
+
+(* AH=6Ch 확장 열기 — MS-DOS 4.0 FILE.ASM $Extended_Open, 상수는
+   FILEMODE.INC. DX 의 아래 4 비트는 파일이 있을 때(0 실패, 1 열기,
+   2 비우고 열기), 위 4 비트는 없을 때(0 실패, 1 만들기) 할 일이다.
+   FE00h 비트가 켜졌거나, 둘 다 실패거나, 범위를 넘으면 에러 1. *)
+let ext_reserved_bits = 0xFE00
+let ext_exists_mask = 0x0F
+let ext_absent_mask = 0xF0
+
+type if_exists = Exists_fail | Exists_open | Exists_replace
+type if_absent = Absent_fail | Absent_create
+type ext_action = Opened | Created | Replaced
+
+(* CX 로 돌려주는 값: action_opened·action_created_opened·
+   action_replaced_opened *)
+let ext_action_code = function Opened -> 1 | Created -> 2 | Replaced -> 3
+
+let parse_ext_flag dx =
+  let if_exists =
+    match dx land ext_exists_mask with
+    | 0 -> Some Exists_fail
+    | 1 -> Some Exists_open
+    | 2 -> Some Exists_replace
+    | _ -> None
+  and if_absent =
+    match dx land ext_absent_mask with
+    | 0x00 -> Some Absent_fail
+    | 0x10 -> Some Absent_create
+    | _ -> None
+  in
+  if dx land ext_reserved_bits <> 0 then None
+  else
+    match if_exists, if_absent with
+    | Some Exists_fail, Some Absent_fail -> None
+    | Some e, Some a -> Some (e, a)
+    | None, _ | _, None -> None
+
+(* 이름은 DS:SI. 열기 모드(BX)와 속성(CL)은 3Dh·3Ch 처럼 보지 않는다.
+   디렉터리 이름이면 3Ch·3Dh 와 같이 접근 거부다. *)
+let extended_open t =
+  let cpu = t.cpu in
+  match parse_ext_flag (Cpu86.reg16 cpu 2) with
+  | None -> fail t invalid_function
+  | Some (if_exists, if_absent) ->
+    (match guest_file t (seg_off t 3 6) with
+     | Error e -> fail t e
+     | Ok p ->
+       let name = Dos_path.key p in
+       let opened action h =
+         Cpu86.set_reg16 cpu 0 h;
+         Cpu86.set_reg16 cpu 1 (ext_action_code action);
+         ok t
+       in
+       let create action =
+         match create_file t name with
+         | None -> fail t too_many_open_files
+         | Some h -> opened action h
+       in
+       (match Hashtbl.find_opt t.host_files name, if_exists, if_absent with
+        | Some _, Exists_fail, _ -> fail t error_file_exists
+        | Some data, Exists_open, _ ->
+          (match open_handle t name data with
+           | Some h -> opened Opened h
+           | None -> fail t too_many_open_files)
+        | Some _, Exists_replace, _ -> create Replaced
+        | None, _, Absent_fail ->
+          fail t (if dir_exists t p then access_denied else file_not_found)
+        | None, _, Absent_create ->
+          if dir_exists t p then fail t access_denied else create Created))
+
+(* GETSET.ASM $CHAR_OPER 의 AL *)
+type char_oper = Get_switch_char | Set_switch_char | Get_availdev | Set_availdev
+
+let char_oper_of_al = function
+  | 0 -> Some Get_switch_char
+  | 1 -> Some Set_switch_char
+  | 2 -> Some Get_availdev
+  | 3 -> Some Set_availdev
+  | _ -> None
+
+(* 0..3 은 AL·DH 를 그대로 두고, 그 밖은 AL=FFh. \DEV\ 생략 여부는 늘
+   FFh(생략 가능)이고 바꾸기는 받기만 한다. CF 는 어느 쪽이든 그대로다. *)
+let char_oper t =
+  let cpu = t.cpu in
+  match char_oper_of_al (Cpu86.reg8 cpu 0) with
+  | Some Get_switch_char -> Cpu86.set_reg8 cpu 2 (rd8 t (sda pre_swap_switch_char))
+  | Some Set_switch_char -> wr8 t (sda pre_swap_switch_char) (Cpu86.reg8 cpu 2)
+  | Some Get_availdev -> Cpu86.set_reg8 cpu 2 byte_max
+  | Some Set_availdev -> ()
+  | None -> Cpu86.set_reg8 cpu 0 byte_max
+
+let verify_on = 1
+
+(* DISP.ASM $SET_CTRL_C_TRAPPING 의 AL. 06h 는 DOS 5 가 더했다(RBIL
+   INT 21/AX=3306h). *)
+type break_oper =
+  | Get_break | Set_break | Swap_break | Get_cpsw | Set_cpsw | Boot_drive | True_version
+
+let break_oper_of_al = function
+  | 0 -> Some Get_break
+  | 1 -> Some Set_break
+  | 2 -> Some Swap_break
+  | 3 -> Some Get_cpsw
+  | 4 -> Some Set_cpsw
+  | 5 -> Some Boot_drive
+  | 6 -> Some True_version
+  | _ -> None
+
+let break_on = 1
+(* MSCONST.ASM BOOTDRIVE 는 1 이 A: 다. 이 기계의 드라이브는 C: 하나다. *)
+let boot_drive = default_drive + 1
+(* 3306h DL·DH: 개정 번호 없는 5.00, ROM(비트 3)에도 HMA(비트 4)에도
+   없다 — XMS 가 HMA 를 없다고 답한다(Dos_xms Hma_missing). 30h AL=01h 의
+   BH(비트 3: ROM)도 이 깃발이다. *)
+let dos_revision = 0
+let dos_version_flags = 0
+
+(* 깃발은 SWAP_START 의 CNTCFLAG 다. 01h 는 DL 을 그대로 두고(PUSH DX),
+   02h 는 DL 과 맞바꾼다. 03h·04h 는 CPSW 코드가 주석 처리돼 아무것도
+   안 한다. 06h 는 AL 을 그대로 둔다. 그 밖은 AL=FFh. 어느 갈래도 IRET
+   으로 끝나 CF 는 그대로다. Ctrl-C 검사 자체는 이 기계에 없어 깃발은
+   읽고 쓰기만 한다. *)
+let break_oper t =
+  let cpu = t.cpu in
+  let flag = sda sda_cntc_flag in
+  match break_oper_of_al (Cpu86.reg8 cpu 0) with
+  | Some Get_break -> Cpu86.set_reg8 cpu 2 (rd8 t flag)
+  | Some Set_break -> wr8 t flag (Cpu86.reg8 cpu 2 land break_on)
+  | Some Swap_break ->
+    let old = rd8 t flag in
+    wr8 t flag (Cpu86.reg8 cpu 2 land break_on);
+    Cpu86.set_reg8 cpu 2 old
+  | Some Get_cpsw | Some Set_cpsw -> ()
+  | Some Boot_drive -> Cpu86.set_reg8 cpu 2 boot_drive
+  | Some True_version ->
+    Cpu86.set_reg8 cpu 3 dos_version_major;        (* BL *)
+    Cpu86.set_reg8 cpu 7 dos_version_minor;        (* BH *)
+    Cpu86.set_reg8 cpu 2 dos_revision;             (* DL *)
+    Cpu86.set_reg8 cpu 6 dos_version_flags         (* DH *)
+  | None -> Cpu86.set_reg8 cpu 0 byte_max
+
+(* GETSET.ASM $GET_VERSION: AL.AH = 버전, BH = OEMNUM, BL:CX = USERNUM.
+   DOSMES.ASM 의 MS 판 OEMNUM 은 FFh 이고, USERNUM 은 초기값이 없어(?)
+   0 으로 둔다. DOS 5 부터 AL=01h 면 BH 는 OEM 번호 대신 버전 깃발이다
+   (RBIL INT 21/AH=30h). RBIL 은 AL 00h·01h 만 적어서 다른 AL 은 DOS 5
+   전처럼 OEM 번호를 준다. return 으로 끝나 CF 는 그대로다. *)
+let oem_microsoft = 0xFF
+let user_number = 0                    (* 24 비트 *)
+let version_flag_request = 1
+
+let get_version t =
+  let cpu = t.cpu in
+  let bh =
+    if Cpu86.reg8 cpu 0 = version_flag_request then dos_version_flags else oem_microsoft
+  in
+  Cpu86.set_reg8 cpu 0 dos_version_major;
+  Cpu86.set_reg8 cpu 4 dos_version_minor;
+  Cpu86.set_reg16 cpu 3 ((bh lsl 8) lor (user_number lsr 16));      (* BH, BL *)
+  Cpu86.set_reg16 cpu 1 (user_number land 0xffff)                   (* CX *)
+
+(* ALLOC.ASM $AllocOper 의 AL *)
+type alloc_oper = Get_strategy | Set_strategy
+
+let alloc_oper_of_al = function
+  | 0 -> Some Get_strategy
+  | 1 -> Some Set_strategy
+  | _ -> None
+
+(* AL=0 은 AX=AllocMethod(AH=0), AL=1 은 AllocMethod=BL 이고 AX 는 그대로.
+   둘 다 SYS_RET_OK 라 CF=0. 그 밖은 locus 를 Mem 으로 두고 에러 1. *)
+let alloc_oper t =
+  let cpu = t.cpu in
+  match alloc_oper_of_al (Cpu86.reg8 cpu 0) with
+  | Some Get_strategy -> Cpu86.set_reg16 cpu 0 (rd8 t (sda pre_swap_alloc_method)); ok t
+  | Some Set_strategy -> wr8 t (sda pre_swap_alloc_method) (Cpu86.reg8 cpu 3); ok t
+  | None -> set_locus t Dos_error.Memory; fail t invalid_function
+
+(* MS-DOS 4.0 의 마지막 기능 번호(MS_TABLE.ASM MAXCOM, $Extended_Open).
+   그 위는 DISP.ASM BADCALL 이 AL=0 만 쓰고 IRET 한다. 다른 레지스터와
+   CF 는 그대로다 — 소스 주석: CF 를 세우면 프로그램이 깨질 수 있다.
+   AX=71A0h(긴 파일 이름 지원?)를 부르고 AX=7100h 를 보고 「없음」을 아는
+   프로그램이 이 값을 읽는다. *)
+let max_function = 0x6C
+
+(* 표 안([max_function] 이하)의 기능 중 이 DOS 가 아직 만들지 않은
+   것은 CPU 에 없는 명령처럼 [Cpu86.Unsupported] 로 멈춘다. 레지스터를 그대로 둔 채 돌아가면 호출자는 성공으로 읽는다
    (#61). INT 21h 는 어느 길로 들어와도 2 바이트 [CD xx] 를 지나 이리
    온다(호출자의 INT, 또는 훅이 옛 벡터로 넘긴 ROM 스텁의 INT). IP 를
    그 INT 로 되돌려, 다시 돌려도 지나가지 않고 같은 자리에서 멈춘다. *)
@@ -943,7 +1554,7 @@ let service_immediate t =
     Cpu86.set_reg8 cpu 0 t.last_child_code;
     Cpu86.set_reg8 cpu 4 0;
     ok t
-  | 0x02 -> put_char t (Cpu86.reg8 cpu 2) 0x07
+  | 0x02 -> teletype t (Cpu86.reg8 cpu 2) dos_output_color
   | 0x06 ->
     (* 직접 콘솔 입출력. DL=FF 면 읽기(ZF 로 있고없음), 아니면 쓰기.
        Turbo Pascal 런타임의 에러 메시지가 이 길로 나온다 — 없으면
@@ -958,7 +1569,7 @@ let service_immediate t =
         Cpu86.set_reg8 cpu 0 0;
         Cpu86.set_flags cpu (Cpu86.flags cpu lor Cpu86.f_zero)
       )
-    else put_char t dl 0x07
+    else teletype t dl dos_output_color
   | 0x09 ->
     (* '$' 로 끝나는 문자열. 길이를 안 주는 대신 끝 표시를 찾는다. *)
     let base = seg_off t 3 2 in
@@ -966,7 +1577,7 @@ let service_immediate t =
     while (not !stop) && !i < 65536 do
       let c = rd8 t (base + !i) in
       if c = Char.code '$' then stop := true
-      else begin put_char t c 0x07; incr i end
+      else begin teletype t c dos_output_color; incr i end
     done
   | 0x0B -> Cpu86.set_reg8 cpu 0 (if console_ready t then 0xFF else 0x00)
   | 0x0D -> ()                              (* 디스크 리셋 *)
@@ -986,33 +1597,44 @@ let service_immediate t =
     Cpu86.set_seg cpu 0 (rd16 t ((v * 4) + 2))
   | 0x29 -> parse_fcb_service t
   | 0x2A ->
-    let y, m, d, _, _, _ = now_fields t in
-    Cpu86.set_reg16 cpu 1 y;
-    Cpu86.set_reg8 cpu 6 m;
-    Cpu86.set_reg8 cpu 2 d;
-    Cpu86.set_reg8 cpu 0 (day_of_week (y, m, d))
+    ignore (read_clock t : int);
+    let d = Dos_clock.date_of_days t.dos_days in
+    Cpu86.set_reg16 cpu 1 d.year;
+    Cpu86.set_reg8 cpu 6 d.month;
+    Cpu86.set_reg8 cpu 2 d.day;
+    Cpu86.set_reg8 cpu 0 (Dos_clock.weekday t.dos_days)
   | 0x2B ->
-    t.epoch_year <- Cpu86.reg16 cpu 1;
-    t.epoch_month <- Cpu86.reg8 cpu 6;
-    t.epoch_day <- Cpu86.reg8 cpu 2;
-    Cpu86.set_reg8 cpu 0 0
+    (match
+       Dos_clock.date_of_fields ~year:(Cpu86.reg16 cpu 1) ~month:(Cpu86.reg8 cpu 6)
+         ~day:(Cpu86.reg8 cpu 2)
+     with
+     | None -> Cpu86.set_reg8 cpu 0 bad_clock_value
+     | Some d ->
+       (* DODATE: 날 수를 정하고, 시각을 읽어 그대로 다시 쓴다. 틱은 시각을
+          거쳐 돌아오며 한 틱 줄 수 있다. *)
+       let time = Dos_clock.time_of_ticks (read_clock t) in
+       write_clock t ~days:(Dos_clock.days_of_date d) ~ticks:(Dos_clock.ticks_of_time time);
+       Cpu86.set_reg8 cpu 0 0)
   | 0x2C ->
-    let _, _, _, h, mi, s = now_fields t in
-    Cpu86.set_reg8 cpu 5 h;
-    Cpu86.set_reg8 cpu 1 mi;
-    Cpu86.set_reg8 cpu 6 s;
-    Cpu86.set_reg8 cpu 2 0
-  | 0x2D ->
-    t.epoch_hour <- Cpu86.reg8 cpu 5;
-    t.epoch_min <- Cpu86.reg8 cpu 1;
-    t.epoch_sec <- Cpu86.reg8 cpu 6;
+    let time = Dos_clock.time_of_ticks (read_clock t) in
+    Cpu86.set_reg8 cpu 5 time.hour;
+    Cpu86.set_reg8 cpu 1 time.minute;
+    Cpu86.set_reg8 cpu 6 time.second;
+    Cpu86.set_reg8 cpu 2 time.hundredths;
     Cpu86.set_reg8 cpu 0 0
-  | 0x30 ->
-    Cpu86.set_reg8 cpu 0 dos_version_major;
-    Cpu86.set_reg8 cpu 4 dos_version_minor;
-    Cpu86.set_reg8 cpu 3 0xFF;              (* OEM: 일반 *)
-    Cpu86.set_reg16 cpu 1 0
-  | 0x33 -> Cpu86.set_reg8 cpu 2 0          (* Ctrl-Break 검사 꺼짐 *)
+  | 0x2D ->
+    (match
+       Dos_clock.time_of_fields ~hour:(Cpu86.reg8 cpu 5) ~minute:(Cpu86.reg8 cpu 1)
+         ~second:(Cpu86.reg8 cpu 6) ~hundredths:(Cpu86.reg8 cpu 2)
+     with
+     | None -> Cpu86.set_reg8 cpu 0 bad_clock_value
+     | Some time ->
+       (* $SET_TIME 은 먼저 시계를 읽어 넘긴 자정을 날짜에 반영한다 *)
+       ignore (read_clock t : int);
+       write_clock t ~days:t.dos_days ~ticks:(Dos_clock.ticks_of_time time);
+       Cpu86.set_reg8 cpu 0 0)
+  | 0x30 -> get_version t
+  | 0x33 -> break_oper t
   | 0x36 ->
     (* 남은 디스크 공간: 섹터/클러스터, 가용 클러스터, 섹터 크기,
        전체 클러스터. 마운트 표는 메모리 위라 넉넉한 값을 답한다. *)
@@ -1020,36 +1642,49 @@ let service_immediate t =
     Cpu86.set_reg16 cpu 3 0x1000;
     Cpu86.set_reg16 cpu 1 512;
     Cpu86.set_reg16 cpu 2 0x2000
-  | 0x39 | 0x3A | 0x3B ->
-    (* 디렉터리가 없는 모델이다. 조용한 성공 대신 '경로 없음' 으로
-       답한다 — 성공으로 속이면 게스트가 그 뒤를 헛돈다. *)
-    fail t 3
+  | 0x38 -> Dos_nls.international t
+  | 0x39 ->
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       if file_exists t p || dir_exists t p then fail t access_denied
+       else begin Hashtbl.replace t.dirs (Dos_path.key p) (); ok t end)
+  | 0x3A ->
+    (match guest_path t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       if p = Dos_path.root || not (dir_exists t p) then fail t path_not_found
+       else if Dos_path.is_within ~dir:p t.cwd then fail t removing_current_directory
+       else if not (is_empty_dir t p) then fail t access_denied
+       else begin Hashtbl.remove t.dirs (Dos_path.key p); ok t end)
+  | 0x3B ->
+    (match guest_path t (seg_off t 3 2) with
+     | Ok p when dir_exists t p -> t.cwd <- p; ok t
+     | Ok _ -> fail t path_not_found
+     | Error e -> fail t e)
   | 0x3C | 0x5B ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    if ah = 0x5B && Hashtbl.mem t.host_files name then fail t 0x50
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p when dir_exists t p -> fail t access_denied
+     | Ok p ->
+    let name = Dos_path.key p in
+    if ah = 0x5B && Hashtbl.mem t.host_files name then fail t error_file_exists
     else begin
-      match open_handle t name Bytes.empty with
+      match create_file t name with
       | None -> fail t too_many_open_files
-      | Some h ->
-        Hashtbl.replace t.host_files name Bytes.empty;
-        (* [open_handle] joins a buffer already shared by another live
-           handle on [name] instead of seeding a fresh empty one -- create
-           truncates regardless, so force it empty here too, visible to
-           whoever else already has [name] open. *)
-        (match Hashtbl.find_opt t.handles h with
-         | Some hd -> hd.data := Bytes.empty
-         | None -> ());
-        Cpu86.set_reg16 cpu 0 h;
-        ok t
-    end
+      | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
+    end)
   | 0x3D ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    (match Hashtbl.find_opt t.host_files name with
-     | Some data ->
-       (match open_handle t name data with
-        | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
-        | None -> fail t too_many_open_files)
-     | None -> fail t 2)
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       let name = Dos_path.key p in
+       (match Hashtbl.find_opt t.host_files name with
+        | Some data ->
+          (match open_handle t name data with
+           | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
+           | None -> fail t too_many_open_files)
+        | None -> fail t (if dir_exists t p then access_denied else file_not_found)))
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
   (* dup/dup2 는 같은 열린 파일을 가리킨다 — 위치와 내용을 나눠 쓴다.
      사본을 주면 한쪽에 쓴 것이 다른 쪽에 안 보인다. *)
@@ -1089,7 +1724,7 @@ let service_immediate t =
     if is_console h then begin
       (* 실기 DOS 는 부팅 때 stdin/stdout/stderr 를 열어 준다 — 없으면
          런타임이 잘못된 핸들(6)로 즉사한다(실측). *)
-      for i = 0 to n - 1 do put_char t (rd8 t (src + i)) 0x07 done;
+      for i = 0 to n - 1 do teletype t (rd8 t (src + i)) dos_output_color done;
       Cpu86.set_reg16 cpu 0 n;
       ok t
     end
@@ -1099,7 +1734,7 @@ let service_immediate t =
        | Some hd ->
          let chunk = Bytes.create n in
          for i = 0 to n - 1 do
-           Bytes.set chunk i (Char.chr (rd8 t (src + i)))
+           Bytes.set chunk i (Char.chr (bus_rd8 t (src + i)))
          done;
          let len = Bytes.length !(hd.data) in
          let grown =
@@ -1122,12 +1757,10 @@ let service_immediate t =
          Cpu86.set_reg16 cpu 0 n;
          ok t)
   | 0x41 ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    if Hashtbl.mem t.host_files name then begin
-      Hashtbl.remove t.host_files name;
-      ok t
-    end
-    else fail t 2
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p when file_exists t p -> Hashtbl.remove t.host_files (Dos_path.key p); ok t
+     | Ok p -> fail t (if dir_exists t p then access_denied else file_not_found))
   | 0x42 ->
     let h = Cpu86.reg16 cpu 3 in
     let off32 = (Cpu86.reg16 cpu 1 lsl 16) lor Cpu86.reg16 cpu 2 in
@@ -1151,18 +1784,30 @@ let service_immediate t =
          ok t
        end)
   | 0x43 ->
-    let name = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    if Hashtbl.mem t.host_files name then begin
-      if Cpu86.reg8 cpu 0 = 0 then Cpu86.set_reg16 cpu 1 0x20;
-      ok t
-    end
-    else fail t 2
+    (match guest_file t (seg_off t 3 2) with
+     | Error e -> fail t e
+     | Ok p ->
+       let attr =
+         if file_exists t p then Some attr_archive
+         else if dir_exists t p then Some attr_directory
+         else None
+       in
+       (match attr with
+        | Some a -> if Cpu86.reg8 cpu 0 = 0 then Cpu86.set_reg16 cpu 1 a; ok t
+        | None -> fail t file_not_found))
   | 0x44 -> Dos_ioctl.service t
   | 0x47 ->
-    (* 현재 디렉터리는 늘 루트다 — 빈 문자열이 루트를 뜻한다. *)
-    wr8 t (seg_off t 3 6) 0;
-    Cpu86.set_reg16 cpu 0 0x0100;
-    ok t
+    (* DL 0 은 기본 드라이브, 3 은 C:. 앞의 [\] 없이 쓰고, 루트는 빈
+       문자열이다. *)
+    let dl = Cpu86.reg8 cpu 2 in
+    if dl <> 0 && dl <> default_drive + 1 then fail t invalid_drive
+    else begin
+      let dst = seg_off t 3 6 and cwd = Dos_path.key t.cwd in
+      String.iteri (fun i c -> wr8 t (dst + i) (Char.code c)) cwd;
+      wr8 t (dst + String.length cwd) 0;
+      Cpu86.set_reg16 cpu 0 0x0100;
+      ok t
+    end
   | 0x48 ->
     (match allocate t (Cpu86.reg16 cpu 3) with
      | Some seg -> Cpu86.set_reg16 cpu 0 seg; ok t
@@ -1176,29 +1821,46 @@ let service_immediate t =
      | Error 9 -> fail t 9
      | Error avail -> Cpu86.set_reg16 cpu 3 (max 0 avail); fail t 8)
   | 0x4E ->
-    let pattern = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    let all = Hashtbl.fold (fun k _ acc -> k :: acc) t.host_files [] in
-    let hits =
-      List.sort compare
-        (List.filter (fun n -> matches_pattern ~pattern ~name:n) all)
-    in
-    (match hits with
-     | [] -> t.find_queue <- []; fail t 2
-     | first :: rest -> t.find_queue <- rest; fill_find_block t first; ok t)
+    (* CX bit4 가 서야 디렉터리도 찾는다. 하위 디렉터리는 [.] 과 [..] 을
+       먼저 보인다 — 실기 디렉터리의 첫 두 항목이다. *)
+    (match Dos_path.parse_pattern ~cwd:t.cwd (asciiz_at t (seg_off t 3 2)) with
+     | Error _ -> t.find_queue <- []; fail t path_not_found
+     | Ok (dir, _) when not (dir_exists t dir) -> t.find_queue <- []; fail t path_not_found
+     | Ok (dir, pattern) ->
+       let dirs_too = Cpu86.reg16 cpu 1 land attr_directory <> 0 in
+       let dots =
+         if dirs_too && dir <> Dos_path.root then [ (".", Dir_hit "."); ("..", Dir_hit "..") ]
+         else []
+       in
+       let named =
+         List.sort (fun (a, _) (b, _) -> compare a b)
+           (List.filter
+              (fun (_, hit) -> match hit with File_hit _ -> true | Dir_hit _ -> dirs_too)
+              (entries_of t dir))
+       in
+       let hits =
+         List.filter_map
+           (fun (name, hit) -> if matches_pattern ~pattern ~name then Some hit else None)
+           (dots @ named)
+       in
+       (match hits with
+        | [] -> t.find_queue <- []; fail t file_not_found
+        | first :: rest -> t.find_queue <- rest; fill_find_block t first; ok t))
   | 0x4F ->
     (match t.find_queue with
-     | [] -> fail t 18                      (* 더 이상 없음 *)
+     | [] -> fail t no_more_files
      | next :: rest -> t.find_queue <- rest; fill_find_block t next; ok t)
   | 0x56 ->
-    let src = String.uppercase_ascii (asciiz_at t (seg_off t 3 2)) in
-    let dst = String.uppercase_ascii (asciiz_at t ((Cpu86.seg cpu 0 lsl 4)
-                                                   + Cpu86.reg16 cpu 7)) in
-    (match Hashtbl.find_opt t.host_files src with
-     | Some d ->
-       Hashtbl.remove t.host_files src;
-       Hashtbl.replace t.host_files dst d;
-       ok t
-     | None -> fail t 2)
+    (match guest_file t (seg_off t 3 2), guest_file t ((Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 7) with
+     | Error e, _ | _, Error e -> fail t e
+     | Ok src, Ok dst ->
+       (match Hashtbl.find_opt t.host_files (Dos_path.key src) with
+        | None -> fail t file_not_found
+        | Some _ when file_exists t dst || dir_exists t dst -> fail t access_denied
+        | Some d ->
+          Hashtbl.remove t.host_files (Dos_path.key src);
+          Hashtbl.replace t.host_files (Dos_path.key dst) d;
+          ok t))
   | 0x57 ->
     if Hashtbl.mem t.handles (Cpu86.reg16 cpu 3) then begin
       if Cpu86.reg8 cpu 0 = 0 then begin
@@ -1208,10 +1870,59 @@ let service_immediate t =
       ok t
     end
     else fail t 6
-  | 0x51 | 0x62 -> Cpu86.set_reg16 cpu 3 t.psp_seg  (* 51h 는 DOS 2 때의 내부 이름 *)
-  | 0x68 -> ok t                            (* 파일 반영 — 메모리라 즉시 *)
-  | 0x0F | 0x10 | 0x14 | 0x21 | 0x24 -> fcb_service t ah
-  | _ -> unsupported_function t ah
+  | 0x59 ->
+    (* GETSET.ASM $GetExtendedError: AX=EXTERR, BL=action, BH=class,
+       CH=locus(CL 그대로), ES:DI=EXTERRPT, CF=0 *)
+    let word off = rd8 t (sda off) lor (rd8 t (sda (off + 1)) lsl 8) in
+    Cpu86.set_reg16 cpu 0 (word sda_exterr);
+    Cpu86.set_reg16 cpu 3 (word sda_exterr_action);
+    Cpu86.set_reg8 cpu 5 (rd8 t (sda sda_exterr_locus));
+    Cpu86.set_reg16 cpu 7 (word sda_exterr_pointer);
+    Cpu86.set_seg cpu 0 (word (sda_exterr_pointer + 2));
+    ok t
+  | 0x2E ->
+    (* GETSET.ASM $SET_VERIFY_ON_WRITE: AND AL,1 을 VERFLG 에 두고, 그 AL 을
+       DISP.ASM LEAVEDOS 가 돌려준다. CF 는 그대로 *)
+    let flag = Cpu86.reg8 cpu 0 land verify_on in
+    wr8 t (sda pre_swap_verify) flag;
+    Cpu86.set_reg8 cpu 0 flag
+  | 0x54 -> Cpu86.set_reg8 cpu 0 (rd8 t (sda pre_swap_verify))   (* $GET_VERIFY_ON_WRITE *)
+  | 0x37 -> char_oper t
+  | 0x58 -> alloc_oper t
+  | 0x34 ->
+    (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
+    Cpu86.set_seg cpu 0 sda_seg;
+    Cpu86.set_reg16 cpu 3 sda_in_dos
+  | 0x51 | 0x62 ->
+    (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
+       51h 는 DOS 2 때의 내부 이름 *)
+    Cpu86.set_reg16 cpu 3 t.psp_seg
+  | 0x63 -> Dos_nls.lead_byte_table t
+  | 0x65 -> Dos_nls.extended_country t
+  | 0x66 -> Dos_nls.code_page t
+  | 0x68 | 0x6A -> ok t                     (* 파일 반영($Commit) — 메모리라 즉시 *)
+  | 0x6C -> extended_open t
+  | 0x0F -> fcb_open t
+  | 0x10 -> fcb_close t
+  | 0x14 -> fcb_io t ~dir:Fcb_read ~where:Sequential
+  | 0x15 -> fcb_io t ~dir:Fcb_write ~where:Sequential
+  | 0x16 -> fcb_create t
+  | 0x21 -> fcb_io t ~dir:Fcb_read ~where:Random_record
+  | 0x22 -> fcb_io t ~dir:Fcb_write ~where:Random_record
+  | 0x27 -> fcb_io t ~dir:Fcb_read ~where:Random_block
+  | 0x28 -> fcb_io t ~dir:Fcb_write ~where:Random_block
+  | 0x23 -> fcb_file_size t
+  | 0x24 -> fcb_set_random t
+  | 0x13 -> fcb_delete t
+  | 0x17 -> fcb_rename t
+  | 0x18 | 0x1D | 0x1E | 0x20 | 0x61 ->
+    (* MS_TABLE.ASM 의 빈 칸 CPMFunc: XOR AL,AL 뒤 LEAVEDOS *)
+    Cpu86.set_reg8 cpu 0 0
+  | ah when ah > max_function -> Cpu86.set_reg8 cpu 0 0
+  | _ ->
+    (* 집계에 올린 뒤 멈춘다. dosboot 는 멈춤을 찍고 집계도 찍는다. *)
+    report_unserved t No_function ~vector:0x21;
+    unsupported_function t ah
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
@@ -1227,6 +1938,7 @@ let divide_overflow t =
   child_exit t ~code:0 ~keep:None
 
 let rec service t ~return_to =
+  enter_call t;
   match Cpu86.reg8 t.cpu 4 with
   | (0x01 | 0x07 | 0x08) as ah -> resume_input t (Read_character { echo = ah = 0x01 })
   | 0x0A ->

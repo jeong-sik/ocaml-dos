@@ -1,0 +1,3 @@
+(test
+ (name dos_speed_test)
+ (libraries dosmachine cpu86core))

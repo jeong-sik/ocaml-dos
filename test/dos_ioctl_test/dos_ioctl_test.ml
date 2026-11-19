@@ -49,7 +49,7 @@ let ioctl ?bx i ~ax =
 
 let run ?(keys = []) ?(mounts = []) code =
   let m = Dos_machine.create () in
-  List.iter (fun (n, d) -> Dos_machine.mount_file m n d) mounts;
+  List.iter (fun (n, d) -> Result.get_ok (Dos_machine.mount_file m n d)) mounts;
   List.iter (Dos_machine.push_key m) keys;
   Dos_machine.load_com m (code ^ quit);
   Dos_machine.run m ~max_steps:200_000;
