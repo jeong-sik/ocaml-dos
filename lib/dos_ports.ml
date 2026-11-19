@@ -105,6 +105,9 @@ type t = {
   mutable opl_t1_exp : opl_flag;
   mutable opl_t2_exp : opl_flag;
   mutable mpu : Dos_mpu401.t option;    (** 330h 의 MPU-401. 스냅숏이 꽂고 뺀다 *)
+  mutable audio : Dos_audio.t option;
+  (** RFC 0006 의 소리 표본. 켠 기계만 있다. 기계 상태가 아니라서 스냅숏에
+      들지 않는다. *)
 }
 
 (* 기본 VGA 256색: 0-15 CGA, 16-31 회색 램프, 32-247 6x6x6 RGB 큐브,
@@ -192,6 +195,7 @@ let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
     opl_t1_exp = Opl_clear;
     opl_t2_exp = Opl_clear;
     mpu = (if mpu401 then Some (Dos_mpu401.create ()) else None);
+    audio = None;
   }
 
 (* 모드를 세우면 BIOS 가 DAC 을 기본값으로 다시 싣는다. 앞 프로그램이
@@ -406,6 +410,31 @@ let speaker_on t = t.port_b land 0x03 = 0x03
 let pit_tick t = t.now / t.speed
 let gate2 t = t.port_b land gate2_bit <> 0
 
+(* 포트 0x61 bit1: 스피커 데이터. 스피커는 이 비트와 채널 2 의 OUT 의
+   AND 를 따른다(Dos_audio.speaker). *)
+let speaker_data_bit = 0x02
+
+(* 채널 2 를 부르거나 0x61 을 바꾸기 전에 지금까지의 스피커 소리를 표본으로
+   만든다. 채널 2 를 지금 시각으로 부르면 지난 구간이 남지 않는다
+   (Dos_pit.next_change) — 읽기도 그렇다. *)
+let catch_up_audio t =
+  match t.audio with
+  | None -> ()
+  | Some a ->
+    Dos_audio.render a ~until:t.now
+      (Dos_audio.speaker t.pit2 ~data:(t.port_b land speaker_data_bit <> 0) ~speed:t.speed)
+
+let start_audio t ~rate = t.audio <- Some (Dos_audio.create ~cpu_hz:(cpu_hz t) ~rate ~start:t.now)
+
+let take_audio t =
+  match t.audio with
+  | None -> None
+  | Some a ->
+    catch_up_audio t;
+    Some (Dos_audio.take a)
+
+let audio_clipped t = Option.map Dos_audio.clipped t.audio
+
 (* 채널 0 에 사건(제어 워드, 카운트 쓰기)이 있으면 다음 상승을 다시 잡는다. *)
 let pit0_changed t = t.irq0_at <- rise_cycle ~speed:t.speed t.pit0 ~tick:(pit_tick t)
 
@@ -481,9 +510,12 @@ let port_in t p =
   | 0x20 -> Dos_pic.read_command t.pic
   | 0x21 -> Dos_pic.read_mask t.pic
   | 0x40 -> Dos_pit.read t.pit0 ~tick:(pit_tick t)
-  | 0x42 -> Dos_pit.read t.pit2 ~tick:(pit_tick t)
+  | 0x42 ->
+    catch_up_audio t;
+    Dos_pit.read t.pit2 ~tick:(pit_tick t)
   | 0x60 -> Dos_kbc.read_data t.kbc ~hz:(cpu_hz t) ~now:t.now
   | 0x61 ->
+    catch_up_audio t;
     (* bit4 는 메모리 리프레시 — 실기에서 쉬지 않고 뒤집힌다. 고정값을
        주면 이 비트를 세는 지연 루프가 안 끝난다. bit5 는 채널 2 의 OUT
        이다 — 채널 2 를 모드 0 으로 걸고 이 비트를 기다리는 지연 루프가
@@ -544,8 +576,11 @@ let port_out t p v =
   | 0x40 ->
     Dos_pit.write t.pit0 ~tick:(pit_tick t) ~gate:channel0_gate v;
     pit0_changed t
-  | 0x42 -> Dos_pit.write t.pit2 ~tick:(pit_tick t) ~gate:(gate2 t) v
+  | 0x42 ->
+    catch_up_audio t;
+    Dos_pit.write t.pit2 ~tick:(pit_tick t) ~gate:(gate2 t) v
   | 0x43 ->
+    catch_up_audio t;
     (* 제어 워드: bit7-6 채널(3 은 읽기-되돌림 명령), bit5-4 접근
        모드(0=래치). 채널 1 은 DRAM 리프레시라 게스트가 쓰지 않는다 — 이
        기계에는 채널 1 이 없다. *)
@@ -565,6 +600,7 @@ let port_out t p v =
        if v land read_back_channel2 <> 0 then Dos_pit.read_back t.pit2 ~tick ~count ~status)
   | 0x60 -> Dos_kbc.write_data t.kbc ~hz:(cpu_hz t) ~now:t.now v
   | 0x61 ->
+    catch_up_audio t;
     let was = gate2 t in
     t.port_b <- v;
     let now_high = gate2 t in
@@ -629,7 +665,8 @@ let write_state w t =
         speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b; cga_status;
         mode_control; color_select; cmos; opl_reg; opl_t1_count;
-        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu } = t
+        opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; pit2; mpu;
+        audio = _ (* an observer, not machine state *) } = t
   in
   let put what r v = C.put w ~what r v in
   put "speed" speed_r speed;

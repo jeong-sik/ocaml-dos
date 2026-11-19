@@ -104,6 +104,20 @@ val speaker_on : t -> bool
 (** 포트 0x61 의 bit0·bit1 이 둘 다 켜졌다 — 게이트와 데이터가 열렸다.
     소리를 내지는 않고, 하네스가 관측만 한다. *)
 
+(** {1 Sound (RFC 0006)} *)
+
+val start_audio : t -> rate:int -> unit
+(** Samples the PC speaker from now on, [rate] samples a second. A port
+    write that changes the speaker first turns the time since the last
+    one into samples. *)
+
+val take_audio : t -> Bytes.t option
+(** The samples up to now not taken yet, signed 16-bit little endian
+    mono; [None] when {!start_audio} was not called. *)
+
+val audio_clipped : t -> int option
+(** How many samples were clipped to the 16-bit range. *)
+
 (** {1 Snapshot} *)
 
 val write_state : Dos_snap_codec.writer -> t -> unit
