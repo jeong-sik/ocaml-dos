@@ -93,8 +93,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    cell (page, column, row, the word under it) or a graphics block (left,
    top, width, height, the points under it).
    36: DOS keeps its own day count (MS-DOS DAYCNT) after the clock fields;
-   the DOS time of day is the BIOS tick count in RAM. *)
-let format_version = 36
+   the DOS time of day is the BIOS tick count in RAM.
+   37: the standard devices are handle records too: a record is a file
+   (name, buffer) or CON, AUX or PRN, then its position. *)
+let format_version = 37
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -281,6 +283,10 @@ let put_input_continuation w wait =
    restored ref, not two copies of the same bytes. Pool order is first
    appearance in the sorted live table, then in the frames, so the bytes
    are deterministic. *)
+type saved_target =
+  | Saved_file of string * int        (* name, buffer pool index *)
+  | Saved_device of standard_device
+
 let handle_pool t =
   let buffers = ref [] and buffer_count = ref 0 in
   let buffer_index buf =
@@ -307,15 +313,29 @@ let handle_pool t =
     List.map (fun f -> List.map (fun (n, h) -> (n, index h)) f.parent_handles)
       t.exec_frames
   in
-  let handles = List.rev_map fst !pool in
-  let handles_with_buffers = List.map (fun h -> (h, buffer_index h.data)) handles in
-  (handles_with_buffers, List.rev_map fst !buffers, live, frames)
+  let saved h =
+    let target =
+      match h.target with
+      | File { hname; data } -> Saved_file (hname, buffer_index data)
+      | Device d -> Saved_device d
+    in
+    (target, h.pos)
+  in
+  let handles = List.map saved (List.rev_map fst !pool) in
+  (handles, List.rev_map fst !buffers, live, frames)
 
 let put_buffer w buf = C.put_bytes w !buf
 
-let put_handle w (h, buffer_idx) =
-  let { hname; data = _; pos } = h in
-  C.put_string w hname; C.put w ~what:"handle buffer" C.count buffer_idx;
+let target_tag = C.range 0 3
+
+let put_handle w (target, pos) =
+  let tag = C.put w ~what:"handle target" target_tag in
+  (match target with
+   | Saved_file (hname, buffer_idx) ->
+     tag 0; C.put_string w hname; C.put w ~what:"handle buffer" C.count buffer_idx
+   | Saved_device Con -> tag 1
+   | Saved_device Aux -> tag 2
+   | Saved_device Prn -> tag 3);
   C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
@@ -644,11 +664,19 @@ let read_payload r =
   let pool =
     Array.of_list
       (get_list r ~what:"handle record" (fun () ->
-           let hname = C.get_string r in
-           let buffer_idx = get "handle buffer" C.count in
-           if buffer_idx >= Array.length buffers then C.fail "a handle names no buffer"
-           else
-             { hname; data = buffers.(buffer_idx); pos = get "handle position" file_pos }))
+           let target =
+             match get "handle target" target_tag with
+             | 0 ->
+               let hname = C.get_string r in
+               let buffer_idx = get "handle buffer" C.count in
+               if buffer_idx >= Array.length buffers then C.fail "a handle names no buffer"
+               else File { hname; data = buffers.(buffer_idx) }
+             | 1 -> Device Con
+             | 2 -> Device Aux
+             | 3 -> Device Prn
+             | _ -> C.fail "invalid handle target"
+           in
+           { target; pos = get "handle position" file_pos }))
   in
   let resolve = List.map (fun (n, i) ->
       if i >= Array.length pool then C.fail "a handle names no record" else (n, pool.(i)))
@@ -662,7 +690,10 @@ let read_payload r =
      one. *)
   Hashtbl.reset t.open_files;
   Array.iter
-    (fun h -> if h.hname <> "" then Hashtbl.replace t.open_files h.hname h.data)
+    (fun h ->
+       match h.target with
+       | File { hname; data } -> if hname <> "" then Hashtbl.replace t.open_files hname data
+       | Device _ -> ())
     pool;
   fill_table t.handles (resolve (get_pairs r ~what:"handle" ~a:handle_number ~b:C.count));
   fill_table t.fcbs
