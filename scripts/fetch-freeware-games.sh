@@ -13,11 +13,17 @@ base=https://classicdosgames.com/files/games
 fetch() {
   name=$1
   url=$2
+  skip=${3:-}
   mkdir -p "$dest/$name"
   tmp=$(mktemp "${TMPDIR:-/tmp}/game.XXXXXX")
   curl -fsSL "$url" -o "$tmp"
   # -j: 압축 안의 폴더를 펴서 게임 폴더 바로 아래에 둔다
-  unzip -o -q -j "$tmp" -d "$dest/$name"
+  # skip: 풀지 않을 압축 안의 경로 패턴(소스 폴더가 게임 파일과 이름이 겹친다)
+  if [ -n "$skip" ]; then
+    unzip -o -q -j "$tmp" -x "$skip" -d "$dest/$name"
+  else
+    unzip -o -q -j "$tmp" -d "$dest/$name"
+  fi
   rm -f "$tmp"
   echo "fetched $name"
 }
@@ -42,3 +48,6 @@ fetch bio     "$base/apogee/bmfreew.zip"
 fetch mars    "$base/scenario/marsfree.zip"
 fetch dark    "$base/scenario/da_freew.zip"
 fetch_installer harry "$base/subzero/1hh12.zip" HARRY1.1
+fetch ken     "$base/kensilverman/%24ken.zip"
+fetch supernova "$base/apogee/snova_fw.zip" 'source/*'
+fetch titanic   "$base/apogee/tit_free.zip" 'source/*'
