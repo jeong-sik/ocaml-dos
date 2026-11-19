@@ -22,6 +22,27 @@ type model = I8086 | I80186 | I80286 | I80386
 (* 286 실모드의 MSW: 예약 비트 4-15 는 1, PE·MP·EM·TS 는 0. *)
 let msw_real_mode_286 = 0xFFF0
 
+(* 286 실모드의 기술자 표 레지스터를 SGDT·SIDT 가 6바이트로 쓴다: 한계(16비트),
+   기준의 하위 24비트, 마지막 바이트. 마지막 바이트는 286 이 FFh 를 쓰고
+   386 은 16비트 피연산자에서 0 을 쓴다. 게임은 이 바이트로 286 과 386 을
+   가른다(`push sp` 로 286 이상을 확인한 다음 단계: Charlie the Duck 은
+   `inc bh` 가 0 이면 286).
+
+   근거: Intel 80386 Programmer's Reference Manual, SGDT/SIDT 의 Compatibility
+   Note — "The 80286 stores 1's in these upper bits, whereas the 80386 stores
+   0's if the operand-size attribute is 16 bits. These bits were specified as
+   undefined by the SGDT/SIDT instructions in the iAPX 286 Programmer's
+   Reference Manual." 즉 FFh 는 286 매뉴얼이 정한 값이 아니라 칩이 보이는
+   동작이다.
+
+   한계와 기준은 확인하지 못했다(확인 필요): IDTR 03FFh·기준 0 은 실모드 IVT
+   (0000:0000 부터 400h 바이트)와 맞추었고, GDTR 은 0 으로 돌려준다. 게임이
+   읽는 것은 마지막 바이트뿐이다. *)
+let gdtr_limit_286 = 0x0000
+let idtr_limit_286 = 0x03FF
+let descriptor_table_base_286 = 0
+let descriptor_table_top_byte_286 = 0xFF
+
 let f_carry = 0x001
 let f_parity = 0x004
 let f_aux = 0x010
