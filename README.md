@@ -207,7 +207,9 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
 - **DOS**: INT 21h — 콘솔 입출력, 파일 핸들(open/create/read/write/
   seek/close/dup, 6Ch 확장 열기, 0~4번 CON·AUX·PRN도 같은 표에 있어 46h로 파일에
   돌리고 닫을 수 있다. AUX·PRN에 실제 바이트를 읽고 쓰면 포트와 INT 24h가 없어
-  `Unsupported`로 멈춘다), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
+  `Unsupported`로 멈춘다. 위치는 32비트로 돈다. 0바이트 쓰기는 파일 길이를
+  위치에 맞춘다. 한 번의 쓰기가 36h가 말하는 빈 클러스터(8MB)보다 많이 늘리면
+  디스크가 찬 것으로 답한다), FCB(0Fh/10h/13h~17h/21h~24h/27h/28h, 확장 FCB —
   쓴 바이트는 닫을 때 파일이 된다, 29h 이름 나누기), findfirst/findnext,
   디렉터리(39h 만들기·3Ah 지우기·3Bh 옮기기·47h 현재 위치 — FCB 는 현재
   디렉터리의 파일을 가리킨다),
