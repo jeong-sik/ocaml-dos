@@ -416,6 +416,16 @@ ZZT_DIR=/path/to/zzt ZZT_EXE=/path/to/ZZT.EXE dune exec --root . test/zzt_run_te
 SAMGUK3_DIR=/path/to/samguk3 dune exec --root . test/samguk3_scenario_test/samguk3_scenario_test.exe
 ```
 
+프리웨어 게임 다섯 개(Snarf, Caves of Thor, Xargon, Kiloblaster, Jetpack)가
+시작해 키에 답하는지는 연기 시험 하나로 본다. 받는 스크립트가 게임을
+`DEST/<이름>/` 에 푼다(curl 과 unzip 필요). 장면의 해시는 보지 않고, 화면에
+글자나 비디오 모드와 색 수가 나올 때까지만 기다린다. 약 100초 걸린다.
+
+```sh
+scripts/fetch-freeware-games.sh /path/to/games
+DOS_GAMES_DIR=/path/to/games dune exec --root . test/games_smoke_test/games_smoke_test.exe
+```
+
 삼국지3 시나리오는 스텝 수를 적지 않는다. 단계마다 "화면의 이 영역이 이
 digest 가 될 때까지" 기다린 뒤 키를 하나씩 넣고, 게임이 다시 키를 묻고
 화면이 멈출 때까지 기다린다(`Dos_scenario`). 코어의 타이밍이 바뀌어도

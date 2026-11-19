@@ -1,0 +1,29 @@
+#!/bin/sh
+# 연기 시험(test/games_smoke_test)이 쓰는 프리웨어 게임을 받아 DEST/<이름>/ 에 푼다.
+# 쓰기: scripts/fetch-freeware-games.sh DEST
+#       DOS_GAMES_DIR=DEST dune exec --root . test/games_smoke_test/games_smoke_test.exe
+#
+# 게임 파일은 저장소에 넣지 않는다. 받는 곳은 classicdosgames.com 이고, 각 게임의
+# 배포 조건은 그 사이트의 licenses.html 에 적혀 있다. curl 과 unzip 이 필요하다.
+set -eu
+
+dest=${1:?usage: fetch-freeware-games.sh DEST}
+base=https://classicdosgames.com/files/games
+
+fetch() {
+  name=$1
+  url=$2
+  mkdir -p "$dest/$name"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/game.XXXXXX")
+  curl -fsSL "$url" -o "$tmp"
+  # -j: 압축 안의 폴더를 펴서 게임 폴더 바로 아래에 둔다
+  unzip -o -q -j "$tmp" -d "$dest/$name"
+  rm -f "$tmp"
+  echo "fetched $name"
+}
+
+fetch snarf   "$base/everettkaser/snarf26.zip"
+fetch thor    "$base/apogee/cavethor.zip"
+fetch xargon  "$base/epic/%24xargon.zip"
+fetch kilo    "$base/epic/kilo.zip"
+fetch jetpack "$base/adampedersen/jetpak15.zip"
