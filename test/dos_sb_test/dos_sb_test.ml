@@ -443,9 +443,9 @@ let unhooked_flag = 0x13D
 
 (* OCW3 0Bh: the next read of 20h is the in-service register. *)
 let in_service pic =
-  Dos_pic.write_command pic 0x0B;
-  let isr = Dos_pic.read_command pic in
-  Dos_pic.write_command pic 0x0A;
+  Dos_pic.write_command pic Dos_pic.Master 0x0B;
+  let isr = Dos_pic.read_command pic Dos_pic.Master in
+  Dos_pic.write_command pic Dos_pic.Master 0x0A;
   isr
 
 let test_machine_unhooked_irq () =
