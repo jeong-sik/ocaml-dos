@@ -20,6 +20,11 @@ type t = {
   mutable index : int;
   mutable rate : int;  (** 레지스터 A 의 bit0~6 *)
   mutable control : int;  (** 레지스터 B *)
+  mutable periodic_seen : bool;
+      (** [periodic_since] 전에 이미 선 PF — 레지스터 A 를 바꾸기 전의 주기 *)
+  mutable periodic_since : int;
+      (** 이 사이클 뒤의 주기 끝만 PF 를 세운다. 레지스터 C 를 읽거나
+          레지스터 A 를 쓴 때 *)
 }
 
 let index_mask = 0x7F
@@ -29,11 +34,26 @@ let default_rate = 0x26
 let rate_mask = 0x7F
 let update_in_progress = 0x80
 
+(* 레지스터 A 의 DV2-DV0(bit6~4)이 010 일 때만 발진기가 돌고 나눔 사슬이
+   센다. RS3-RS0(bit3~0)은 주기 인터럽트의 탭을 고른다. 0 은 탭이 없고,
+   1·2 는 128·256 틱, 3 이상은 2^(RS-1) 틱이다(32.768kHz 한 틱).
+   86Box src/nvr_at.c nvr_osc_running·timer_load_count. *)
+let divider_mask = 0x70
+let oscillator_on = 0x20
+let rate_select_mask = 0x0F
+let rtc_base_hz = 32768
+let short_rate_shift = 6
+
 (* 레지스터 B: 24시간, BCD. *)
 let default_control = 0x02
 let control_set = 0x80
+let control_periodic = 0x40
 let control_binary = 0x04
 let control_24_hour = 0x02
+
+(* 레지스터 C: bit7 IRQF(켜 둔 인터럽트의 깃발이 섰다), bit6 PF(주기). *)
+let flag_irq = 0x80
+let flag_periodic = 0x40
 
 (* 레지스터 D bit7: 전지가 살아 있고 RAM 이 유효하다. *)
 let valid_ram = 0x80
@@ -73,7 +93,9 @@ let reg_century = 0x32
 let checksum_first = 0x10
 let checksum_last = 0x2D
 
-let create ~clock = { clock; index = 0; rate = default_rate; control = default_control }
+let create ~clock =
+  { clock; index = 0; rate = default_rate; control = default_control;
+    periodic_seen = false; periodic_since = 0 }
 
 let select c v = c.index <- v land index_mask
 let index c = c.index
@@ -117,6 +139,38 @@ let updating c ~now ~cpu_hz =
   let cycles us = us * cpu_hz / us_per_second in
   into_second < cycles uip_after_us || into_second >= cpu_hz - cycles uip_before_us
 
+(* 고른 탭의 한 주기, 32.768kHz 틱 수. 발진기가 멈췄거나 RS 가 0 이면
+   없다. *)
+let periodic_ticks rate =
+  if rate land divider_mask <> oscillator_on then None
+  else
+    match rate land rate_select_mask with
+    | 0 -> None
+    | (1 | 2) as rs -> Some (1 lsl (rs + short_rate_shift))
+    | rs -> Some (1 lsl (rs - 1))
+
+(* 나눔 사슬은 기계가 켜질 때(사이클 0) 센 것으로 친다. 그래서 주기의 끝은
+   사이클 0 에서 한 주기씩 떨어져 있고, 탭을 바꿔도 사슬의 위상은 그대로다.
+   [period_index] 가 늘면 그 사이에 주기 끝이 있었다. *)
+let period_index ~ticks ~cpu_hz cycle = cycle * rtc_base_hz / (ticks * cpu_hz)
+
+let periodic_flag c ~now ~cpu_hz =
+  c.periodic_seen
+  ||
+  match periodic_ticks c.rate with
+  | None -> false
+  | Some ticks ->
+    period_index ~ticks ~cpu_hz now > period_index ~ticks ~cpu_hz c.periodic_since
+
+(* 레지스터 C 를 읽으면 깃발이 모두 지워진다(86Box nvr_reg_read). AF·UF 는
+   만들지 않아 늘 0 이다. *)
+let read_flags c ~now ~cpu_hz =
+  let pf = periodic_flag c ~now ~cpu_hz in
+  let irqf = pf && c.control land control_periodic <> 0 in
+  c.periodic_seen <- false;
+  c.periodic_since <- now;
+  (if irqf then flag_irq else 0) lor if pf then flag_periodic else 0
+
 let read c ~now ~cpu_hz =
   let reg = c.index in
   let wall () = c.clock () in
@@ -131,14 +185,19 @@ let read c ~now ~cpu_hz =
   else if reg = reg_a then
     c.rate lor if updating c ~now ~cpu_hz then update_in_progress else 0
   else if reg = reg_b then c.control
-  else if reg = reg_c then 0
+  else if reg = reg_c then read_flags c ~now ~cpu_hz
   else if reg = reg_d then valid_ram
   else if reg = reg_checksum_hi then high checksum
   else if reg = reg_checksum_lo then low checksum
   else table reg
 
-let write c v =
-  if c.index = reg_a then c.rate <- v land rate_mask
+let write c v ~now ~cpu_hz =
+  if c.index = reg_a then begin
+    (* 옛 탭이 이미 세운 PF 는 남는다. 새 탭은 지금부터 센다. *)
+    c.periodic_seen <- periodic_flag c ~now ~cpu_hz;
+    c.periodic_since <- now;
+    c.rate <- v land rate_mask
+  end
   else if c.index = reg_b then c.control <- low v
 
 (* ---------- snapshot ---------- *)
@@ -148,12 +207,16 @@ module C = Dos_snap_codec
 let index_r = C.range 0 index_mask
 let rate_r = C.range 0 rate_mask
 
-let write_state w { clock = _; index; rate; control } =
+let write_state w { clock = _; index; rate; control; periodic_seen; periodic_since } =
   C.put w ~what:"cmos index" index_r index;
   C.put w ~what:"cmos register A" rate_r rate;
-  C.put w ~what:"cmos register B" C.byte control
+  C.put w ~what:"cmos register B" C.byte control;
+  C.put_bool w periodic_seen;
+  C.put w ~what:"cmos periodic since" C.count periodic_since
 
 let read_state r c =
   c.index <- C.get r ~what:"cmos index" index_r;
   c.rate <- C.get r ~what:"cmos register A" rate_r;
-  c.control <- C.get r ~what:"cmos register B" C.byte
+  c.control <- C.get r ~what:"cmos register B" C.byte;
+  c.periodic_seen <- C.get_bool r;
+  c.periodic_since <- C.get r ~what:"cmos periodic since" C.count
