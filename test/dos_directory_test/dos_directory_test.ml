@@ -31,11 +31,18 @@ let test_path () =
   check ".. above the root" (parsed ".." = Error Above_root);
   check "another drive" (parsed "D:\\X" = Error Bad_drive);
   check "a long name is cut to 8.3" (parsed "LongFileName.Text" = Ok [ "LONGFILE.TEX" ]);
+  check "separators in a row are one" (parsed "A\\\\B" = Ok [ "A"; "B" ]);
+  check "a mixed run too" (parsed "C:\\DATA\\/\\X.DAT" = Ok [ "DATA"; "X.DAT" ]);
+  check "a run after .." (parsed ~cwd:(under "DATA") "..//Y" = Ok [ "Y" ]);
   List.iter
     (fun s -> check (Printf.sprintf "%S is not a name" s) (parsed s = Error Bad_name))
-    [ ""; "A.B.C"; "A\\\\B"; "DATA\\"; "A B"; "A*"; ".X"; "A?B"; "A|B"; "..." ];
+    [ ""; "A.B.C"; "DATA\\"; "DATA\\\\"; "\\\\SERVER\\X"; "C:/\\X"; "//"; "A B"; "A*"; ".X";
+      "A?B"; "A|B"; "..." ];
   check "a pattern keeps its wildcards"
     (Result.map (fun ((d : Dos_path.t), p) -> ((d :> string list), p)) (parse_pattern ~cwd:root "data\\*.dat")
+     = Ok ([ "DATA" ], "*.DAT"));
+  check "a pattern after a run"
+    (Result.map (fun ((d : Dos_path.t), p) -> ((d :> string list), p)) (parse_pattern ~cwd:root "data\\\\*.dat")
      = Ok ([ "DATA" ], "*.DAT"));
   check "a bare pattern searches the current directory"
     (Result.map (fun ((d : Dos_path.t), p) -> ((d :> string list), p)) (parse_pattern ~cwd:(under "DATA") "*.*")
@@ -146,6 +153,34 @@ let test_make_change_find () =
   check "then no more files" (error_at m 13 = Some 18);
   check "the host sees the file under its directory" (Dos_machine.read_mounted m "save/game.sav" = Some "");
   check "the program left the root current" ((m.Dos_state.cwd :> string list) = [])
+
+(* A program that builds "SAVE" ^ "\\" ^ "\\GAME.SAV", as strcat onto a
+   directory that already ends in a separator does. *)
+let test_repeated_separators () =
+  let at, data =
+    layout [ "SAVE"; "SAVE\\\\GAME.SAV"; "SAVE/\\GAME.SAV"; "SAVE\\\\*.SAV"; "\\\\SAVE\\GAME.SAV" ]
+  in
+  let code =
+    String.concat ""
+      [ mov_ax 0x3900; mov_dx (at "SAVE"); int21; save (slot 0);
+        mov_ax 0x3C00; mov_cx 0; mov_dx (at "SAVE\\\\GAME.SAV"); int21; mov_bx_ax; save (slot 1);
+        mov_ax 0x3E00; int21; save (slot 2);
+        mov_ax 0x3D00; mov_dx (at "SAVE/\\GAME.SAV"); int21; mov_bx_ax; save (slot 3);
+        mov_ax 0x3E00; int21; save (slot 4);
+        mov_ax 0x4E00; mov_cx 0; mov_dx (at "SAVE\\\\*.SAV"); int21; save (slot 5); copy_found 0;
+        mov_ax 0x3D00; mov_dx (at "\\\\SAVE\\GAME.SAV"); int21; save (slot 6);
+        quit ]
+  in
+  let m = machine () in
+  Dos_machine.load_com m (image code data);
+  run m;
+  check "repeated: the program ran to its end" (Dos_machine.exited m);
+  check "repeated: MKDIR" (ok_at m 0);
+  check "repeated: CREATE through SAVE\\\\" (ok_at m 1 && ok_at m 2);
+  check "repeated: OPEN through SAVE/\\" (ok_at m 3 && ok_at m 4);
+  check "repeated: FINDFIRST through SAVE\\\\" (ok_at m 5 && asciiz m names_at = "GAME.SAV");
+  check "repeated: \\\\ in front is a network name" (error_at m 6 = Some 3);
+  check "repeated: the host sees one file" (Dos_machine.read_mounted m "save/game.sav" = Some "")
 
 let save_snapshot m = match Dos_snapshot.save m with
   | Ok s -> s | Error e -> failwith (Dos_snapshot.save_error_to_string e)
@@ -261,6 +296,7 @@ let test_mount_names () =
 let () =
   test_path ();
   test_make_change_find ();
+  test_repeated_separators ();
   test_mounted_tree ();
   test_mount_names ();
   test_fcb_current_directory ();
