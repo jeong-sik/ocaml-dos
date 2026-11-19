@@ -54,6 +54,12 @@ let emm_entry_off = 0x0000
 let iret_stub_off = 0x0020
 let hw_irq_off = 0x0030
 let bios_int8_off = 0x0040
+(* F000:0022 의 미디어 ID 바이트. INT 21h AH=1Bh·1Ch 가 DS:BX 로 가리킨다.
+   MS-DOS 4.0 은 DOS 데이터의 고정 칸(FATBYTE)을 가리키고 사용자는 이 한
+   바이트만 읽어야 한다(MISC.ASM $SLEAZEFUNC). F8h 는 하드 디스크다. IRET
+   스텁(0x20)과 하드웨어 IRQ 루틴(0x30) 사이의 빈 곳이다. *)
+let media_id_off = 0x0022
+let media_id_fixed_disk = 0xF8
 let stub_area = 0x0100
 let stub_stride = 16
 let rom_font_off = 0xFA6E
@@ -318,6 +324,7 @@ let install t =
     ((rom_seg * 16) + bios_int8_off)
     (String.length bios_int8);
   wr8 t ((rom_seg * 16) + iret_stub_off) 0xCF;   (* IRET 스텁 *)
+  wr8 t ((rom_seg * 16) + media_id_off) media_id_fixed_disk;
   wr8 t ((rom_seg * 16) + model_byte_off) at_model_byte;
   String.iteri
     (fun i c -> wr8 t ((rom_seg * 16) + country_off + i) (Char.code c))
