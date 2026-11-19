@@ -59,6 +59,26 @@ let to_title_menu =
     press "키보드로" [ "enter" ];
     wait "타이틀 메뉴" (region 200 165 240 75) "f972cdb6e3cba6fcb06162d52a0c2171" ]
 
+(* The same start with the mouse: after the code the game asks to click for
+   the mouse or press a key for the keyboard, and the title menu and the
+   scenario list then answer the pointer. The scenario list is looked at
+   with the pointer over it: the row under the pointer is lit (row 2 at
+   y 180), so a pointer that does not arrive, or a button that does not
+   register, changes the digest. Clicking 1. 새로운 게임 at y 180 leaves the
+   pointer there, so the next click goes to row 1 at y 162. *)
+let mouse_start =
+  [ wait "KOEI 로고" (region 220 130 200 120) "418c2ef28ff2c7fb299ad234fe7bf09b";
+    press "로고에서 오프닝 건너뛰기" [ "enter" ];
+    wait "보호 코드 [孫李呂]" (region 104 18 64 20) "3e0a63288c39ede1bda328640a6579da";
+    press "보호 코드 10183" [ "1"; "0"; "1"; "8"; "3"; "enter" ];
+    wait "마우스·키보드 고르기" (region 160 200 340 70) "2149360be7941fa5965f35e1a4dc0ded";
+    Dos_scenario.Click { what = "마우스로"; x = 320; y = 240 };
+    wait "타이틀 메뉴" (region 200 165 240 70) "7ad9f017b82f273b6f9173fb9967138a";
+    Dos_scenario.Click { what = "1. 새로운 게임"; x = 300; y = 180 };
+    wait "시나리오 목록, 포인터 밑 2번 줄이 켜짐" (region 170 150 290 140) "97f19ad915eaa18a7bb1e318390aa7b8";
+    Dos_scenario.Click { what = "시나리오 1 (189년)"; x = 300; y = 162 };
+    wait "몇 명으로 게임하겠습니까" prompt_line "1db0914c7a404189ca81bfe0ef1ae127" ]
+
 (* The question is typed out a letter at a time, and a key pressed before
    it ends only skips the typing: after a load, a 1 meant for 1. 군사 went
    there and the Enter after it fell on an empty prompt. The region ends at
@@ -177,6 +197,7 @@ let () =
   match Sys.getenv_opt "SAMGUK3_DIR" with
   | None -> print_endline "samguk3 scenario: SAMGUK3_DIR unset, skipped"
   | Some dir ->
+    play (boot dir) ~name:"mouse-start" mouse_start;
     let first = boot dir in
     play first ~name:"new-game" (new_game @ save_to_slot_1);
     let original = read (Filename.concat dir save_file) in

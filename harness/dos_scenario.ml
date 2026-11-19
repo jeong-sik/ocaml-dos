@@ -19,6 +19,7 @@ let region_digest m r =
 type step =
   | Wait_for of { what : string; region : region; digest : string; budget : int }
   | Press of { what : string; keys : string list; budget : int }
+  | Click of { what : string; x : int; y : int }
 
 (* The rhythm the masc DOS lane plays with (see test/zzt_run_test.ml): a
    game loop eats a key and asks again within hundreds of instructions,
@@ -81,6 +82,32 @@ let press m ~spent ~budget word =
      | Program_exited when not (Dos_state.key_pending m) -> Done
      | o -> o)
 
+(* A game polls the mouse (INT 33h AX=03h) from its own loop, a few hundred
+   instructions apart, with no key request to mark the answer. So a click
+   is timed in machine steps: long enough for every poll loop to see the
+   pointer arrive, the button down and the button up. The next [Wait_for]
+   is what tells that the game answered. *)
+let click_move_steps = 200_000
+let click_hold_steps = 300_000
+let click_release_steps = 300_000
+
+let click m ~spent ~x ~y =
+  let run steps =
+    if Dos_machine.exited m then Program_exited
+    else begin
+      let report = Dos_machine.run_until m ~max_steps:steps ~stop:(fun _ -> false) in
+      spent := !spent + report.machine_steps;
+      Done
+    end
+  in
+  let ( >>= ) o f = match o with Done -> f () | (Out_of_budget | Program_exited) as o -> o in
+  Dos_machine.set_mouse m ~x ~y ~buttons:0;
+  run click_move_steps >>= fun () ->
+  Dos_machine.set_mouse m ~x ~y ~buttons:1;
+  run click_hold_steps >>= fun () ->
+  Dos_machine.set_mouse m ~x ~y ~buttons:0;
+  run click_release_steps
+
 let reason_of = function
   | Done -> None
   | Out_of_budget -> Some "budget ran out"
@@ -111,5 +138,9 @@ let run m steps =
               | Some reason -> fail index what (Printf.sprintf "key %S: %s" name reason)))
       in
       keys_go keys
+    | Click { what; x; y } :: rest ->
+      (match reason_of (click m ~spent ~x ~y) with
+       | None -> go (index + 1) rest
+       | Some reason -> fail index what (Printf.sprintf "click (%d, %d): %s" x y reason))
   in
   go 0 steps

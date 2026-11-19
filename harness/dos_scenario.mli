@@ -30,6 +30,12 @@ type step =
           screen digest did not change since the previous chunk. A key the
           program takes and then exits on is answered too. [budget] bounds
           each key. *)
+  | Click of { what : string; x : int; y : int }
+      (** Move the pointer to [x], [y], press the left button, hold it, and
+          let go. The game polls the mouse from its own loop, so this takes
+          a fixed number of machine steps rather than waiting for an
+          answer; follow it with a {!Wait_for}. Fails only if the program
+          exited. *)
 
 val chunk_steps : int
 
