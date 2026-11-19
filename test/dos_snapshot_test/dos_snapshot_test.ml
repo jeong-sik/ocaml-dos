@@ -441,14 +441,17 @@ let () =
   ignore (restore_exn (save_exn t))
 
 (* The payload ends with the two mouse ranges, each a low and a high
-   word of eight bytes. A low end above the high end is refused at restore,
-   even with the checksum fixed. *)
+   word of eight bytes, then the drawn cursor's kind (eight bytes: none
+   drawn). A low end above the high end is refused at restore, even with
+   the checksum fixed. *)
+let drawn_none_len = 8
+
 let () =
   let t = Dos_machine.create () in
   let saved = save_exn t in
   let header_len = magic_len + 8 + 32 + 16 in
   let b = Bytes.of_string saved in
-  let x_low_at = Bytes.length b - (4 * 8) in
+  let x_low_at = Bytes.length b - (4 * 8) - drawn_none_len in
   check "the crafted bytes see the x range 0..639"
     (Bytes.get_int64_be b x_low_at = 0L && Bytes.get_int64_be b (x_low_at + 8) = 639L);
   Bytes.set_int64_be b x_low_at 640L;
@@ -492,7 +495,8 @@ let () =
      its callback registration (the default cursors take a flag, two kinds
      and two text masks; the motion counters are followed by five motion
      settings and two carries), then three ints for each of six button
-     logs, then two ranges of two ints each. The mapping is a count, then
+     logs, then two ranges of two ints each, then the drawn cursor's kind
+     (one int: none drawn). The mapping is a count, then
      per frame page a shown flag byte and, when shown, the handle and the
      page. Pages 2 and 3 are empty. Point page 1 at handle 9, which does
      not exist, and fix the checksum so only the consistency check can
@@ -506,6 +510,7 @@ let () =
   let motion_len = 7 * 8 in
   let mouse_len =
     1 + (3 * 8) + cursors_len + (5 * 8) + motion_len + (button_logs * 3 * 8) + (2 * 2 * 8)
+    + drawn_none_len
   in
   let empty_len = 1 and shown_len = 1 + (2 * 8) in
   let at = String.length saved - mouse_len - (2 * empty_len) - shown_len + 1 in

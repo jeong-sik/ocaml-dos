@@ -148,6 +148,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
         (* 범위와 자리는 [Dos_bios.install] 이 BDA 를 채운 뒤 부팅 모드의
            가상 화면에 맞춰 다시 쓴다 *)
         mouse_range_x = (0, 0); mouse_range_y = (0, 0);
+        mouse_drawn = Dos_state.Not_drawn;
       };
       on_unserved = (fun _ ~vector:_ ~ax:_ -> ());
     }
@@ -587,6 +588,9 @@ let set_mouse t ~x ~y ~buttons =
     (if moved then 0x01 else 0)
     lor edge 0x1 0x02 0x04 lor edge 0x2 0x08 0x10 lor edge 0x4 0x20 0x40
   in
+  (* 드라이버는 사건마다 커서를 다시 그린 뒤 핸들러를 부른다(DOSBox-X
+     INT74_Handler 의 DrawCursor). 숨어 있으면 그리지 않는다. *)
+  if events <> 0 then Dos_mouse_cursor.draw t;
   let mask = m.mouse_handler_mask in
   if mask <> 0 && events land mask <> 0
      && (m.mouse_handler_seg <> 0 || m.mouse_handler_off <> 0)

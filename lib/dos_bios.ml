@@ -587,6 +587,10 @@ let video t =
   | 0x00 ->
     (* AL 의 최상위 비트는 "화면을 지우지 말라" 는 뜻이다. *)
     let mode = al land 0x7f in
+    (* 마우스 드라이버는 모드를 세우기 전에 커서를 숨긴다(CuteMouse
+       int10handler 가 INT 33h 02h 를 부른다). 화면을 지우지 않는 모드
+       세우기라도 커서 자국이 남지 않는다. *)
+    Dos_mouse_cursor.restore t;
     Dos_video.set_mode t.video mode ~clear:(al land 0x80 = 0);
     modeset_bda t ~screen_kept:(al land 0x80 <> 0);
     (* 실기 VGA BIOS 는 모드를 세울 때 DAC 을 기본값으로 다시 싣는다.
@@ -995,6 +999,7 @@ let double_speed_of dx = if dx = 0 then default_motion.double_speed else dx
    지우는 칸(ClearArea3)에 들고, DOSBox-X Mouse_Reset 도 지운다. *)
 let reset_mouse_driver t =
   let m = t.mouse in
+  Dos_mouse_cursor.restore t;
   m.mouse_cursor_flag <- cursor_flag_after_reset;
   m.mouse_graphics_cursor <- Default_arrow;
   m.mouse_text_cursor <- default_text_cursor;
@@ -1039,8 +1044,11 @@ let mouse t =
   | 0x01 ->
     (* 깃발을 하나 올리되 0 에서 멈춘다. 02h 를 n 번 불렀으면 01h 도 n 번
        불러야 보인다(RBIL INT 33/0002, DOSBox-X mouse.cpp). *)
-    if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1
-  | 0x02 -> m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
+    if m.mouse_cursor_flag < 0 then m.mouse_cursor_flag <- m.mouse_cursor_flag + 1;
+    Dos_mouse_cursor.draw t
+  | 0x02 ->
+    Dos_mouse_cursor.restore t;
+    m.mouse_cursor_flag <- m.mouse_cursor_flag - 1
   | 0x03 ->
     let space = Dos_mouse_space.current t.mem in
     Cpu86.set_reg16 cpu 1 (Dos_mouse_space.cell_x space m.mouse_x);
@@ -1049,7 +1057,8 @@ let mouse t =
   | 0x04 ->
     m.mouse_x <- clamp_to m.mouse_range_x (Cpu86.reg16 cpu 1);
     m.mouse_y <- clamp_to m.mouse_range_y (Cpu86.reg16 cpu 2);
-    clear_mickey_carry m
+    clear_mickey_carry m;
+    Dos_mouse_cursor.draw t
   | 0x0F ->
     (* DEFINE MICKEY/PIXEL RATIO: CX·DX 는 8 화소당 미키. 하나라도 0 이면
        무시한다(CuteMouse sensitivity_0F, DOSBox-X Mouse_SetMickeyPixelRate). *)
@@ -1136,16 +1145,18 @@ let mouse t =
       Custom_cursor
         { hot_x = Cpu86.reg16 cpu 3; hot_y = Cpu86.reg16 cpu 1;
           screen_mask = Array.init cursor_rows row;
-          cursor_mask = Array.init cursor_rows (fun k -> row (cursor_rows + k)) }
+          cursor_mask = Array.init cursor_rows (fun k -> row (cursor_rows + k)) };
+    Dos_mouse_cursor.draw t
   | 0x0A ->
     (* 텍스트 커서: BX=0 이면 CX·DX 가 마스크, 아니면 스캔 줄이다. RBIL 은
-       BX 0·1 만 적는다. 그 밖의 값은 DOSBox-X 처럼 하드웨어로 본다. CRTC 의
-       커서 모양은 바꾸지 않는다 — 마우스 커서를 그리는 곳이 아직 없다. *)
+       BX 0·1 만 적는다. 그 밖의 값은 DOSBox-X 처럼 하드웨어로 본다. 하드웨어
+       커서는 그리지 않는다(Dos_mouse_cursor). *)
     let cx = Cpu86.reg16 cpu 1 and dx = Cpu86.reg16 cpu 2 in
     m.mouse_text_cursor <-
       (match Cpu86.reg16 cpu 3 with
        | 0 -> Software_text { screen_mask = cx; cursor_mask = dx }
-       | _ -> Hardware_text { first_line = cx; last_line = dx })
+       | _ -> Hardware_text { first_line = cx; last_line = dx });
+    Dos_mouse_cursor.draw t
   | 0x2A ->
     (* GET CURSOR HOT SPOT(RBIL INT 33/002A): AX 깃발, BX·CX 핫스폿, DX 종류.
        RBIL 은 깃발을 AX 로 적는다. DOSBox-X 는 AL 만 쓴다. *)

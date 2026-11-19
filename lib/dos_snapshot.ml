@@ -88,8 +88,11 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    rises, after the periodic count start.
    33: a suspended service may wait for INT 15h AH=86h (input request tag
    4, no fields).
-   34: the OPL2's voice registers 00h-F5h after its timers (Dos_opl). *)
-let format_version = 34
+   34: the OPL2's voice registers 00h-F5h after its timers (Dos_opl).
+   35: the mouse driver's drawn cursor after the mouse ranges: none, a text
+   cell (page, column, row, the word under it) or a graphics block (left,
+   top, width, height, the points under it). *)
+let format_version = 35
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -124,6 +127,8 @@ let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
 let cursor_flag = C.range min_int 0
 (* 0 = 기본 화살표·소프트웨어 텍스트 커서, 1 = 사용자 비트맵·하드웨어 *)
 let cursor_kind = C.range 0 1
+let drawn_kind = C.range 0 2
+let drawn_side = C.range 1 cursor_rows
 let mouse_ratio = C.range 1 0xFFFF  (* 0Fh·13h·1Ah 는 0 을 두지 않는다 *)
 let mouse_speed = C.range lowest_speed highest_speed
 let mouse_carry = C.range 0 (pixels_per_ratio - 1)
@@ -437,7 +442,7 @@ let write_payload w t =
         mouse_dx; mouse_dy; mouse_motion; mouse_carry_x; mouse_carry_y;
         mouse_handler_mask; mouse_handler_seg;
         mouse_handler_off; mouse_presses; mouse_releases; mouse_range_x;
-        mouse_range_y } = mouse
+        mouse_range_y; mouse_drawn } = mouse
   in
   C.put_bool w mouse_present;
   put "mouse x" C.any mouse_x;
@@ -484,7 +489,22 @@ let write_payload w t =
     (fun (lo, hi) ->
       put "mouse range low" C.word lo;
       put "mouse range high" C.word hi)
-    [ mouse_range_x; mouse_range_y ]
+    [ mouse_range_x; mouse_range_y ];
+  match mouse_drawn with
+  | Not_drawn -> put "drawn cursor" drawn_kind 0
+  | Drawn_text { page; col; row; under } ->
+    put "drawn cursor" drawn_kind 1;
+    put "drawn cursor page" C.byte page;
+    put "drawn cursor column" C.word col;
+    put "drawn cursor row" C.word row;
+    put "drawn cursor cell" C.word under
+  | Drawn_graphics { left; top; width; height; under } ->
+    put "drawn cursor" drawn_kind 2;
+    put "drawn cursor left" C.word left;
+    put "drawn cursor top" C.word top;
+    put "drawn cursor width" drawn_side width;
+    put "drawn cursor height" drawn_side height;
+    C.put_int_array w ~what:"drawn cursor pixels" C.byte under
 
 let save t =
   match check_consistency t with
@@ -765,6 +785,22 @@ let read_payload r =
   in
   m.mouse_range_x <- get_range ();
   m.mouse_range_y <- get_range ();
+  m.mouse_drawn <-
+    (match get "drawn cursor" drawn_kind with
+     | 0 -> Not_drawn
+     | 1 ->
+       let page = get "drawn cursor page" C.byte in
+       let col = get "drawn cursor column" C.word in
+       let row = get "drawn cursor row" C.word in
+       let under = get "drawn cursor cell" C.word in
+       Drawn_text { page; col; row; under }
+     | _ ->
+       let left = get "drawn cursor left" C.word in
+       let top = get "drawn cursor top" C.word in
+       let width = get "drawn cursor width" drawn_side in
+       let height = get "drawn cursor height" drawn_side in
+       let under = get_int_array r ~what:"drawn cursor pixels" ~len:(width * height) C.byte in
+       Drawn_graphics { left; top; width; height; under });
   C.end_of_input r;
   (match check_consistency t with
    | Ok () -> ()
