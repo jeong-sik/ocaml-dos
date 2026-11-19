@@ -17,6 +17,9 @@ let check name got want =
     Printf.eprintf "FAIL %s: got %d want %d\n%!" name got want
   end
 
+(* 루트 EXE 의 PSP 는 COM 과 같은 0x1000 이다 *)
+let root_psp = 0x1000
+
 (* 최소 MZ 헤더 + 재배치 테이블 + 이미지. reloc = (이미지 내 off, seg). *)
 let make_exe ~image ~ip ~cs ~ss ~sp relocs =
   let b = Buffer.create (32 + String.length image) in
@@ -161,8 +164,8 @@ let () =
   let trailer = String.make (700 * 1024) '\xaa' in
   let m = Dos_machine.create () in
   Dos_machine.load_exe m (small ^ trailer);
-  check "trailer: psp below memtop by the module, not the file"
-    (Dos_machine.psp_seg_of m) (0x9FF0 - (module_bytes / 16));
+  check "trailer: the root psp does not depend on the file length"
+    (Dos_machine.psp_seg_of m) root_psp;
   let base = (Dos_machine.psp_seg_of m + 0x10) * 16 in
   check "trailer: the rest of the last page loads"
     (Dos_machine.mem_read m (base + String.length exit7)) 0xaa;
@@ -196,10 +199,24 @@ let () =
   in
   let m = Dos_machine.create () in
   Dos_machine.load_exe m short511;
-  check "511 short: placed by the pages"
-    (Dos_machine.psp_seg_of m) (0x9FF0 - ((1024 - 32) / 16));
+  check "511 short: loaded at the root psp"
+    (Dos_machine.psp_seg_of m) root_psp;
   Dos_machine.run m ~max_steps:1000;
   check "511 short: program runs" (Dos_machine.exit_code m) 7;
+  (* 루트 EXE 는 남은 메모리를 통째로 받고, AH=4Ah 로 줄이면 그 위가 비어
+     AH=48h 가 성공한다. 위쪽에 실려 있으면 줄여도 위가 비지 않아 실패한다
+     (MS C 런타임의 R6009, Snarf). 성공이면 종료 코드 7, 실패면 1. *)
+  let shrink_then_alloc =
+    "\xb4\x4a\xbb\x00\x01\xcd\x21"          (* mov ah,4Ah; mov bx,100h; int 21h *)
+    ^ "\xb4\x48\xbb\x00\x20\xcd\x21"        (* mov ah,48h; mov bx,2000h; int 21h *)
+    ^ "\x72\x05"                                (* jc fail *)
+    ^ "\xb8\x07\x4c\xcd\x21"                  (* mov ax,4C07h; int 21h *)
+    ^ "\xb8\x01\x4c\xcd\x21"                  (* fail: mov ax,4C01h; int 21h *)
+  in
+  let m = Dos_machine.create () in
+  Dos_machine.load_exe m (make_exe ~image:shrink_then_alloc ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE []);
+  Dos_machine.run m ~max_steps:1000;
+  check "a root EXE that shrinks itself can then allocate" (Dos_machine.exit_code m) 7;
   let raises name image want =
     checkb name
       (try Dos_machine.load_exe (Dos_machine.create ()) image; false
