@@ -195,7 +195,34 @@ let next_paragraph off = (off + paragraph - 1) / paragraph * paragraph
 (* IRQ9-15 루틴은 XMS 진입점 뒤 문단, 스텁 영역(0100h) 앞에 둔다. IRQ8 은
    호스트가 받는다(INT 70h, [rtc_irq]). *)
 let hw_irq2_off = next_paragraph (xms_entry_off + String.length xms_control)
-let () = assert (hw_irq2_off + String.length hw_irq2_default <= stub_area)
+
+(* INT 1Ah AH=00h(틱 읽기)는 읽기 전에 인터럽트를 잠깐 허용한다. SeaBIOS
+   handle_1a00 이 먼저 yield() 를 부르고 yield() 는 check_irqs() 의
+   "sti ; nop ; rep ; nop ; cli ; cld" 로 보류된 IRQ 를 받게 한다(src/clock.c,
+   src/stacks.c). 인터럽트를 끈 채 틱이 늘기를 기다리는 지연 루프가 이 창에서
+   IRQ0 을 받아야 틱이 오른다(Arcy 2). 창은 게스트 코드여야 한다: IRQ0 은
+   게스트 ISR(INT 1Ch 사용자 훅 포함)을 부른다.
+
+   기계는 이 호출을 호스트가 바로 답하지 않고 이 루틴으로 보낸다. 창을 연 뒤
+   int 사설벡터 로 호스트가 읽고 iret 로 돌아간다. 사설 벡터는 int 명령이
+   등록한 스텁 자리에 있어야 알아본다([private_service_vector]). *)
+let time_of_day_vector = 0x1A
+let () = assert (host_vector time_of_day_vector = Some (Bios Time_of_day))
+
+let irq_window_prefix = "\xFB\x90\xFA"        (* sti; nop; cli *)
+let irq_window =
+  irq_window_prefix ^ "\xCD" ^ String.make 1 (Char.chr (private_vector time_of_day_vector))
+  ^ "\xCF"                                     (* iret *)
+let irq_window_int_off = String.length irq_window_prefix
+
+let irq_window_off = next_paragraph (hw_irq2_off + String.length hw_irq2_default)
+let () = assert (irq_window_off + String.length irq_window <= stub_area)
+
+(* 호스트가 답하기 전에 인터럽트 창을 여는 호출. *)
+let opens_irq_window ~vector ~ah =
+  match host_vector vector with
+  | Some (Bios Time_of_day) -> ah = 0x00
+  | _ -> false
 
 (* 시각을 틱으로: SeaBIOS src/hw/timer.c ticks_from_ms. PM 타이머
    3579545Hz 를 거쳐 PIT 분주비 65536 으로 나누고 둘 다 올림한다. *)
@@ -339,6 +366,8 @@ let install t =
   Bytes.blit_string hw_irq2_default 0 t.mem
     ((rom_seg * 16) + hw_irq2_off)
     (String.length hw_irq2_default);
+  Bytes.blit_string irq_window 0 t.mem ((rom_seg * 16) + irq_window_off) (String.length irq_window);
+  t.stubs <- (time_of_day_vector, irq_window_off + irq_window_int_off) :: t.stubs;
   set_ivt t timer_vector bios_int8_off rom_seg;  (* 타이머 IRQ0 *)
   (* POST 는 부팅 모드를 세우며 화면을 지운다: 공백, 속성 07h. 이게
      없으면 화면 메모리가 0(검정 위 검정)이라, 칸의 속성을 두는 teletype

@@ -799,18 +799,22 @@ let push_word t w =
   wr8 t (base + o) (w land 0xff);
   wr8 t (base + ((o + 1) land 0xffff)) (w lsr 8)
 
+(* 같은 프레임을 [sg]:[off] 로 밀어 넣는다. *)
+let deliver_to t ~sg ~off =
+  let flags = Cpu86.flags t.cpu in
+  let push = push_word t in
+  push flags;
+  push (Cpu86.seg t.cpu 1);
+  push (Cpu86.dump_ip t.cpu);
+  Cpu86.set_flags t.cpu
+    (flags land lnot Cpu86.f_interrupt land lnot Cpu86.f_trap);
+  Cpu86.set_seg t.cpu 1 sg;
+  Cpu86.set_ip t.cpu off
+
 let deliver_ivt t v =
   let off = rd16 t (v * 4) and sg = rd16 t ((v * 4) + 2) in
   if off <> 0 || sg <> 0 then begin
-    let flags = Cpu86.flags t.cpu in
-    let push = push_word t in
-    push flags;
-    push (Cpu86.seg t.cpu 1);
-    push (Cpu86.dump_ip t.cpu);
-    Cpu86.set_flags t.cpu
-      (flags land lnot Cpu86.f_interrupt land lnot Cpu86.f_trap);
-    Cpu86.set_seg t.cpu 1 sg;
-    Cpu86.set_ip t.cpu off;
+    deliver_to t ~sg ~off;
     true
   end
   else false
