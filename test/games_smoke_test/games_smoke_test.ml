@@ -71,6 +71,10 @@ let games = [
   { name = "harry"; exe = "HH1.EXE";
     stages = [
       { press = []; until = Graphics { mode = 0x13; min_colors = 32 }; budget = 40_000_000 } ] };
+  (* 레이캐스팅 3D(모드 13h). 타이틀 뒤에 난이도 고르는 화면이 나온다 *)
+  { name = "ken"; exe = "KEN.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x13; min_colors = 32 }; budget = 60_000_000 } ] };
   (* 텍스트 어드벤처. NOVA.COM 은 확장자만 COM 이고 MZ 서명이 있는 EXE 다 *)
   { name = "supernova"; exe = "NOVA.COM";
     stages = [

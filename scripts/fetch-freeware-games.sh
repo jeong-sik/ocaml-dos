@@ -48,5 +48,6 @@ fetch bio     "$base/apogee/bmfreew.zip"
 fetch mars    "$base/scenario/marsfree.zip"
 fetch dark    "$base/scenario/da_freew.zip"
 fetch_installer harry "$base/subzero/1hh12.zip" HARRY1.1
+fetch ken     "$base/kensilverman/%24ken.zip"
 fetch supernova "$base/apogee/snova_fw.zip" 'source/*'
 fetch titanic   "$base/apogee/tit_free.zip" 'source/*'
