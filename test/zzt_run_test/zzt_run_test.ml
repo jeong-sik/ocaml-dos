@@ -48,6 +48,16 @@ let key_right = key "right"
 let key_b = key "b"         (* 사이드바의 소리 켜기/끄기 *)
 let key_s = key "s"         (* 저장 *)
 let key_enter = key "enter"
+let key_h = key "h"         (* 사이드바의 도움말 *)
+let key_esc = key "esc"
+let key_w = key "w"         (* 제목 화면의 월드 고르기 *)
+(* 설정 화면만 지나 제목 화면에 선다: 키보드, 색, 계속 *)
+let title_keys = List.map key [ "k"; "c"; "enter" ]
+
+let contains text needle =
+  let n = String.length needle and h = String.length text in
+  let rec go i = i + n <= h && (String.sub text i n = needle || go (i + 1)) in
+  go 0
 let vram_base = 0xB8000
 let player_glyph = 0x02
 let player_attr = 0x1F              (* 파란 바탕 흰 글자 — 플레이어만 *)
@@ -68,14 +78,14 @@ let find_player m =
   done;
   !found
 
-let boot dir ~extra_keys ~steps =
+let boot ?(intro = intro_keys) dir ~extra_keys ~steps =
   let m = Dos_machine.create () in
   (* ZZT.CFG 가 없으면 첫 실행 설정 화면이 떠서 키 차례가 어긋난다 *)
   List.iter
     (fun n ->
       let p = Filename.concat dir n in
       if Sys.file_exists p then mount m n (read_file p))
-    [ "ZZT.DAT"; "ZZT.CFG"; "TOWN.ZZT" ];
+    [ "ZZT.DAT"; "ZZT.CFG"; "TOWN.ZZT"; "DEMO.ZZT"; "TOUR.ZZT" ];
   let exe =
     match Sys.getenv_opt "ZZT_EXE" with
     | Some p -> p
@@ -83,7 +93,7 @@ let boot dir ~extra_keys ~steps =
   in
   Dos_machine.load_exe m (read_file exe);
   let keys =
-    List.map (fun w -> { Dos_machine.word = w; not_before = 0 }) intro_keys
+    List.map (fun w -> { Dos_machine.word = w; not_before = 0 }) intro
     @ extra_keys
   in
   ignore (Dos_machine.run_with_keys m ~max_steps:steps ~keys);
@@ -227,6 +237,37 @@ let () =
        (* ZZT 3.x 월드 서명: FFFF 뒤에 보드 수 *)
        check_true "세이브가 ZZT 월드 형식이다"
          (String.length data > 2 && data.[0] = '\xff' && data.[1] = '\xff'));
+    (* H 는 ZZT.DAT 에서 도움말 본문을 파일 핸들로 읽어 창에 띄운다. 열기·
+       탐색·읽기가 하나라도 어긋나면 창이 비거나 안 뜬다. Esc 로 닫는다. *)
+    let help_keys =
+      [ { Dos_machine.word = key_right; not_before = 5_000_000 };
+        { Dos_machine.word = key_h; not_before = 6_000_000 } ]
+    in
+    let m4 = boot dir ~extra_keys:help_keys ~steps:9_000_000 in
+    check_true "H 가 ZZT.DAT 의 도움말 창을 띄운다"
+      (contains (Dos_machine.screen_text m4) "Playing ZZT");
+    let m5 =
+      boot dir
+        ~extra_keys:(help_keys @ [ { Dos_machine.word = key_esc; not_before = 9_000_000 } ])
+        ~steps:12_000_000
+    in
+    check_true "Esc 가 도움말 창을 닫는다"
+      (not (contains (Dos_machine.screen_text m5) "Playing ZZT")
+       && contains (Dos_machine.screen_text m5) "Health:");
+    (* 제목 화면의 W 는 디렉터리를 찾고(INT 21h 4Eh·4Fh) 월드 파일마다
+       머리의 제목을 읽어 목록을 만든다. 파일 이름은 목록에, 제목은 설명에
+       나온다. DEMO·TOUR 가 있으면 같이 나온다. *)
+    let m6 =
+      boot dir ~intro:title_keys
+        ~extra_keys:[ { Dos_machine.word = key_w; not_before = 5_000_000 } ]
+        ~steps:9_000_000
+    in
+    let text6 = Dos_machine.screen_text m6 in
+    check_true "W 가 월드 목록 창을 띄운다" (contains text6 "ZZT Worlds");
+    check_true "목록이 TOWN.ZZT 를 찾고 머리의 제목을 읽는다"
+      (contains text6 "TOWN" && contains text6 "The Town of ZZT");
+    if Sys.file_exists (Filename.concat dir "TOUR.ZZT") then
+      check_true "목록이 TOUR.ZZT 의 제목도 읽는다" (contains text6 "Guided Tour");
     test_lane_rhythm dir;
     if !failed = 0 then print_endline "zzt run: all passed"
     else begin
