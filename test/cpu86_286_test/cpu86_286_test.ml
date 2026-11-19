@@ -90,7 +90,44 @@ let test_0f () =
     | exception Cpu86.Unsupported _ -> true
   in
   check "286: other 0F instructions are not there yet"
-    (Bool.to_int (raised "\x0f\x00\xc0" && raised "\x0f\x01\xf0" && raised "\x0f\x06")) 1
+    (Bool.to_int (raised "\x0f\x00\xc0" && raised "\x0f\x01\xf0" && raised "\x0f\x06")) 1;
+  (* SGDT·SIDT with a register operand are invalid instructions, not a store *)
+  check "286: SGDT and SIDT want a memory operand"
+    (Bool.to_int (raised "\x0f\x01\xc0" && raised "\x0f\x01\xc8")) 1
+
+(* sgdt [0200h] / sidt [0200h]: 0F 01 /0 and /1, modrm 00 reg 110, disp16.
+   Six bytes: limit, base low 24 bits, then FFh — what a 286 stores in the
+   sixth byte and a 386 does not. *)
+let test_descriptor_tables () =
+  let with_ds code = "\xb8\x00\x10\x8e\xd8" ^ code in
+  let run_ds code =
+    let t, mem = cpu_mem Cpu86.I80286 (with_ds code) in
+    run t 3;
+    (t, List.init 6 (fun i -> Char.code (Bytes.get mem (0x10000 + 0x200 + i))))
+  in
+  let t, sgdt = run_ds "\x0f\x01\x06\x00\x02" in
+  check "286: SGDT stores a zero limit" (List.nth sgdt 0 lor (List.nth sgdt 1 lsl 8)) 0;
+  check "286: SGDT stores a zero base" (List.nth sgdt 2 lor (List.nth sgdt 3 lsl 8) lor (List.nth sgdt 4 lsl 16)) 0;
+  check "286: SGDT stores FFh in the sixth byte" (List.nth sgdt 5) 0xFF;
+  check "286: SGDT is five bytes" (Cpu86.dump_ip t) (5 + 5);
+  let _, sidt = run_ds "\x0f\x01\x0e\x00\x02" in
+  check "286: SIDT stores the real-mode limit 03FFh" (List.nth sidt 0 lor (List.nth sidt 1 lsl 8)) 0x03FF;
+  check "286: SIDT stores FFh in the sixth byte" (List.nth sidt 5) 0xFF;
+  (* The detection a game runs after PUSH SP says 286-or-later: SGDT through
+     BP, then pop the base's top word and test its high byte for FFh. A 286
+     answers; a 386 would fall on to its 32-bit probe. *)
+  let detect286 =
+    "\x83\xec\x06"              (* sub sp,6 *)
+    ^ "\x89\xe5"                 (* mov bp,sp *)
+    ^ "\x0f\x01\x46\x00"       (* sgdt [bp+0] *)
+    ^ "\x83\xc4\x04"            (* add sp,4 *)
+    ^ "\x5b"                    (* pop bx *)
+    ^ "\xfe\xc7"                 (* inc bh *)
+  in
+  let t = cpu Cpu86.I80286 detect286 in
+  run t 6;
+  check "286: the sixth byte is FFh, so INC BH gives zero" (Cpu86.reg16 t 3 lsr 8) 0
+
 
 (* Where INT 0 is taken from: the next instruction on a 186, the dividing
    instruction itself, prefix and all, on a 286. *)
@@ -1022,6 +1059,7 @@ let () =
   test_flags ();
   test_push_sp ();
   test_0f ();
+  test_descriptor_tables ();
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;
     exit 1

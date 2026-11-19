@@ -14,6 +14,14 @@ let idle t =
   t.cycles <- t.cycles + 2;
   2
 
+(* SGDT·SIDT(286 실모드): 한계, 기준의 하위 16비트, 기준의 위 8비트와 마지막
+   바이트를 세 워드로 쓴다. 오프셋은 세그먼트 안에서 감긴다. *)
+let store_descriptor_table t seg off limit =
+  write16 t seg off limit;
+  write16 t seg ((off + 2) land 0xffff) (descriptor_table_base_286 land 0xffff);
+  write16 t seg ((off + 4) land 0xffff)
+    (((descriptor_table_base_286 lsr 16) land 0xff) lor (descriptor_table_top_byte_286 lsl 8))
+
 let step t =
   if t.halted then idle t
   else begin
@@ -229,7 +237,7 @@ let step t =
       | 0x16 -> push16 t (seg t 2); 10
       | 0x1e -> push16 t (seg t 3); 10
       | 0x07 -> set_seg t 0 (pop16 t); 8
-      (* 286: 실모드 게임이 쓰는 두 바이트 명령은 CPU 판별용 SMSW 뿐이다.
+      (* 286: 실모드 게임이 쓰는 두 바이트 명령은 CPU 판별용 SMSW·SGDT·SIDT 뿐이다.
          보호 모드로 가는 나머지(LMSW·LGDT·CLTS …)는 아직 없다. 386 의
          0x0F 확장은 [Cpu86_exec0f] 가 RFC 0001 3 단계로 하나씩 더한다. *)
       | 0x0f ->
@@ -238,8 +246,12 @@ let step t =
            let op2 = fetch8 t in
            if op2 = 0x01 then begin
              let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
-             if regf = 4 then begin op_write t 16 rm msw_real_mode_286; 3 end
-             else unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
+             match (regf, rm) with
+             | 4, _ -> op_write t 16 rm msw_real_mode_286; 3
+             (* clock 수 11·12 는 iAPX 286 표에서 기억한 값이다(확인 필요: 원문은 못 읽었다) *)
+             | 0, Mem (seg, off) -> store_descriptor_table t seg off gdtr_limit_286; 11
+             | 1, Mem (seg, off) -> store_descriptor_table t seg off idtr_limit_286; 12
+             | _ -> unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
            end
            else unsupported t ctx (Printf.sprintf "0f %02x" op2)
          | I80386 -> Cpu86_exec0f.(dispatch t ctx Word)
