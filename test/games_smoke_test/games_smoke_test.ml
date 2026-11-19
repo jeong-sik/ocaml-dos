@@ -71,6 +71,15 @@ let games = [
   { name = "harry"; exe = "HH1.EXE";
     stages = [
       { press = []; until = Graphics { mode = 0x13; min_colors = 32 }; budget = 40_000_000 } ] };
+  (* 텍스트 어드벤처. NOVA.COM 은 확장자만 COM 이고 MZ 서명이 있는 EXE 다 *)
+  { name = "supernova"; exe = "NOVA.COM";
+    stages = [
+      { press = []; until = Text "Do you want Color or Black and white?"; budget = 20_000_000 };
+      { press = [ "c" ]; until = Text "S U P E R N O V A"; budget = 40_000_000 } ] };
+  { name = "titanic"; exe = "BEYOND.COM";
+    stages = [
+      { press = []; until = Text "Are you using a COLOR screen"; budget = 40_000_000 };
+      { press = [ "y" ]; until = Text "Yes, I do have a color screen."; budget = 40_000_000 } ] };
 ]
 
 let contains text needle =
@@ -97,6 +106,12 @@ let describe = function
   | Text s -> Printf.sprintf "text %S" s
   | Graphics { mode; min_colors } -> Printf.sprintf "mode %02Xh with %d+ colors" mode min_colors
 
+(* 확장자가 COM 이어도 MZ 서명이 있으면 EXE 다(DOS 는 서명으로 고른다). *)
+let load m name image =
+  if String.length image >= 2 && (String.sub image 0 2 = "MZ" || String.sub image 0 2 = "ZM")
+  then Dos_machine.load_exe ~name m image
+  else Dos_machine.load_com ~name m image
+
 let run_steps m n = ignore (Dos_machine.run_until m ~max_steps:n ~stop:(fun _ -> false))
 
 (* 단계를 지난다. 맞췄으면 None, 못 맞췄으면 이유. *)
@@ -115,12 +130,14 @@ let run_stage m stage =
             (describe stage.until))
   else Some (Printf.sprintf "no %s within %d steps" (describe stage.until) stage.budget)
 
-let mount_dir m dir exe =
+(* 실행 파일도 마운트한다. 실기의 디스크에는 그 파일이 있고, 자기 파일을
+   여는 프로그램이 있다(NOVA.COM 은 시작할 때 C:\NOVA.COM 을 연다). 빼면
+   그 게임은 질문 화면이 뜨기 전에 종료 코드 0 으로 끝난다. *)
+let mount_dir m dir =
   Sys.readdir dir |> Array.to_list |> List.sort compare
   |> List.iter (fun n ->
       let p = Filename.concat dir n in
       if (not (Sys.is_directory p)) && String.length n <= 12
-         && String.uppercase_ascii n <> exe
       then
         match Dos_machine.mount_file m n (read_file p) with
         | Ok () -> ()
@@ -134,8 +151,8 @@ let run_game root g =
   end
   else begin
     let m = Dos_machine.create () in
-    mount_dir m dir g.exe;
-    Dos_machine.load_exe ~name:g.exe m (read_file (Filename.concat dir g.exe));
+    mount_dir m dir;
+    load m g.exe (read_file (Filename.concat dir g.exe));
     let unserved = ref 0 in
     Dos_machine.on_unserved m (fun _ ~vector:_ ~ax:_ -> incr unserved);
     let failure =
