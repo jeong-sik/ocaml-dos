@@ -95,8 +95,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    36: DOS keeps its own day count (MS-DOS DAYCNT) after the clock fields;
    the DOS time of day is the BIOS tick count in RAM.
    37: the standard devices are handle records too: a record is a file
-   (name, buffer) or CON, AUX or PRN, then its position. *)
-let format_version = 37
+   (name, buffer) or CON, AUX or PRN, then its position.
+   38: a handle record carries its access mode and whether EXEC's child
+   gets it, between the target and the position. *)
+let format_version = 38
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -271,7 +273,7 @@ let put_input_continuation w wait =
    record under two numbers, position included, and an EXEC frame keeps
    the parent's records dormant while a child runs -- either way, a read
    or write through any of those numbers moves the one record. Two names
-   opened separately (AH=3Dh twice, Dos_dos.open_handle) instead share
+   opened separately (AH=3Dh twice, Dos_dos.open_file) instead share
    only the underlying bytes: each keeps its own position, but a write
    through one is a read through the other because [handle.data] is the
    same [Bytes.t ref].
@@ -319,7 +321,7 @@ let handle_pool t =
       | File { hname; data } -> Saved_file (hname, buffer_index data)
       | Device d -> Saved_device d
     in
-    (target, h.pos)
+    (target, h.access, h.inheritable, h.pos)
   in
   let handles = List.map saved (List.rev_map fst !pool) in
   (handles, List.rev_map fst !buffers, live, frames)
@@ -328,7 +330,9 @@ let put_buffer w buf = C.put_bytes w !buf
 
 let target_tag = C.range 0 3
 
-let put_handle w (target, pos) =
+let access_tag = C.range 0 2
+
+let put_handle w (target, access, inheritable, pos) =
   let tag = C.put w ~what:"handle target" target_tag in
   (match target with
    | Saved_file (hname, buffer_idx) ->
@@ -336,6 +340,9 @@ let put_handle w (target, pos) =
    | Saved_device Con -> tag 1
    | Saved_device Aux -> tag 2
    | Saved_device Prn -> tag 3);
+  C.put w ~what:"handle access" access_tag
+    (match access with Read_only -> 0 | Write_only -> 1 | Read_write -> 2);
+  C.put_bool w inheritable;
   C.put w ~what:"handle position" file_pos pos
 
 let put_frame w f handles =
@@ -676,7 +683,15 @@ let read_payload r =
              | 3 -> Device Prn
              | _ -> C.fail "invalid handle target"
            in
-           { target; pos = get "handle position" file_pos }))
+           let access =
+             match get "handle access" access_tag with
+             | 0 -> Read_only
+             | 1 -> Write_only
+             | 2 -> Read_write
+             | _ -> C.fail "invalid handle access"
+           in
+           let inheritable = C.get_bool r in
+           { target; access; inheritable; pos = get "handle position" file_pos }))
   in
   let resolve = List.map (fun (n, i) ->
       if i >= Array.length pool then C.fail "a handle names no record" else (n, pool.(i)))
@@ -685,7 +700,7 @@ let read_payload r =
      needs to know is already in [pool], each with the one buffer every
      record sharing that name points at (by construction: [handle_pool]
      never puts two different buffers under the same live name). Rebuild
-     it here so the next [Dos_dos.open_handle] on a name already open
+     it here so the next [Dos_dos.open_file] on a name already open
      joins the restored buffer instead of starting a fresh, disconnected
      one. *)
   Hashtbl.reset t.open_files;

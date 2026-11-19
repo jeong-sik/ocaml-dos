@@ -179,13 +179,36 @@ let shared_buffer t name seed =
     buf
 
 (* The new handle and the buffer it shares with every open of [name]. *)
-let open_handle t name seed =
-  match free_handle t with
-  | None -> None
-  | Some h ->
-    let data = shared_buffer t name seed in
-    Hashtbl.replace t.handles h { target = File { hname = name; data }; pos = 0 };
-    Some (h, data)
+(* Opens [name] under the free number [h] and returns the buffer it
+   shares with every open of [name]. *)
+let open_file t h name seed ~access ~inheritable =
+  let data = shared_buffer t name seed in
+  Hashtbl.replace t.handles h
+    { target = File { hname = name; data }; access; inheritable; pos = 0 };
+  data
+
+(* AL of AH=3Dh (DOS/FILEMODE.INC): bit 7 keeps the handle from EXEC's
+   child, bits 4-6 are the sharing mode, bits 0-3 the access. $Open
+   (FILE.ASM) masks bit 7 off; Check_Access_AX (OPEN.ASM) then refuses a
+   sharing mode above 40h or an access above 2 with error 0Ch. SHARE is
+   not loaded here, so a valid sharing mode changes nothing. *)
+let no_inherit_bit = 0x80
+let sharing_mask = 0xF0
+let last_sharing_mode = 0x40
+let access_mask = 0x0F
+let invalid_access = 0x0C
+
+let open_mode al =
+  let mode = al land lnot no_inherit_bit in
+  let access =
+    match mode land access_mask with
+    | 0 -> Some Read_only
+    | 1 -> Some Write_only
+    | 2 -> Some Read_write
+    | _ -> None
+  in
+  if mode land sharing_mask > last_sharing_mode then None
+  else Option.map (fun access -> (access, al land no_inherit_bit = 0)) access
 
 (* 닫을 때 마운트 표로 되돌린다 — 저장한 파일을 같은 세션에서 다시
    열 수 있어야 게임의 세이브/로드가 성립한다. 공유 버퍼는 같은 이름의
@@ -802,6 +825,12 @@ let exec_program t ~return_to =
                  (Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles []);
            }
            :: t.exec_frames;
+         (* The child's table is the parent's without the opens made with
+            AL bit 7 ($Dup_PDB, MISC.ASM). Child exit puts them back with
+            the rest of [parent_handles]. *)
+         Hashtbl.filter_map_inplace
+           (fun _ hd -> if hd.inheritable then Some hd else None)
+           t.handles;
          let env = env_word env in
          (match kind with
           | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true ~env t image m
@@ -1368,19 +1397,16 @@ let set_date_from_clock t =
 
 (* ---------- INT 21h ---------- *)
 
-(* 3Ch·5Bh·6Ch 의 몸통: [name] 을 비우거나 새로 만들고 핸들을 연다.
-   핸들이 모자라면 [None]. *)
-let create_file t name =
-  match open_handle t name Bytes.empty with
-  | None -> None
-  | Some (h, data) ->
-    Hashtbl.replace t.host_files name Bytes.empty;
-    (* [open_handle] joins a buffer already shared by another live
-       handle on [name] instead of seeding a fresh empty one -- create
-       truncates regardless, so force it empty here too, visible to
-       whoever else already has [name] open. *)
-    data := Bytes.empty;
-    Some h
+(* 3Ch·5Bh·6Ch 의 몸통: [name] 을 비우거나 새로 만들고 빈 번호 [h] 로
+   연다. 새 파일은 읽고 쓰는 용으로 열리고 자식이 물려받는다(CREATE.ASM). *)
+let create_file t h name =
+  let data = open_file t h name Bytes.empty ~access:Read_write ~inheritable:true in
+  Hashtbl.replace t.host_files name Bytes.empty;
+  (* [open_file] joins a buffer already shared by another live handle on
+     [name] instead of seeding a fresh empty one -- create truncates
+     regardless, so force it empty here too, visible to whoever else
+     already has [name] open. *)
+  data := Bytes.empty
 
 (* AH=6Ch 확장 열기 — MS-DOS 4.0 FILE.ASM $Extended_Open, 상수는
    FILEMODE.INC. DX 의 아래 4 비트는 파일이 있을 때(0 실패, 1 열기,
@@ -1435,15 +1461,17 @@ let extended_open t =
          ok t
        in
        let create action =
-         match create_file t name with
+         match free_handle t with
          | None -> fail t too_many_open_files
-         | Some h -> opened action h
+         | Some h -> create_file t h name; opened action h
        in
        (match Hashtbl.find_opt t.host_files name, if_exists, if_absent with
         | Some _, Exists_fail, _ -> fail t error_file_exists
         | Some data, Exists_open, _ ->
-          (match open_handle t name data with
-           | Some (h, _) -> opened Opened h
+          (match free_handle t with
+           | Some h ->
+             ignore (open_file t h name data ~access:Read_write ~inheritable:true);
+             opened Opened h
            | None -> fail t too_many_open_files)
         | Some _, Exists_replace, _ -> create Replaced
         | None, _, Absent_fail ->
@@ -1698,29 +1726,39 @@ let service_immediate t =
      | Ok p when dir_exists t p -> t.cwd <- p; ok t
      | Ok _ -> fail t path_not_found
      | Error e -> fail t e)
+  (* Both take a free number before they look at the name ($Open and
+     $Creat share AccessFile, FILE.ASM). A created file is open for
+     reading and writing (CREATE.ASM). *)
   | 0x3C | 0x5B ->
-    (match guest_file t (seg_off t 3 2) with
-     | Error e -> fail t e
-     | Ok p when dir_exists t p -> fail t access_denied
-     | Ok p ->
-    let name = Dos_path.key p in
-    if ah = 0x5B && Hashtbl.mem t.host_files name then fail t error_file_exists
-    else begin
-      match create_file t name with
-      | None -> fail t too_many_open_files
-      | Some h -> Cpu86.set_reg16 cpu 0 h; ok t
-    end)
+    (match free_handle t with
+     | None -> fail t too_many_open_files
+     | Some h ->
+       (match guest_file t (seg_off t 3 2) with
+        | Error e -> fail t e
+        | Ok p when dir_exists t p -> fail t access_denied
+        | Ok p ->
+          let name = Dos_path.key p in
+          if ah = 0x5B && Hashtbl.mem t.host_files name then fail t error_file_exists
+          else begin
+            create_file t h name;
+            Cpu86.set_reg16 cpu 0 h;
+            ok t
+          end))
   | 0x3D ->
-    (match guest_file t (seg_off t 3 2) with
-     | Error e -> fail t e
-     | Ok p ->
-       let name = Dos_path.key p in
-       (match Hashtbl.find_opt t.host_files name with
-        | Some data ->
-          (match open_handle t name data with
-           | Some (h, _) -> Cpu86.set_reg16 cpu 0 h; ok t
-           | None -> fail t too_many_open_files)
-        | None -> fail t (if dir_exists t p then access_denied else file_not_found)))
+    (match free_handle t, open_mode (Cpu86.reg8 cpu 0) with
+     | None, _ -> fail t too_many_open_files
+     | Some _, None -> fail t invalid_access
+     | Some h, Some (access, inheritable) ->
+       (match guest_file t (seg_off t 3 2) with
+        | Error e -> fail t e
+        | Ok p ->
+          let name = Dos_path.key p in
+          (match Hashtbl.find_opt t.host_files name with
+           | Some data ->
+             ignore (open_file t h name data ~access ~inheritable);
+             Cpu86.set_reg16 cpu 0 h;
+             ok t
+           | None -> fail t (if dir_exists t p then access_denied else file_not_found))))
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
   (* dup/dup2 는 같은 열린 파일을 가리킨다 — 위치와 내용을 나눠 쓴다.
      사본을 주면 한쪽에 쓴 것이 다른 쪽에 안 보인다. *)
@@ -1749,6 +1787,9 @@ let service_immediate t =
     let src = seg_off t 3 2 in
     (match Hashtbl.find_opt t.handles h with
      | None -> fail t invalid_handle
+     (* DOS_WRITE (DISK.ASM) checks the access mode first, for files and
+        devices alike. *)
+     | Some { access = Read_only; _ } -> fail t access_denied
      | Some { target = Device Con; _ } ->
        for i = 0 to n - 1 do teletype t (rd8 t (src + i)) dos_output_color done;
        Cpu86.set_reg16 cpu 0 n;
@@ -1954,9 +1995,9 @@ let service_immediate t =
 
 let terminate t = child_exit t ~code:0 ~keep:None
 
-(* AH=3Fh. CON waits for a line; a file answers at once. PRN was opened
-   write-only, and DOS_READ (DISK.ASM) checks the access mode before the
-   count, so even 0 bytes from PRN is error 5. *)
+(* AH=3Fh. CON waits for a line; a file answers at once. DOS_READ
+   (DISK.ASM) checks the access mode before the count, so even 0 bytes
+   from a write-only open, PRN included, is error 5. *)
 let read_handle t =
   let cpu = t.cpu in
   let destination = seg_off t 3 2 and length = Cpu86.reg16 cpu 1 in
@@ -1965,10 +2006,10 @@ let read_handle t =
   | Some { target = Device Con; _ } ->
     if length = 0 || t.console_pending <> "" then return_console_bytes t ~destination ~length
     else resume_input t (Read_console_line { destination; length; line = { text = ""; echo_widths = [] } })
-  | Some { target = Device Prn; _ } -> fail t access_denied; Completed
-  | Some { target = Device Aux; _ } ->
+  | Some { access = Write_only; _ } -> fail t access_denied; Completed
+  | Some { target = Device ((Aux | Prn) as dev); _ } ->
     if length = 0 then begin Cpu86.set_reg16 cpu 0 0; ok t; Completed end
-    else device_unmodelled t Aux
+    else device_unmodelled t dev
   | Some ({ target = File { data; _ }; _ } as hd) ->
     let take = min length (max 0 (Bytes.length !data - hd.pos)) in
     blit_to_mem t !data hd.pos destination take;
