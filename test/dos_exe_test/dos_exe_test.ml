@@ -21,7 +21,7 @@ let check name got want =
 let root_psp = 0x1000
 
 (* 최소 MZ 헤더 + 재배치 테이블 + 이미지. reloc = (이미지 내 off, seg). *)
-let make_exe ~image ~ip ~cs ~ss ~sp relocs =
+let make_exe ?(minalloc = 0) ?(maxalloc = 0) ~image ~ip ~cs ~ss ~sp relocs =
   let b = Buffer.create (32 + String.length image) in
   let w v = Buffer.add_char b (Char.chr (v land 0xff));
             Buffer.add_char b (Char.chr ((v lsr 8) land 0xff)) in
@@ -32,7 +32,7 @@ let make_exe ~image ~ip ~cs ~ss ~sp relocs =
   w ((total + 511) / 512);        (* 페이지 수 *)
   w (List.length relocs);
   w 2;            (* header paras: 32 바이트 *)
-  w 0; w 0;       (* minalloc/maxalloc *)
+  w minalloc; w maxalloc;
   w ss; w sp;
   w 0;            (* checksum *)
   w ip; w cs;
@@ -214,9 +214,43 @@ let () =
     ^ "\xb8\x01\x4c\xcd\x21"                  (* fail: mov ax,4C01h; int 21h *)
   in
   let m = Dos_machine.create () in
-  Dos_machine.load_exe m (make_exe ~image:shrink_then_alloc ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE []);
+  Dos_machine.load_exe m
+    (make_exe ~maxalloc:0xFFFF ~image:shrink_then_alloc ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE []);
   Dos_machine.run m ~max_steps:1000;
   check "a root EXE that shrinks itself can then allocate" (Dos_machine.exit_code m) 7;
+
+  (* 블록은 PSP(10h)·적재 모듈·그 뒤 maxalloc 문단까지다(minalloc 보다 적지
+     않게, 메모리가 모자라면 있는 만큼). 런처처럼 maxalloc 을 작게 적은 EXE 는
+     처음부터 위가 비어 있어 AH=4Ah 없이 AH=48h 가 된다. PSP:2 가 블록 끝이다. *)
+  let alloc_only =
+    "\xb4\x48\xbb\x00\x20\xcd\x21"          (* mov ah,48h; mov bx,2000h; int 21h *)
+    ^ "\x72\x05"                                (* jc fail *)
+    ^ "\xb8\x07\x4c\xcd\x21"                  (* mov ax,4C07h; int 21h *)
+    ^ "\xb8\x01\x4c\xcd\x21"                  (* fail: mov ax,4C01h; int 21h *)
+  in
+  let module_paras = (512 - 32) / 16 in               (* 한 페이지 − 헤더 *)
+  let load_with ~minalloc ~maxalloc =
+    let m = Dos_machine.create () in
+    Dos_machine.load_exe m
+      (make_exe ~minalloc ~maxalloc ~image:alloc_only ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE []);
+    m
+  in
+  let psp_top m =
+    let a = Dos_machine.psp_seg_of m * 16 in
+    Dos_machine.mem_read m (a + 2) lor (Dos_machine.mem_read m (a + 3) lsl 8)
+  in
+  let launcher = load_with ~minalloc:0x10 ~maxalloc:0x20 in
+  check "maxalloc: PSP:2 is the end of the block"
+    (psp_top launcher) (root_psp + 0x10 + module_paras + 0x20);
+  Dos_machine.run launcher ~max_steps:1000;
+  check "maxalloc: the memory above a small block is free" (Dos_machine.exit_code launcher) 7;
+  let greedy = load_with ~minalloc:0 ~maxalloc:0xFFFF in
+  check "maxalloc 0FFFFh: the program gets the rest of memory" (psp_top greedy) 0x9FFF;
+  Dos_machine.run greedy ~max_steps:1000;
+  check "maxalloc 0FFFFh: nothing is left to allocate" (Dos_machine.exit_code greedy) 1;
+  let inverted = load_with ~minalloc:0x40 ~maxalloc:0x10 in
+  check "minalloc wins over a smaller maxalloc"
+    (psp_top inverted) (root_psp + 0x10 + module_paras + 0x40);
   let raises name image want =
     checkb name
       (try Dos_machine.load_exe (Dos_machine.create ()) image; false

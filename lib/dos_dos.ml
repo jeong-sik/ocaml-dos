@@ -320,16 +320,17 @@ let resize_block t seg paras =
       else Error (limit - seg)             (* 최대 가능 크기를 알린다 *)
     end
 
-(* 실기 DOS 는 .EXE 에 남은 메모리를 통째로 준다. 힙이 필요한 프로그램은
-   AH=4Ah 로 제 블록을 줄여 뒤를 내놓고, 그 다음에야 AH=48h 이 성공한다
-   — Turbo Pascal 런타임이 정확히 그렇게 한다. 처음부터 남는 자리를
-   비워 두면 4Ah 없이도 할당이 되어 실기와 다르게 움직인다.
+(* 실기 DOS 는 .EXE 에 헤더의 maxalloc 만큼(보통 남은 메모리 통째로)
+   준다. 힙이 필요한 프로그램은 AH=4Ah 로 제 블록을 줄여 뒤를 내놓고,
+   그 다음에야 AH=48h 이 성공한다 — Turbo Pascal 런타임이 정확히 그렇게
+   한다. maxalloc 이 큰데도 남는 자리를 비워 두면 4Ah 없이도 할당이 되어
+   실기와 다르게 움직인다.
    [~psp_seg] 를 주는 EXEC 자식 경로는 이 함수를 부르지 않는다 — 블록
    표에 이미 부모·상주 프로그램이 있어 통째로 초기화하면 지워진다. *)
-let init_memory t ~psp_seg =
+let init_memory t ~psp_seg ~block_end =
   t.free_base <- psp_seg;
   t.free_top <- conv_mem_top;
-  t.blocks <- [ (psp_seg, conv_mem_top - psp_seg) ]
+  t.blocks <- [ (psp_seg, block_end - psp_seg) ]
 
 (* PSP 칸(RBIL INT 21/AH=26h 표 01378). 값은 MS-DOS 4.0 MISC.ASM SETMEM·
    $Dup_PDB 가 적는 것이다. *)
@@ -428,11 +429,11 @@ let child_environment t ~source ~name =
 
 let env_word = function No_environment -> 0 | Environment seg -> seg
 
-let write_psp ?(init = true) ~env t psp_seg =
+let write_psp ?(init = true) ?(block_end = conv_mem_top) ~env t psp_seg =
   let psp = psp_seg * 16 in
   wr8 t psp 0xCD;                      (* int 20h *)
   wr8 t (psp + 1) 0x20;
-  wr16 t (psp + 2) conv_mem_top;       (* 가진 메모리의 끝 *)
+  wr16 t (psp + 2) block_end;          (* 가진 메모리의 끝 *)
   for i = 0 to saved_vectors_len - 1 do
     wr8 t (psp + psp_saved_vectors + i) (rd8 t (saved_vectors_ivt + i))
   done;
@@ -447,7 +448,7 @@ let write_psp ?(init = true) ~env t psp_seg =
   wr8 t (psp + 0x81) 0x0D;
   t.psp_seg <- psp_seg;
   t.dta <- physical psp_seg 0x80;      (* 기본 DTA = PSP:0x80 *)
-  if init then init_memory t ~psp_seg
+  if init then init_memory t ~psp_seg ~block_end
 
 (* COM: 실기 DOS 는 PSP 를 독립 세그먼트에 준다. 세그 0 에 두면 PSP 가
    IVT·BDA 와 겹쳐 부팅 스텁을 지운다(실측: PSP:0x80 쓰기가 IVT[20h]
@@ -549,27 +550,48 @@ let loadable image =
   if not (has_mz_signature image) then Ok Com_image
   else Result.map (fun m -> Exe_image m) (mz_module image)
 
+(* EXE 가 받는 블록의 크기(문단). MS-DOS 4.0 EXEC.ASM 대로 PSP(10h)와 적재
+   모듈 뒤에 maxalloc 문단까지, 메모리가 허락하는 만큼을 더하고 minalloc
+   보다 적게 주지는 않는다. 헤더에 maxalloc 을 작게 적은 EXE(다른 프로그램을
+   실행하는 런처)는 블록이 작아서 그 위가 비고, 거기에 자식이 실린다.
+   자리가 모자라면 있는 만큼 쓴다. 루트의 상한은 메모리 끝이고, 자식의
+   상한은 그 위의 다른 블록 앞이다. *)
+let exe_block_paras t ~psp_seg ~child m ~minalloc ~maxalloc =
+  let limit =
+    if child then
+      List.fold_left
+        (fun acc (s, _) -> if s > psp_seg && s < acc then s else acc)
+        t.free_top t.blocks
+    else conv_mem_top
+  in
+  let base = 0x10 + m.load_paras in
+  let extra = max minalloc (min maxalloc (limit - psp_seg - base)) in
+  min (limit - psp_seg) (base + extra)
+
 (* MZ EXE — 실기 배치. 루트는 COM 과 같은 [root_psp_seg] 에 PSP 를 두고
-   남은 메모리를 통째로 블록 하나로 받는다. 실기 DOS 도 가장 낮은 빈
-   자리에 싣고 남은 메모리를 준다. 프로그램이 AH=4Ah 로 블록을 줄이면
-   그 위가 빈 메모리가 되어 AH=48h 가 성공한다.
+   블록 하나를 받는다. 크기는 헤더의 maxalloc 이 정한다([exe_block_paras]).
+   대부분의 EXE 는 maxalloc 이 0FFFFh 라 남은 메모리를 통째로 받는다. 실기
+   DOS 도 가장 낮은 빈 자리에 싣는다. 이 블록을 AH=4Ah 로 줄이면 그 위가
+   빈 메모리가 되어 AH=48h 가 성공한다. maxalloc 이 작은 EXE 는 처음부터
+   그 위가 비어 있다(Halloween Harry 의 HH1.EXE 가 이렇다).
    예전에는 이미지 끝이 0x9FF0 에 닿게 위쪽에 실었다. 그러면 줄여도 위가
    비지 않아서 MS C 런타임이 환경 복사본(2 문단)을 못 받고 R6009 로,
    Borland C 런타임은 abort 로 끝났다(Snarf·Caves of Thor 실측).
    LZEXE 압축 EXE(ZZT.EXE 실측)도 이 자리에서 풀린다.
-   [psp_seg] 를 주면 그 자리에(배치는 호출자 계약). 자식 EXE 도 마찬가지로
-   남은 메모리를 통째로 블록으로 받는다 — 실기와 같아서, 자식이 다시
-   EXEC 하려면 먼저 AH=4Ah 로 줄여야 한다. *)
+   [psp_seg] 를 주면 그 자리에(배치는 호출자 계약). 자식 EXE 도 같은 규칙으로
+   블록을 받는다. maxalloc 이 0FFFFh 인 자식은 다시 EXEC 하려면 먼저
+   AH=4Ah 로 줄여야 한다. *)
 let load_exe_module ?psp_seg ~child ~env t image m =
   let u16 = header_u16 image in
   let exe_ip = u16 0x14 and exe_cs = u16 0x16 in
   let exe_sp = u16 0x10 and exe_ss = u16 0x0E in
   let psp_seg = Option.value psp_seg ~default:root_psp_seg in
   let image_seg = psp_seg + 0x10 in
+  let block = exe_block_paras t ~psp_seg ~child m ~minalloc:(u16 0x0A) ~maxalloc:(u16 0x0C) in
   place_mz_module t image m ~base:(image_seg * 16) ~factor:image_seg;
-  write_psp ~init:(not child) ~env t psp_seg;
+  write_psp ~init:(not child) ~block_end:(psp_seg + block) ~env t psp_seg;
   if child then begin
-    t.blocks <- t.blocks @ [ (psp_seg, t.free_top - psp_seg) ];
+    t.blocks <- t.blocks @ [ (psp_seg, block) ];
     t.free_base <- psp_seg
   end;
   Cpu86.set_seg t.cpu 1 (image_seg + exe_cs);

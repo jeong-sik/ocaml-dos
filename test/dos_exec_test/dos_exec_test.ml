@@ -21,7 +21,7 @@ let w16 b v =
   Buffer.add_char b (Char.chr ((v lsr 8) land 0xff))
 
 (* 최소 MZ 헤더 + 이미지 — dos_exe_test 와 같은 모양. *)
-let make_exe ~image ~ip ~cs ~ss ~sp relocs =
+let make_exe ?(minalloc = 0) ?(maxalloc = 0) ~image ~ip ~cs ~ss ~sp relocs =
   let b = Buffer.create (32 + String.length image) in
   Buffer.add_string b "MZ";
   let total = 32 + String.length image in
@@ -29,7 +29,7 @@ let make_exe ~image ~ip ~cs ~ss ~sp relocs =
   w16 b ((total + 511) / 512);
   w16 b (List.length relocs);
   w16 b 2;                                  (* header paras = 32 바이트 *)
-  w16 b 0; w16 b 0;                         (* minalloc/maxalloc *)
+  w16 b minalloc; w16 b maxalloc;
   w16 b ss; w16 b sp;
   w16 b 0;                                  (* checksum *)
   w16 b ip; w16 b cs;
@@ -433,6 +433,43 @@ let () =
   let m = run_overlay ~al:0x01 (Some file) in
   check "4B01h is still refused: error 1" (Dos_machine.exit_code m) 1;
   check "4B01h loads nothing" (Dos_machine.mem_read m base) 0
+
+let () =
+  (* 런처: 헤더에 maxalloc 을 작게 적은 EXE 는 AH=4Ah 로 줄이지 않고도 자식을
+     실행할 수 있다. DOS 가 처음부터 블록을 작게 주어 그 위가 비어 있다(Halloween
+     Harry 의 HH1.EXE 가 이렇다: minalloc = maxalloc = 165h). 이 EXE 는 DS·ES 를
+     제 세그먼트로 맞춘 뒤 CHILD.COM 을 실행하고, 자식의 종료 코드로 끝난다.
+     스택은 모듈 뒤 minalloc 몫(0x40 문단) 안에 둔다. *)
+  let code_len = 30 in
+  let name_off = code_len in
+  let epb_off = name_off + String.length "CHILD.COM\000" in
+  let code =
+    let b = Buffer.create code_len in
+    Buffer.add_string b "\x0e\x1f\x0e\x07";                 (* push cs; pop ds; push cs; pop es *)
+    Buffer.add_string b "\xb8\x00\x4b";                      (* mov ax,4B00h *)
+    Buffer.add_string b "\xba"; w16 b name_off;              (* mov dx,name *)
+    Buffer.add_string b "\xbb"; w16 b epb_off;               (* mov bx,epb *)
+    Buffer.add_string b "\xcd\x21";                          (* int 21h *)
+    Buffer.add_string b "\x72\x08";                          (* jc fail *)
+    Buffer.add_string b "\xb4\x4d\xcd\x21\xb4\x4c\xcd\x21";    (* 4Dh; 4Ch with the child's code *)
+    Buffer.add_string b "\xb8\xff\x4c\xcd\x21";              (* fail: mov ax,4CFFh; int 21h *)
+    Buffer.contents b
+  in
+  assert (String.length code = code_len);
+  let image = code ^ "CHILD.COM\000" ^ String.make 14 '\000' in
+  let launcher ~maxalloc =
+    make_exe ~minalloc:0x40 ~maxalloc ~image ~ip:0 ~cs:0 ~ss:0 ~sp:0x200 []
+  in
+  let run ~maxalloc =
+    let m = Dos_machine.create () in
+    mount m "CHILD.COM" "\xb0\x2a\xb4\x4c\xcd\x21";         (* mov al,42; 4Ch; int 21h *)
+    Dos_machine.load_exe m (launcher ~maxalloc);
+    Dos_machine.run m ~max_steps:5000;
+    Dos_machine.exit_code m
+  in
+  check "a launcher with a small maxalloc can EXEC without shrinking" (run ~maxalloc:0x40) 42;
+  check "with maxalloc 0FFFFh the parent owns the rest, so EXEC fails with error 8"
+    (run ~maxalloc:0xFFFF) 0xFF
 
 let () =
   if !failed > 0 then begin
