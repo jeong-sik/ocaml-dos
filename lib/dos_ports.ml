@@ -417,20 +417,33 @@ let speaker_data_bit = 0x02
 (* 채널 2 를 부르거나 0x61 을 바꾸기 전에 지금까지의 스피커 소리를 표본으로
    만든다. 채널 2 를 지금 시각으로 부르면 지난 구간이 남지 않는다
    (Dos_pit.next_change) — 읽기도 그렇다. *)
-let catch_up_audio t =
+let render_audio t ~until =
   match t.audio with
   | None -> ()
   | Some a ->
-    Dos_audio.render a ~until:t.now
-      (Dos_audio.speaker t.pit2 ~data:(t.port_b land speaker_data_bit <> 0) ~speed:t.speed)
+    let speaker =
+      Dos_audio.speaker t.pit2 ~data:(t.port_b land speaker_data_bit <> 0) ~speed:t.speed
+    in
+    (* the DSP's DAC holds between the changes it tells of (on_output) *)
+    let sb = match t.sb with None -> 0 | Some sb -> Dos_audio.sb_level (Dos_sb.output sb) in
+    Dos_audio.render a ~until (fun c ->
+        let level, next = speaker c in
+        (level + sb, next))
 
-let start_audio t ~rate = t.audio <- Some (Dos_audio.create ~cpu_hz:(cpu_hz t) ~rate ~start:t.now)
+let catch_up_audio t = render_audio t ~until:t.now
 
+let start_audio t ~rate =
+  t.audio <- Some (Dos_audio.create ~cpu_hz:(cpu_hz t) ~rate ~start:t.now);
+  Option.iter (fun sb -> Dos_sb.on_output sb (fun at -> render_audio t ~until:at)) t.sb
+
+(* A DSP event due by now runs at the start of the next step, with its
+   own cycle: the samples stop short of it until then. *)
 let take_audio t =
   match t.audio with
   | None -> None
   | Some a ->
-    catch_up_audio t;
+    let until = match t.sb with None -> t.now | Some sb -> min t.now (Dos_sb.due_at sb) in
+    render_audio t ~until;
     Some (Dos_audio.take a)
 
 let audio_clipped t = Option.map Dos_audio.clipped t.audio

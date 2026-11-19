@@ -107,13 +107,16 @@ val speaker_on : t -> bool
 (** {1 Sound (RFC 0006)} *)
 
 val start_audio : t -> rate:int -> unit
-(** Samples the PC speaker from now on, [rate] samples a second. A port
-    write that changes the speaker first turns the time since the last
-    one into samples. *)
+(** Samples the PC speaker and the Sound Blaster's DAC from now on,
+    [rate] samples a second. A port access that changes the speaker, and
+    a DSP change at its own cycle, first turn the time before it into
+    samples. *)
 
 val take_audio : t -> Bytes.t option
-(** The samples up to now not taken yet, signed 16-bit little endian
-    mono; [None] when {!start_audio} was not called. *)
+(** The samples not taken yet, signed 16-bit little endian mono, up to
+    now — or up to the DSP's next event when that is earlier, since the
+    next step runs it at its own cycle. [None] when {!start_audio} was
+    not called. *)
 
 val audio_clipped : t -> int option
 (** How many samples were clipped to the 16-bit range. *)
