@@ -126,6 +126,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       stubs = []; exec_frames = []; last_child_code = 0;
       epoch_year = 1990; epoch_month = 1; epoch_day = 1;
       epoch_hour = 8; epoch_min = 0; epoch_sec = 0;
+      dos_days = 0;   (* 아래 Dos_dos.set_date_from_clock 가 기준시각으로 채운다 *)
       ems_pages = Dos_ems.boot_handles ();
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
@@ -158,10 +159,18 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   wall_clock :=
     (fun () ->
       let year, month, day, hour, minute, second = Dos_state.now_fields t in
-      { Dos_cmos.year; month; day; weekday = Dos_state.day_of_week (year, month, day);
-        hour; minute; second });
+      let weekday =
+        match Dos_clock.date_of_fields ~year ~month ~day with
+        | Some d -> Dos_clock.weekday (Dos_clock.days_of_date d)
+        | None ->
+          invalid_arg
+            (Printf.sprintf "CMOS date %04d-%02d-%02d is outside 1980-01-01..2099-12-31"
+               year month day)
+      in
+      { Dos_cmos.year; month; day; weekday; hour; minute; second });
   Dos_bios.install t;
   init_dos_data t;
+  Dos_dos.set_date_from_clock t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
       match Dos_bios.private_service_vector t raw with
@@ -495,7 +504,7 @@ let cpu_of t = t.cpu
 let psp_seg_of t = t.psp_seg
 let mem_read t a = rd8 t a
 let mem_write t a v = wr8 t a v
-let tick_count t = rd16 t 0x46C lor (rd16 t 0x46E lsl 16)
+let tick_count t = read_ticks t
 
 let on_unserved t f = t.on_unserved <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
@@ -531,7 +540,8 @@ let set_clock t ~year ~month ~day ~hour ~minute ~second =
   t.epoch_hour <- hour;
   t.epoch_min <- minute;
   t.epoch_sec <- second;
-  Dos_bios.set_ticks_from_clock t
+  Dos_bios.set_ticks_from_clock t;
+  Dos_dos.set_date_from_clock t
 
 let attach_mouse t = t.mouse.mouse_present <- true
 

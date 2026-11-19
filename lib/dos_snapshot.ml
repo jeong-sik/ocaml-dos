@@ -91,8 +91,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    34: the OPL2's voice registers 00h-F5h after its timers (Dos_opl).
    35: the mouse driver's drawn cursor after the mouse ranges: none, a text
    cell (page, column, row, the word under it) or a graphics block (left,
-   top, width, height, the points under it). *)
-let format_version = 35
+   top, width, height, the points under it).
+   36: DOS keeps its own day count (MS-DOS DAYCNT) after the clock fields;
+   the DOS time of day is the BIOS tick count in RAM. *)
+let format_version = 36
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -360,7 +362,7 @@ let write_payload w t =
         open_files = _ (* derived from [handles]/[exec_frames]; rebuilt on
                            read, nothing of its own to write *);
         last_child_code; epoch_year; epoch_month; epoch_day; epoch_hour;
-        epoch_min; epoch_sec; ems_pages; ems_mapped; ems_saved; ems_names;
+        epoch_min; epoch_sec; dos_days; ems_pages; ems_mapped; ems_saved; ems_names;
         mouse; xms;
         on_unserved = _ (* a host observer, not machine state *) } = t
   in
@@ -420,6 +422,7 @@ let write_payload w t =
   (* [Dos_machine.set_clock] takes any ints; a snapshot carries any. *)
   List.iter (put "clock" C.any)
     [ epoch_year; epoch_month; epoch_day; epoch_hour; epoch_min; epoch_sec ];
+  put "DOS days" C.count dos_days;
   Dos_xms.write_state w xms;
   put_list w ~what:"EMS handle"
     (fun (k, pages) ->
@@ -717,6 +720,7 @@ let read_payload r =
   t.epoch_hour <- get "clock" C.any;
   t.epoch_min <- get "clock" C.any;
   t.epoch_sec <- get "clock" C.any;
+  t.dos_days <- get "DOS days" C.count;
   Dos_xms.read_state r t.xms;
   fill_table t.ems_pages
     (get_list r ~what:"EMS handle" (fun () ->
