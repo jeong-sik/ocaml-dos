@@ -105,7 +105,7 @@ TEST386_BIN=/path/to/test386.bin dune build --root . @test/cpu86_test386/runtest
 |---|---|---|
 | FLAGS bit12-15 를 읽으면 | 1 | 0 |
 | PUSH SP 가 미는 값 | 줄어든 SP | 줄기 전 SP |
-| 0x0F | POP CS | 두 바이트 명령의 머리 — SMSW(0F 01 /4)만 있고 0xFFF0 을 준다 |
+| 0x0F | POP CS | 두 바이트 명령의 머리 — SMSW(0F 01 /4)는 0xFFF0 을 주고, SGDT·SIDT(/0·/1)는 6바이트를 쓴다(마지막 바이트 FFh) |
 | 주소선 | 20개, FFFF:FFFF 는 0FFEFh | 24개, FFFF:FFFF 는 10FFEFh(1MB 에서 감는 일은 기계의 A20 몫) |
 | AAA·AAS | AL 과 AH 를 따로 고친다 | AX 에 106h 를 더하고 뺀다 |
 | DAS | AL-6 의 빌림은 CF 에 남지 않는다 | 남는다 |
@@ -139,6 +139,7 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 | BOUND 하한 밖 | 상한을 읽지 않는다 | 상한도 읽는다(FFFF 면 INT 13) |
 | 바이트 SHL·SHR 를 16·24 번 | CF=0 | 8 번일 때의 CF |
 | 명령 길이 | 10 바이트 | 15 바이트 |
+| SMSW·SGDT·SIDT | 0xFFF0 을 주고, 6바이트의 마지막은 FFh | 0 을 주고, 마지막 바이트는 0(PUSH SP 다음에 게임이 이 바이트로 286 과 386 을 가른다) |
 | 66h·67h | opcode 자리(Unsupported) | 피연산자·주소 크기 접두 |
 
 66h 는 [80386.csv](https://github.com/SingleStepTests/80386/blob/main/80386.csv)

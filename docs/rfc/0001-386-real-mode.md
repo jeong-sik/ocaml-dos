@@ -62,7 +62,7 @@ Intel 80386 Programmer's Reference Manual(1986) 기준이다.
 | 접두 | `66h` 피연산자 크기, `67h` 주소 크기. 실모드 기본은 16 비트 |
 | 주소 | 32 비트 modrm 과 SIB. 오프셋이 FFFFh 를 넘으면 INT 13, 스택 세그먼트면 INT 12 |
 | 명령 길이 | 15 바이트를 넘으면 INT 13 (286 은 10 바이트) |
-| `0Fh` 확장 | Jcc rel16/32, SETcc, MOVZX·MOVSX, BT·BTS·BTR·BTC, BSF·BSR, SHLD·SHRD, IMUL r,r/m, LFS·LGS·LSS, PUSH·POP FS·GS, MOV CRn·DRn·TRn |
+| `0Fh` 확장 | Jcc rel16/32, SETcc, MOVZX·MOVSX, BT·BTS·BTR·BTC, BSF·BSR, SHLD·SHRD, IMUL r,r/m, LFS·LGS·LSS, PUSH·POP FS·GS, SGDT·SIDT·SMSW(읽기만), MOV CRn·DRn·TRn |
 | 32 비트 형태 | PUSHAD·POPAD, CWDE·CDQ, 문자열 명령의 ESI·EDI·ECX, JECXZ, LOOP 의 ECX |
 | FLAGS | 실모드에서 비트 12-14(IOPL, NT)를 쓸 수 있다. 286 은 늘 0, 8086 은 늘 1 이다. 게임의 CPU 판별이 이 차이를 본다 |
 
