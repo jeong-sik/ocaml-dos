@@ -51,6 +51,26 @@ let games = [
   { name = "jetpack"; exe = "JETPACK.EXE";
     stages = [
       { press = []; until = Graphics { mode = 0x13; min_colors = 32 }; budget = 40_000_000 } ] };
+  (* AA1.EXE 는 메모리가 모자라다는 글을 쓰고 끝나던 게임이다(헤더 maxalloc 을
+     무시하고 메모리를 통째로 주던 때). 타이틀은 CGA 4색이다 *)
+  { name = "arctic"; exe = "AA1.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x04; min_colors = 4 }; budget = 40_000_000 } ] };
+  { name = "bio"; exe = "BMENACE1.EXE";
+    stages = [
+      { press = []; until = Text "Ready - Press a Key"; budget = 40_000_000 };
+      { press = [ "space" ]; until = Graphics { mode = 0x0d; min_colors = 6 }; budget = 40_000_000 } ] };
+  { name = "mars"; exe = "MARS1.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x04; min_colors = 4 }; budget = 40_000_000 } ] };
+  { name = "dark"; exe = "DA1.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x0d; min_colors = 8 }; budget = 40_000_000 } ] };
+  (* HH1.EXE 는 HARRY1.-0 을 EXEC 하는 런처다. 헤더가 블록을 작게 정해 둬서
+     AH=4Ah 없이 EXEC 이 돼야 한다(통째로 주면 종료 코드 255 로 끝났다) *)
+  { name = "harry"; exe = "HH1.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x13; min_colors = 32 }; budget = 40_000_000 } ] };
 ]
 
 let contains text needle =

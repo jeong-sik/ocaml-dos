@@ -22,8 +22,23 @@ fetch() {
   echo "fetched $name"
 }
 
+# 설치본: 압축 안의 NAME.1 이 한 번 더 압축된 게임이다(DEICE 설치기가 풀던 것).
+# 이 압축을 한 번 더 푼다.
+fetch_installer() {
+  name=$1
+  url=$2
+  inner=$3
+  fetch "$name" "$url"
+  unzip -o -q -j "$dest/$name/$inner" -d "$dest/$name"
+}
+
 fetch snarf   "$base/everettkaser/snarf26.zip"
 fetch thor    "$base/apogee/cavethor.zip"
 fetch xargon  "$base/epic/%24xargon.zip"
 fetch kilo    "$base/epic/kilo.zip"
 fetch jetpack "$base/adampedersen/jetpak15.zip"
+fetch arctic  "$base/microfx/aa_freew.zip"
+fetch bio     "$base/apogee/bmfreew.zip"
+fetch mars    "$base/scenario/marsfree.zip"
+fetch dark    "$base/scenario/da_freew.zip"
+fetch_installer harry "$base/subzero/1hh12.zip" HARRY1.1
