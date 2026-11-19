@@ -25,6 +25,10 @@ type t = {
   mutable periodic_since : int;
       (** 이 사이클 뒤의 주기 끝만 PF 를 세운다. 레지스터 C 를 읽거나
           레지스터 A 를 쓴 때 *)
+  mutable irq_line : bool;
+      (** IRQ8 이 올라가 있다: IRQF 가 섰고 레지스터 C 를 아직 안 읽었다 *)
+  mutable irq_at : int;
+      (** IRQF 가 다음에 서는 사이클. 오를 일이 없으면 [no_irq] *)
 }
 
 let index_mask = 0x7F
@@ -93,9 +97,11 @@ let reg_century = 0x32
 let checksum_first = 0x10
 let checksum_last = 0x2D
 
+let no_irq = max_int
+
 let create ~clock =
   { clock; index = 0; rate = default_rate; control = default_control;
-    periodic_seen = false; periodic_since = 0 }
+    periodic_seen = false; periodic_since = 0; irq_line = false; irq_at = no_irq }
 
 let select c v = c.index <- v land index_mask
 let index c = c.index
@@ -154,6 +160,25 @@ let periodic_ticks rate =
    [period_index] 가 늘면 그 사이에 주기 끝이 있었다. *)
 let period_index ~ticks ~cpu_hz cycle = cycle * rtc_base_hz / (ticks * cpu_hz)
 
+(* [periodic_since] 뒤 첫 주기 끝의 사이클: [period_index] 가 하나 느는
+   가장 이른 사이클. *)
+let next_end ~ticks ~cpu_hz since =
+  let k = period_index ~ticks ~cpu_hz since + 1 in
+  ((k * ticks * cpu_hz) + rtc_base_hz - 1) / rtc_base_hz
+
+(* IRQ8 은 IRQF 가 0 에서 1 로 바뀔 때 오른다(86Box timer_update_irq:
+   B 와 C 의 PIE·PF 가 겹치면 IRQF 를 세우고 줄을 올린다). 줄이 올라가
+   있는 동안은 주기가 더 끝나도 새로 오르지 않는다. 그 사이의 끝은 PF 로만
+   남는다. *)
+let schedule c ~cpu_hz =
+  c.irq_at <-
+    (if c.irq_line || c.control land control_periodic = 0 then no_irq
+     else if c.periodic_seen then c.periodic_since
+     else
+       match periodic_ticks c.rate with
+       | None -> no_irq
+       | Some ticks -> next_end ~ticks ~cpu_hz c.periodic_since)
+
 let periodic_flag c ~now ~cpu_hz =
   c.periodic_seen
   ||
@@ -169,6 +194,8 @@ let read_flags c ~now ~cpu_hz =
   let irqf = pf && c.control land control_periodic <> 0 in
   c.periodic_seen <- false;
   c.periodic_since <- now;
+  c.irq_line <- false;
+  schedule c ~cpu_hz;
   (if irqf then flag_irq else 0) lor if pf then flag_periodic else 0
 
 let read c ~now ~cpu_hz =
@@ -196,9 +223,26 @@ let write c v ~now ~cpu_hz =
     (* 옛 탭이 이미 세운 PF 는 남는다. 새 탭은 지금부터 센다. *)
     c.periodic_seen <- periodic_flag c ~now ~cpu_hz;
     c.periodic_since <- now;
-    c.rate <- v land rate_mask
+    c.rate <- v land rate_mask;
+    schedule c ~cpu_hz
   end
-  else if c.index = reg_b then c.control <- low v
+  else if c.index = reg_b then begin
+    c.control <- low v;
+    (* PIE 를 끄면 IRQF 가 내려가 줄도 내려간다. *)
+    if c.control land control_periodic = 0 then c.irq_line <- false;
+    schedule c ~cpu_hz
+  end
+
+(* 기계가 매 스텝 부른다. 거의 늘 [now < irq_at] 라 비교 하나로 끝난다. *)
+let[@inline] irq_rises c ~now =
+  if now >= c.irq_at then begin
+    c.irq_line <- true;
+    c.irq_at <- no_irq;
+    true
+  end
+  else false
+
+let irq_line c = c.irq_line
 
 (* ---------- snapshot ---------- *)
 
@@ -207,16 +251,21 @@ module C = Dos_snap_codec
 let index_r = C.range 0 index_mask
 let rate_r = C.range 0 rate_mask
 
-let write_state w { clock = _; index; rate; control; periodic_seen; periodic_since } =
+let write_state w
+    { clock = _; index; rate; control; periodic_seen; periodic_since; irq_line; irq_at } =
   C.put w ~what:"cmos index" index_r index;
   C.put w ~what:"cmos register A" rate_r rate;
   C.put w ~what:"cmos register B" C.byte control;
   C.put_bool w periodic_seen;
-  C.put w ~what:"cmos periodic since" C.count periodic_since
+  C.put w ~what:"cmos periodic since" C.count periodic_since;
+  C.put_bool w irq_line;
+  C.put w ~what:"cmos next IRQ8" C.count irq_at
 
 let read_state r c =
   c.index <- C.get r ~what:"cmos index" index_r;
   c.rate <- C.get r ~what:"cmos register A" rate_r;
   c.control <- C.get r ~what:"cmos register B" C.byte;
   c.periodic_seen <- C.get_bool r;
-  c.periodic_since <- C.get r ~what:"cmos periodic since" C.count
+  c.periodic_since <- C.get r ~what:"cmos periodic since" C.count;
+  c.irq_line <- C.get_bool r;
+  c.irq_at <- C.get r ~what:"cmos next IRQ8" C.count

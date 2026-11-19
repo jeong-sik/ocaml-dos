@@ -83,8 +83,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    30: the CMOS carries the periodic flag raised before its last register A
    write and the cycle its count starts from, after register B.
    31: the slave 8259 (mask, requests, in service, OCW3 read choice) after
-   the master's. *)
-let format_version = 31
+   the master's.
+   32: the CMOS carries whether its IRQ8 line is up and the cycle IRQF next
+   rises, after the periodic count start. *)
+let format_version = 32
 
 let digest_hex_len = 32
 let checksum_len = 16

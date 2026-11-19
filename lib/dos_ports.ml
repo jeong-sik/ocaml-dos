@@ -456,6 +456,14 @@ let irq0_due t =
   | Some at when t.now >= at -> pit0_changed t; true
   | Some _ | None -> false
 
+let[@inline] rtc_irq_due t = Dos_cmos.irq_rises t.cmos ~now:t.now
+
+(* RTC 가 줄을 내렸는데 CPU 가 아직 요청을 안 받았으면 요청을 거둔다
+   (DSP 의 [follow_sb_line] 과 같다). 레지스터 C 를 읽은 뒤, PIE 를 끈
+   뒤다. *)
+let follow_rtc_line t =
+  if not (Dos_cmos.irq_line t.cmos) then Dos_pic.lower_irq t.pic Dos_pic.Rtc
+
 (* BIOS 데이터 영역에서 쪽과 커서가 사는 자리(SeaBIOS std/bda.h 의
    video_pagesize·video_pagestart·cursor_pos[8]·video_page). 쪽 p 의 커서는
    [bda_cursor_pos] + 2p 에 열, 그 다음 바이트에 행이다. *)
@@ -540,7 +548,10 @@ let port_in t p =
     (t.port_b land lnot (refresh_bit lor out2_bit)) lor refresh lor out2
   | 0x64 -> Dos_kbc.status t.kbc
   | 0x70 -> Dos_cmos.index t.cmos
-  | 0x71 -> Dos_cmos.read t.cmos ~now:t.now ~cpu_hz:(cpu_hz t)
+  | 0x71 ->
+    let v = Dos_cmos.read t.cmos ~now:t.now ~cpu_hz:(cpu_hz t) in
+    follow_rtc_line t;
+    v
   (* 조이스틱 미장착: 축 비트 0(방전) 이면 축 카운트 루프가 즉시
      통과한다. 0xFF 를 주면 카운터가 랩할 때까지 갇힌다(ZZT 실측).
      버튼 비트(4~7)는 0 이 눌림이라 1 로 둔다(86Box joystick_standard.c
@@ -624,7 +635,9 @@ let port_out t p v =
     if was <> now_high then Dos_pit.gate_edge t.pit2 ~tick:(pit_tick t) ~high:now_high
   | 0x64 -> Dos_kbc.write_command t.kbc ~hz:(cpu_hz t) v
   | 0x70 -> Dos_cmos.select t.cmos v
-  | 0x71 -> Dos_cmos.write t.cmos v ~now:t.now ~cpu_hz:(cpu_hz t)
+  | 0x71 ->
+    Dos_cmos.write t.cmos v ~now:t.now ~cpu_hz:(cpu_hz t);
+    follow_rtc_line t
   | 0x3C6 -> t.dac_mask <- v
   | 0x3C7 -> t.dac_read_index <- v; t.dac_phase <- 0
   | 0x3C8 -> t.dac_write_index <- v; t.dac_phase <- 0
