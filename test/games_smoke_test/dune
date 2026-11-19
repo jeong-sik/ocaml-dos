@@ -1,0 +1,3 @@
+(test
+ (name games_smoke_test)
+ (libraries dosmachine))
