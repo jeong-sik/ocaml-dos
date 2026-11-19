@@ -132,6 +132,21 @@ let free_clusters = 0x1000
 let total_clusters = 0x2000
 let clusters bytes = (bytes + cluster_bytes - 1) / cluster_bytes
 
+(* AH=1Bh (default drive) and AH=1Ch (DL: 0 = default, 1 = A, ...): the disk
+   AH=36h describes, the older way. AL = sectors per cluster, CX = bytes per
+   sector, DX = clusters on the disk, DS:BX -> the media ID byte; AL = FFh
+   for a drive that is not there. MS-DOS 4.0 src/DOS/MISC.ASM $SLEAZEFUNC. *)
+let allocation_info t ~drive =
+  let cpu = t.cpu in
+  if drive <> 0 && drive <> default_drive + 1 then Cpu86.set_reg8 cpu 0 0xFF
+  else begin
+    Cpu86.set_reg16 cpu 0 sectors_per_cluster;
+    Cpu86.set_reg16 cpu 1 bytes_per_sector;
+    Cpu86.set_reg16 cpu 2 total_clusters;
+    Cpu86.set_seg cpu 3 Dos_bios.rom_seg;
+    Cpu86.set_reg16 cpu 3 Dos_bios.media_id_off
+  end
+
 (* A file position is the dword [sf_position]: AH=42h adds with ADD/ADC
    and stores the sum without looking at its sign (HANDLE.ASM $LSEEK). *)
 let position_mask = 0xFFFF_FFFF
@@ -1668,6 +1683,8 @@ let service_immediate t =
   | 0x0E -> Cpu86.set_reg8 cpu 0 (default_drive + 1)
   | 0x19 -> Cpu86.set_reg8 cpu 0 default_drive
   | 0x1A -> t.dta <- seg_off t 3 2
+  | 0x1B -> allocation_info t ~drive:0
+  | 0x1C -> allocation_info t ~drive:(Cpu86.reg8 cpu 2)
   | 0x2F ->
     Cpu86.set_seg cpu 0 ((t.dta lsr 4) land 0xffff);
     Cpu86.set_reg16 cpu 3 (t.dta land 0x0f)

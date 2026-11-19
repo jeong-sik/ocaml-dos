@@ -24,6 +24,13 @@ val host_vector : int -> host_vector option
 val rom_seg : int
 (** F000h, the segment of every ROM routine and stub. *)
 
+val media_id_off : int
+(** Where the media ID byte INT 21h AH=1Bh and 1Ch point DS:BX at lives in
+    the ROM segment. *)
+
+val media_id_fixed_disk : int
+(** F8h, the media ID of a fixed disk: the byte at F000:[media_id_off]. *)
+
 val xms_entry_off : int
 (** Where the XMS control function starts in the ROM segment; INT 2Fh
     AX=4310h hands out F000:[xms_entry_off]. *)

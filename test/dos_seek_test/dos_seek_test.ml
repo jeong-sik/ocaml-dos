@@ -1,4 +1,4 @@
-(* AH=42h positions, AH=40h growth and the disk AH=36h describes, from
+(* AH=42h positions, AH=40h growth and the disk AH=36h, 1Bh and 1Ch describe, from
    guest programs. Each INT 21h call leaves AX, DX and the carry (as CX = 0
    or FFFFh) in a 6-byte record. *)
 
@@ -19,6 +19,10 @@ let store_ax a = "\xa3" ^ w a
 let store_bx a = "\x89\x1e" ^ w a
 let store_cx a = "\x89\x0e" ^ w a
 let store_dx a = "\x89\x16" ^ w a
+let store_si a = "\x89\x36" ^ w a
+let mov_ah_from_bx = "\x8a\x27"        (* mov ah,[bx] *)
+let mov_si_ds = "\x8c\xde"
+let ds_from_cs = "\x0e\x1f"           (* push cs; pop ds *)
 let sbb_cx_cx = "\x19\xc9"
 let quit = mov_ax 0x4c00 ^ int_ 0x21
 
@@ -209,6 +213,36 @@ let () =
     (fun (name, off, want) -> check ("36h " ^ name) (peek16 m (r + off)) want)
     [ ("sectors per cluster", 0, 4); ("free clusters", 2, 0x1000);
       ("bytes per sector", 4, 512); ("clusters", 6, 0x2000) ]
+
+(* AH=1Bh and 1Ch name the same disk and point DS:BX at the media ID byte.
+   The program reads the byte through DS:BX, then puts DS back before it
+   stores anything. *)
+let () =
+  let r = results in
+  let after_call fn =
+    mov_ax fn ^ mov_dx 0 ^ int_ 0x21
+    ^ mov_ah_from_bx ^ mov_si_ds ^ ds_from_cs
+    ^ store_ax r ^ store_bx (r + 2) ^ store_cx (r + 4) ^ store_dx (r + 6) ^ store_si (r + 8)
+  in
+  let m = run (after_call 0x1B00) in
+  List.iter
+    (fun (name, off, want) -> check ("1Bh " ^ name) (peek16 m (r + off)) want)
+    [ ("AL sectors per cluster, AH the byte at DS:BX", 0, 0xF804);
+      ("BX points into the ROM", 2, Dos_bios.media_id_off);
+      ("bytes per sector", 4, 512); ("clusters", 6, 0x2000);
+      ("DS is the ROM segment", 8, Dos_bios.rom_seg) ];
+  (* 1Ch with DL = 3 (C:) is 1Bh *)
+  let m = run (mov_ax 0x1C00 ^ mov_dx 3 ^ int_ 0x21
+               ^ mov_ah_from_bx ^ ds_from_cs ^ store_ax r ^ store_cx (r + 2) ^ store_dx (r + 4)) in
+  check "1Ch DL=3 describes C:" (peek16 m r) 0xF804;
+  check "1Ch DL=3 bytes per sector" (peek16 m (r + 2)) 512;
+  check "1Ch DL=3 clusters" (peek16 m (r + 4)) 0x2000;
+  (* A: is not there: AL = FFh, and CX and DX stay what the caller put there *)
+  let m = run (mov_cx 0x1234 ^ mov_dx 1 ^ mov_ax 0x1C00 ^ int_ 0x21
+               ^ store_ax r ^ store_cx (r + 2) ^ store_dx (r + 4)) in
+  check "1Ch DL=1: AL = FFh" (peek16 m r land 0xFF) 0xFF;
+  check "1Ch DL=1: CX untouched" (peek16 m (r + 2)) 0x1234;
+  check "1Ch DL=1: DX untouched" (peek16 m (r + 4)) 1
 
 let () =
   if !failed > 0 then begin
