@@ -1,0 +1,3 @@
+(test
+ (name cpu86_test386)
+ (libraries cpu86core))

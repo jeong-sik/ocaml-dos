@@ -5,9 +5,10 @@
     [Dos_ports], BIOS 는 [Dos_bios], DOS 는 [Dos_dos] 가 맡는다.
 
     결정론: 같은 이미지에 같은 키를 같은 순서로 넣으면 같은 화면이
-    나온다. 시각도 난수도 호스트에서 오지 않는다 — 날짜·시각은
-    [set_clock] 이 정한 기준시각에 CPU 사이클로 환산한 경과를 더해
-    만들고, 타이머 틱도 사이클에서 나온다.
+    나온다. 시각도 난수도 호스트에서 오지 않는다 — RTC 는 [set_clock] 이
+    정한 기준시각에 CPU 사이클로 환산한 경과를 더해 만들고, 타이머 틱도
+    사이클에서 나온다. DOS 의 시각은 BIOS 틱에서, 날짜는 부팅 때 RTC 에서
+    정한 날 수에서 나온다([Dos_clock]).
 
     파일 계약: 하네스가 마운트한 것만 보인다. 게스트가 쓴 내용은 파일을
     닫을 때 마운트 표로 돌아가므로 같은 세션 안에서 저장하고 다시 열 수
@@ -15,25 +16,46 @@
 
 type t = Dos_state.t
 
-val create : unit -> t
+val create :
+  ?model:Cpu86.model -> ?speed:Dos_ports.speed -> ?mpu401:bool -> ?sound_blaster:bool -> unit -> t
+(** [model] 은 기본이 [I80286] 이다. [I80386] 이면 게스트가 32 비트 레지스터,
+    FS·GS, 0Fh 명령을 쓰고, CPU 판별이 386 을 본다. [speed] 를 주지 않으면
+    IBM PC 의 4.77MHz 다.
+
+    640KB 기계. [mpu401] 이면(기본 아님) 330h 에 UART 전용 MPU-401 을
+    꽂는다([Dos_mpu401]). MIDI 바이트는 버린다 — 소리 장치가 없다. 기본으로
+    꺼 둔다. 카드를 찾은 게임이 intelligent 모드 명령을 쓰면, 이 카드는
+    답하지 않으므로 그 게임은 답을 기다린다.
+
+    [sound_blaster] 이면(기본 아님) 220h·IRQ 7·DMA 1 에 Sound Blaster 2.0 을
+    꽂는다. 기본으로 꺼 둔다 — 카드를 찾은 게임이 모델에 없는 전송(ADPCM 등)을
+    고르면 IRQ 를 기다리다 멈추기 때문이다. *)
 
 (** {1 적재} *)
 
-val load_com : t -> string -> unit
+val load_com : ?name:string -> ?tail:string -> t -> string -> unit
 (** COM 이미지를 PSP 세그먼트 0x1000 의 0x100 에 싣는다. CS=DS=ES=SS=PSP,
     IP=0x100, SP=0xFFFE, 스택 맨 위는 0 — RET 으로 돌아오면 PSP 의
-    INT 20h 로 끝나는 실기 관례 그대로다. *)
+    INT 20h 로 끝나는 실기 관례 그대로다. [name] 은 C: 루트 디렉터리의
+    파일 이름이다. 주면 환경 블록 꼬리에 전체 경로를 쓴다
+    ({!Dos_dos.load_com}). [tail] 은 명령 이름 바로 뒤 글자들로 PSP:80h 의
+    명령줄 꼬리가 된다({!Dos_dos.load_com}). *)
 
-val load_exe : t -> string -> unit
+val load_exe : ?name:string -> ?tail:string -> t -> string -> unit
 (** MZ EXE 를 싣는다. 재배치 워드에 로드 세그먼트를 더하고 CS:IP/SS:SP
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
-    MZ 서명이 아니면 [Invalid_argument]. *)
+    MZ 서명이 아니면 [Invalid_argument]. [name]·[tail] 은 [load_com] 과 같다. *)
 
-val mount_file : t -> string -> string -> unit
-(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 대소문자를 가리지 않는다. *)
+val mount_file : t -> string -> string -> (unit, string) result
+(** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 루트에서 시작하는 DOS
+    경로다 — [DATA\X.DAT] 나 [DATA/X.DAT] 처럼 쓰고, DOS 가 읽듯
+    대문자로 바꾸고 8.3 으로 자른다({!Dos_path}). 위 디렉터리는 함께
+    생긴다. DOS 이름이 될 수 없는 이름이나 디렉터리와 같은 이름은
+    [Error] 다. *)
 
 val read_mounted : t -> string -> string option
-(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다. *)
+(** 마운트 표의 현재 내용 — 게스트가 저장한 결과를 하네스가 꺼낸다.
+    이름은 [mount_file] 과 같이 읽는다. *)
 
 val mounted_names : t -> string list
 
@@ -100,7 +122,19 @@ val halted : t -> bool
 (** {1 입력} *)
 
 val push_key : t -> int -> unit
-(** BIOS 키 링에 워드 하나. INT 16h 와 INT 21h 입력이 같은 링을 본다. *)
+(** 키 하나를 눌렀다 뗀다. 워드는 BIOS 가 INT 16h 로 돌려줄 (스캔 lsl 8)
+    lor ASCII 다. 키보드 컨트롤러({!Dos_kbc})가 make·break 바이트를 포트
+    0x60 에 차례로 올리고 바이트마다 IRQ1 을 낸다. BIOS INT 9 가 make
+    바이트의 워드를 링에 넣고, INT 16h 와 INT 21h 입력이 그 링을 본다.
+    INT 9 를 가로챈 게임은 포트 0x60 에서 스캔 코드를 직접 읽는다.
+
+    IRQ1 은 IF 가 켜지고 IMR bit1 이 풀려 있어야 들어간다. 그 전까지 키는
+    컨트롤러에 남아 있고 링에는 없다. *)
+
+val key_unread : t -> bool
+(** 넣은 키 가운데 프로그램이 아직 안 가져간 것이 있다 — 링에 있거나,
+    컨트롤러가 make 바이트를 아직 내주지 않았다. break 바이트만 남은 것은
+    키가 아니다. *)
 
 val named_keys : (string * int) list
 (** 이름으로 부를 수 있는 키와 그 BIOS 워드. *)
@@ -148,7 +182,10 @@ val set_mouse : t -> x:int -> y:int -> buttons:int -> unit
     마스크에 닿으면, 레지스터(AX 이벤트, BX 단추, CX·DX 좌표, SI·DI 그간
     이동량)를 채우고 핸들러를 far call 로 부른다 — 그 자리에서, 다음 run 을
     기다리지 않는다. 이동량은 호출이 소비하므로(AX=0x0B 와 같은 읽기) 호출
-    뒤 AX=0x0B 는 0 을 돌려준다. 마스크가 0 이면 등록이 꺼진 것이다. *)
+    뒤 AX=0x0B 는 0 을 돌려준다. 마스크가 0 이면 등록이 꺼진 것이다.
+    게스트가 AX=07h·08h 로 범위를 정했으면 자리를 그 안으로 자르고,
+    이동량도 자른 자리로 센다. 버튼마다 누름·뗌 횟수와 자리를 AX=05h·06h
+    를 위해 남긴다. *)
 
 (** {1 화면} *)
 
@@ -175,9 +212,16 @@ val screen_digest : t -> int
     키를 먹고 곧바로 다시 묻는다(ZZT 실측 631 명령). 그때 화면은 아직
     그리는 중이다. *)
 
+val frame_digest : t -> int
+(** [frame_rgb] 가 읽는 것 전부의 지문: 화면 메모리([screen_digest]), 모드,
+    CGA 색 선택, 속성 팔레트, DAC. 두 번 같으면 [frame_rgb] 도 같다 — 지문이
+    우연히 겹칠 때만 빼고. DAC 만 바꾸는 페이드는 [screen_digest] 에 잡히지
+    않으니, 화면을 다시 그릴지 정할 때는 이것을 쓴다. *)
+
 val pixel : t -> x:int -> y:int -> int
-(** 그래픽 모드의 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15, 13h 는
-    0-255. 텍스트 모드에서는 늘 0 이다. *)
+(** 화면에 보이는 그래픽 점 하나 — CGA 는 0-3, EGA/VGA 16색은 0-15,
+    256색은 0-255. 256색은 CRTC 시작 주소를 따른다. 텍스트 모드에서는 늘
+    0 이다. *)
 
 (** {1 관측} *)
 
@@ -185,18 +229,39 @@ val cpu_of : t -> Cpu86.t
 val psp_seg_of : t -> int
 
 val mem_read : t -> int -> int
-(** 물리 주소 한 바이트. *)
+(** 물리 주소 한 바이트, RAM 에서. 16색·256색 모드의 0xA0000 창은 비디오
+    어댑터의 평면이라 여기 없다 — 화면은 {!pixel} 로 읽는다. *)
 
 val mem_write : t -> int -> int -> unit
 (** 물리 주소 한 바이트 쓰기({!mem_read} 의 짝). 하네스가 게스트 RAM 에
     상태를 주입하는 용도. 값은 하위 8비트로 잘린다. *)
 
+val on_unserved : t -> (Dos_state.unserved -> vector:int -> ax:int -> unit) -> unit
+(** 이 기계가 받지 못한 INT 호출을 알려 줄 관찰자를 건다. 기계 동작은 그대로다.
+    [No_function] 은 호스트 서비스(21h·10h·15h·16h·1Ah·33h)에 그 기능 갈래가 없을
+    때, [Iret_stub] 은 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔을 때다.
+    [ax] 는 호출 순간의 AX 다. *)
+
 val tick_count : t -> int
-(** BIOS 타이머 틱(0x40:0x6C). 18.2Hz 가 기본이고 게스트가 PIT 분주비를
-    바꾸면 그만큼 빨라진다. *)
+(** BIOS 타이머 틱(0x40:0x6C). 자정부터 센 수라 처음 값은 기준시각의
+    틱이다(08:00:00 이면 524348). 18.2Hz 가 기본이고 게스트가 PIT
+    분주비를 바꾸면 그만큼 빨라진다. 하루치(0x1800B0)에 닿으면 0 으로
+    돌아간다. *)
 
 val speaker_on : t -> bool
-(** 스피커의 게이트와 데이터가 둘 다 열렸다. 소리는 내지 않는다. *)
+(** 스피커의 게이트와 데이터가 둘 다 열렸다. *)
+
+val start_audio : t -> rate:int -> unit
+(** 지금부터 PC 스피커 소리를 초당 [rate] 개의 표본으로 만든다(RFC 0006).
+    표본은 기계가 간 길을 바꾸지 않는다. 스냅숏은 표본을 담지 않으므로
+    되살린 기계는 다시 불러야 한다. *)
+
+val take_audio : t -> Bytes.t option
+(** 지금까지 만든 표본 가운데 아직 가져가지 않은 것. 16비트 부호 있는
+    리틀 엔디언 모노다. {!start_audio} 를 부르지 않았으면 [None] 이다. *)
+
+val audio_clipped : t -> int option
+(** 16비트 범위를 넘어 자른 표본 수. *)
 
 val free_paras : t -> int
 (** INT 21h AH=48h 이 지금 줄 수 있는 가장 큰 덩어리. *)
@@ -204,4 +269,7 @@ val free_paras : t -> int
 val set_clock :
   t -> year:int -> month:int -> day:int -> hour:int -> minute:int ->
   second:int -> unit
-(** 게스트가 보는 기준시각. 기본은 1990-01-01 08:00:00. *)
+(** 게스트가 보는 기준시각. 기본은 1990-01-01 08:00:00. BIOS 틱
+    (0x40:0x6C)과 DOS 날짜도 이 시각으로 다시 채운다 — 실기 BIOS 와 DOS 가
+    부팅 때 RTC 를 읽어 하는 일이다. DOS 날짜는 1980-01-01..2099-12-31 만
+    받는다. 그 밖이면 [Invalid_argument]. *)
