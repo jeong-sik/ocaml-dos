@@ -84,6 +84,16 @@ let games = [
     stages = [
       { press = []; until = Text "Are you using a COLOR screen"; budget = 40_000_000 };
       { press = [ "y" ]; until = Text "Yes, I do have a color screen."; budget = 40_000_000 } ] };
+  (* 인터럽트를 끈 채 INT 1Ah AH=0 으로 틱을 기다리는 지연 루프가 있다. 보류 IRQ0 를
+     받지 못하면 모드 03h 에서 영영 돈다. 제목 화면은 모드 13h 다 *)
+  { name = "arcy2"; exe = "ARCY2.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x13; min_colors = 32 }; budget = 60_000_000 } ] };
+  (* 시작할 때 SGDT 의 여섯째 바이트로 286 과 386 을 가른다. SGDT 가 없으면
+     "Processor:" 줄 앞에서 멈춘다. 프로세서 줄 다음 줄이 나오면 판별이 끝난 것이다 *)
+  { name = "charlie"; exe = "CHARLIE.EXE";
+    stages = [
+      { press = []; until = Text "Display: VGA detected."; budget = 40_000_000 } ] };
 ]
 
 let contains text needle =

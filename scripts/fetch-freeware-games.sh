@@ -51,3 +51,5 @@ fetch_installer harry "$base/subzero/1hh12.zip" HARRY1.1
 fetch ken     "$base/kensilverman/%24ken.zip"
 fetch supernova "$base/apogee/snova_fw.zip" 'source/*'
 fetch titanic   "$base/apogee/tit_free.zip" 'source/*'
+fetch arcy2     "$base/caps/1arcy.zip"
+fetch charlie   "$base/wiering/charlie.zip"
