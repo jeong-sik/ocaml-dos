@@ -91,6 +91,31 @@ let () =
       check (name ^ ": CF kept") r.carry carry)
     results [ ("51h", 1); ("51h", 0); ("62h", 1) ]
 
+(* 50h 는 BX 를 현재 PSP 로 둔다(DISP.ASM $SET_CURRENT_PDB: MOV [CurrentPDB],BX).
+   프로그램은 PSP 를 읽어 두고(51h), 5555h 로 바꿔 62h 로 읽은 뒤(AX·CX·DX 와 CF
+   도 본다), 원래 값으로 되돌리고 끝난다. *)
+let () =
+  let m = Dos_machine.create () in
+  let prog =
+    "\xb4\x51\xcd\x21" ^ "\x53"                                     (* mov ah,51h; int 21h; push bx *)
+    ^ "\xb8\x34\x12\xb9\x22\x22\xba\x33\x33"                        (* ax=1234h cx=2222h dx=3333h *)
+    ^ "\xbb\x55\x55" ^ "\xf9" ^ "\xb4\x50" ^ "\xcd\x21"            (* bx=5555h; stc; mov ah,50h; int 21h *)
+    ^ "\xa3" ^ w out ^ "\x89\x0e" ^ w (out + 2) ^ "\x89\x16" ^ w (out + 4)  (* ax cx dx *)
+    ^ "\x9c\x58\xa3" ^ w (out + 8)                                  (* pushf; pop ax; mov [out+8],ax *)
+    ^ "\xb4\x62" ^ "\xcd\x21" ^ "\x89\x1e" ^ w (out + 6)            (* mov ah,62h; int 21h; mov [out+6],bx *)
+    ^ "\x5b" ^ "\xb4\x50" ^ "\xcd\x21" ^ quit                        (* pop bx; mov ah,50h; int 21h; exit *)
+  in
+  Dos_machine.load_com m prog;
+  Dos_machine.run m ~max_steps:100_000;
+  check "50h: the program exits through the restored PSP" (if Dos_machine.exited m then 1 else 0) 1;
+  let base = Dos_machine.psp_seg_of m * 16 in
+  let word a = Dos_machine.mem_read m (base + a) lor (Dos_machine.mem_read m (base + a + 1) lsl 8) in
+  check "50h: 62h reads back 5555h" (word (out + 6)) 0x5555;
+  check "50h: AX is what the caller left (AH=50h, AL=34h)" (word out) 0x5034;
+  check "50h: CX unchanged" (word (out + 2)) 0x2222;
+  check "50h: DX unchanged" (word (out + 4)) 0x3333;
+  check "50h: CF kept" (word (out + 8) land cf) cf
+
 let () =
   let results, _ = run [ (0x6A00, true); (0x6800, true) ] in
   List.iter2

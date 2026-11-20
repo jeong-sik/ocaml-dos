@@ -1999,6 +1999,10 @@ let service_immediate t =
     (* MISC.ASM $GET_INDOS_FLAG: ES:BX = INDOS. AX·CF 는 그대로 *)
     Cpu86.set_seg cpu 0 sda_seg;
     Cpu86.set_reg16 cpu 3 sda_in_dos
+  | 0x50 ->
+    (* DISP.ASM $SET_CURRENT_PDB: MOV [CurrentPDB],BX 하고 IRET. 다른 레지스터와
+       CF 는 그대로다. DTA 도 건드리지 않는다 *)
+    t.psp_seg <- Cpu86.reg16 cpu 3
   | 0x51 | 0x62 ->
     (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
        51h 는 DOS 2 때의 내부 이름 *)
