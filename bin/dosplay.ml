@@ -195,7 +195,7 @@ let mount_dir m dir =
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
   let fps = ref default_fps and mouse = ref true and state = ref "" and save_dir = ref "" in
-  let audio_cmd = ref "" in
+  let audio_cmd = ref "" and sound_blaster = ref false in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
@@ -208,6 +208,9 @@ let () =
        "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다");
       ("--save-dir", Arg.Set_string save_dir,
        "DIR  게임이 바꾼 파일을 끝날 때 여기에 쓴다. 시작할 때 여기 파일을 --dir 위에 싣는다");
+      ("--sound-blaster", Arg.Set sound_blaster,
+       "  Sound Blaster 2.0 을 꽂는다(220h, IRQ 7, DMA 1). 게임 설정이 Sound Blaster \
+        인 게임은 카드가 없으면 DSP 를 기다리며 멈춘다. --state 로 이어 할 때는 상태 파일의 기계를 쓴다");
       ("--audio-cmd", Arg.Set_string audio_cmd,
        "CMD  소리(49716Hz 16비트 모노 raw)를 이 프로그램의 표준 입력으로 흘린다. \
         공백으로 나누고 셸을 거치지 않는다. 예: \"ffplay -nodisp -autoexit -f s16le \
@@ -230,7 +233,7 @@ let () =
   in
   let originals = ref [] in
   let fresh () =
-    let m = Dos_machine.create () in
+    let m = Dos_machine.create ~sound_blaster:!sound_blaster () in
     List.iter (mount_dir m) (List.rev !dirs);
     List.iter
       (fun spec ->

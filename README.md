@@ -588,6 +588,10 @@ dune build --root . --profile release
     남은 파일과 폴더를 지운다. DA1 에 답하지 않는 터미널이면 1초만
     기다린다.
   - 터미널 창을 닫거나(SIGHUP) SIGTERM 을 받아도 같은 정리를 거친다.
+- `--sound-blaster` 는 Sound Blaster 2.0(220h, IRQ 7, DMA 1)을 꽂는다.
+  게임 설정이 Sound Blaster 인데 카드가 없으면 게임이 DSP 를 기다리며
+  멈춘다(The Even More Incredible Machine 는 제목 화면 전에 멈춘다).
+  `--state` 로 이어 할 때는 상태 파일에 든 기계를 쓰므로 이 옵션이 필요 없다.
 - `--audio-cmd CMD` 는 소리(49716Hz, 16비트 모노 raw)를 `CMD` 의 표준
   입력으로 흘린다. `CMD` 는 공백으로 나누고 셸을 거치지 않는다.
   재생기의 stdout·stderr 는 버린다.
