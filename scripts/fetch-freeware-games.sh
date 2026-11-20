@@ -53,3 +53,4 @@ fetch supernova "$base/apogee/snova_fw.zip" 'source/*'
 fetch titanic   "$base/apogee/tit_free.zip" 'source/*'
 fetch arcy2     "$base/caps/1arcy.zip"
 fetch charlie   "$base/wiering/charlie.zip"
+fetch epicpinball "$base/epic/epicpn21.zip"

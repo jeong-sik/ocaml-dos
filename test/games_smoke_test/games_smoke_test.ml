@@ -96,6 +96,19 @@ let games = [
       { press = []; until = Text "Display: VGA detected."; budget = 40_000_000 } ] };
 ]
 
+(* 386 명령(66h 접두 등)을 쓰는 게임. 286 모델에서는 [Unsupported] 로 멈춘다.
+   기본 모델이 386 이 되면 [games] 로 합친다(이슈 #204). *)
+let games_386 = [
+  (* PINBALL.EXE 는 첫 실행에 설정 메뉴를 띄운다: 사운드 카드 고르기(No Sound Card)
+     → Exit and Save. 저장하면 게임이 모드 13h 인트로로 들어간다. 저장하지 않으면
+     "Please run SETUP!" 로 끝난다 *)
+  { name = "epicpinball"; exe = "PINBALL.EXE";
+    stages = [
+      { press = []; until = Text "Select Sound Card"; budget = 40_000_000 };
+      { press = [ "enter"; "enter"; "down"; "down"; "enter" ];
+        until = Graphics { mode = 0x13; min_colors = 3 }; budget = 100_000_000 } ] };
+]
+
 let contains text needle =
   let n = String.length needle and h = String.length text in
   let rec go i = i + n <= h && (String.sub text i n = needle || go (i + 1)) in
@@ -157,14 +170,14 @@ let mount_dir m dir =
         | Ok () -> ()
         | Error e -> failwith (Printf.sprintf "mount %s: %s" n e))
 
-let run_game root g =
+let run_game ~model root g =
   let dir = Filename.concat root g.name in
   if not (Sys.file_exists dir) then begin
     Printf.printf "games smoke: %s 건너뜀 (폴더 없음)\n%!" g.name;
     true
   end
   else begin
-    let m = Dos_machine.create () in
+    let m = Dos_machine.create ~model () in
     mount_dir m dir;
     load m g.exe (read_file (Filename.concat dir g.exe));
     let unserved = ref 0 in
@@ -187,6 +200,9 @@ let () =
   match Sys.getenv_opt "DOS_GAMES_DIR" with
   | None -> print_endline "games smoke: DOS_GAMES_DIR 없음, 건너뜀"
   | Some root ->
-    let results = List.map (run_game root) games in
+    let results =
+      List.map (run_game ~model:Cpu86.I80286 root) games
+      @ List.map (run_game ~model:Cpu86.I80386 root) games_386
+    in
     if List.for_all Fun.id results then print_endline "games smoke: all passed"
     else exit 1
