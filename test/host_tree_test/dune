@@ -1,0 +1,3 @@
+(test
+ (name host_tree_test)
+ (libraries dosmachine dosharness))

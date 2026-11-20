@@ -575,8 +575,9 @@ dune build --root . --profile release
 ./_build/default/bin/dosplay.exe --dir /path/to/game --exe /path/to/game/GAME.EXE
 ```
 
-- `--dir DIR` 은 폴더의 파일을 모두 대문자 이름으로 마운트한다. 하위
-  폴더는 건너뛴다.
+- `--dir DIR` 은 폴더의 파일을 하위 폴더까지 모두 대문자 이름으로
+  마운트한다(`DATA/ITEMS.DAT` 는 게스트에게 `C:\DATA\ITEMS.DAT`). 폴더가
+  32단계보다 깊게 겹치면 시작하지 않는다.
 - 게스트는 벽시계에 맞춰 돈다. 기본은 4.77MHz 이고 `--cpu-mhz` 로 바꾼다. 화면은 바뀐 프레임만 초당
   `--fps`(기본 30) 번까지 보낸다. DAC 만 바꾸는 페이드도 바뀐 프레임이다.
 - 터미널이 앞 그림을 다 받기 전에는 새 그림을 만들지 않는다. 터미널이
