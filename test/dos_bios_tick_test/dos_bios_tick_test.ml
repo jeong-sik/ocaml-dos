@@ -149,6 +149,43 @@ let () =
   check "delay loop with IF=0: first reading" (word (out + 2)) 1000;
   check "delay loop with IF=0: the count grew by one" (word out) 1001
 
+(* ---------- INT 1Ch 훅이 DX 를 지워도 프로그램의 DX 는 그대로 ----------
+   Castle Adventure 의 INT 1Ch 훅은 DX 를 저장하지 않고 `xor dx,dx` 로 지운다.
+   메인 루프는 DX=1234h 를 두고 훅이 한 번 돌 때까지 기다린 뒤 DX 를 본다.
+   1234h 면 [out]=1, 0 이면 [out]=2. *)
+let () =
+  let counter = 0x200 and out = 0x202 in
+  let w v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xff)) in
+  let main handler =
+    "\x31\xc0\x8e\xc0"                      (* xor ax,ax; mov es,ax *)
+    ^ "\x26\xc7\x06\x70\x00" ^ w handler     (* mov word es:[70h],handler (INT 1Ch) *)
+    ^ "\x8c\xc8\x26\xa3\x72\x00"            (* mov ax,cs; mov es:[72h],ax *)
+    ^ "\xfb"                                  (* sti *)
+    ^ "\xba\x34\x12"                          (* mov dx,1234h *)
+    ^ "\x80\x3e" ^ w counter ^ "\x01"          (* L: cmp byte [counter],1 *)
+    ^ "\x72\xf9"                              (* jb L — 훅이 돌 때까지 *)
+    ^ "\x81\xfa\x34\x12"                      (* cmp dx,1234h *)
+    ^ "\x75\x07"                              (* jne bad *)
+    ^ "\xc6\x06" ^ w out ^ "\x01"              (* mov byte [out],1 *)
+    ^ "\xeb\x05"                              (* jmp exit *)
+    ^ "\xc6\x06" ^ w out ^ "\x02"              (* bad: mov byte [out],2 *)
+    ^ "\xb8\x00\x4c\xcd\x21"                  (* exit: mov ax,4C00h; int 21h *)
+  in
+  let handler =
+    "\x2e\xfe\x06" ^ w counter               (* inc byte cs:[counter] *)
+    ^ "\x31\xd2"                              (* xor dx,dx *)
+    ^ "\xcf"                                  (* iret *)
+  in
+  let handler_off = 0x100 + String.length (main 0) in
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m (main handler_off ^ handler);
+  let base = Dos_machine.psp_seg_of m * 16 in
+  Dos_machine.run m ~max_steps:3_000_000;
+  let byte a = Dos_machine.mem_read m (base + a) in
+  check "INT 1Ch hook clobbers DX: exited" (if Dos_machine.exited m then 1 else 0) 1;
+  check "INT 1Ch hook clobbers DX: hook ran" (if byte counter >= 1 then 1 else 0) 1;
+  check "INT 1Ch hook clobbers DX: DX kept" (byte out) 1
+
 let () =
   if !failed = 0 then print_endline "dos bios tick: all passed"
   else begin
