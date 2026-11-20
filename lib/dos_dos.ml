@@ -106,6 +106,17 @@ let guest_file t addr =
      | Some dir when dir_exists t dir -> Ok p
      | Some _ | None -> Error path_not_found)
 
+(* A name opens a device when its last component, up to the first dot, is
+   the device's name, whatever directory or extension comes with it: DOS
+   treats C:\GAME\NUL.TXT as NUL. Only EMMXXXX0 opens by name here; CON,
+   AUX and PRN stay the boot handles. *)
+let named_device p =
+  match Dos_path.base p with
+  | None -> None
+  | Some base ->
+    let stem = match String.index_opt base '.' with Some i -> String.sub base 0 i | None -> base in
+    if stem = device_name Emm then Some Emm else None
+
 (* What a directory directly holds, by the name each shows. *)
 let entries_of t dir =
   let under tbl hit =
@@ -164,11 +175,21 @@ let names_file name hd =
    and INT 17h, and a port with nothing on it ends in the critical error
    handler, INT 24h. This machine models none of the three, so it stops
    here instead of answering for them. *)
-let device_unmodelled t dev =
+let serial_parallel_needs = "needs INT 14h/17h and INT 24h"
+
+(* The EMM driver answers through INT 67h. AH=3Fh and AH=40h on its handle
+   would be its IOCTL-less read and write, which no program here asks for. *)
+let emm_needs = "is not read or written; EMS answers through INT 67h"
+
+let device_unmodelled t dev ~needs =
   raise
     (Cpu86.Unsupported
-       (Printf.sprintf "INT 21h AH=%02Xh on %s needs INT 14h/17h and INT 24h"
-          (Cpu86.reg8 t.cpu 4) (device_name dev)))
+       (Printf.sprintf "INT 21h AH=%02Xh on %s %s" (Cpu86.reg8 t.cpu 4) (device_name dev) needs))
+
+(* A transfer of 0 bytes never reaches the device (DISK.ASM WRTDEV). *)
+let unmodelled_transfer t dev ~count ~needs =
+  if count = 0 then begin Cpu86.set_reg16 t.cpu 0 0; ok t end
+  else device_unmodelled t dev ~needs
 
 (* [name]을 아직 물고 있는 핸들이 있는지 — 살아있는 [t.handles] 뿐 아니라
    EXEC 로 잠든 부모 핸들(자식이 실행되는 동안은 [t.handles] 밖에 있다)도
@@ -1939,12 +1960,16 @@ let service_immediate t =
         | Error e -> fail t e
         | Ok p ->
           let name = Dos_path.key p in
-          (match Hashtbl.find_opt t.host_files name with
-           | Some data ->
+          (match named_device p, Hashtbl.find_opt t.host_files name with
+           | Some dev, _ ->
+             Hashtbl.replace t.handles h { target = Device dev; access; inheritable; pos = 0 };
+             Cpu86.set_reg16 cpu 0 h;
+             ok t
+           | None, Some data ->
              ignore (open_file t h name data ~access ~inheritable);
              Cpu86.set_reg16 cpu 0 h;
              ok t
-           | None -> fail t (if dir_exists t p then access_denied else file_not_found))))
+           | None, None -> fail t (if dir_exists t p then access_denied else file_not_found))))
   | 0x3E -> if close_handle t (Cpu86.reg16 cpu 3) then ok t else fail t 6
   (* dup/dup2 는 같은 열린 파일을 가리킨다 — 위치와 내용을 나눠 쓴다.
      사본을 주면 한쪽에 쓴 것이 다른 쪽에 안 보인다. *)
@@ -1981,9 +2006,9 @@ let service_immediate t =
        Cpu86.set_reg16 cpu 0 n;
        ok t
      | Some { target = Device ((Aux | Prn) as dev); _ } ->
-       (* A count of 0 never reaches the device (DISK.ASM WRTDEV). *)
-       if n = 0 then begin Cpu86.set_reg16 cpu 0 0; ok t end
-       else device_unmodelled t dev
+       unmodelled_transfer t dev ~count:n ~needs:serial_parallel_needs
+     | Some { target = Device Emm; _ } ->
+       unmodelled_transfer t Emm ~count:n ~needs:emm_needs
      | Some ({ target = File { data; _ }; _ } as hd) ->
        let len = Bytes.length !data in
        (* CX = 0 sets the file's length to the position, shorter or
@@ -2199,8 +2224,11 @@ let read_handle t =
     else resume_input t (Read_console_line { destination; length; line = { text = ""; echo_widths = [] } })
   | Some { access = Write_only; _ } -> fail t access_denied; Completed
   | Some { target = Device ((Aux | Prn) as dev); _ } ->
-    if length = 0 then begin Cpu86.set_reg16 cpu 0 0; ok t; Completed end
-    else device_unmodelled t dev
+    unmodelled_transfer t dev ~count:length ~needs:serial_parallel_needs;
+    Completed
+  | Some { target = Device Emm; _ } ->
+    unmodelled_transfer t Emm ~count:length ~needs:emm_needs;
+    Completed
   | Some ({ target = File { data; _ }; _ } as hd) ->
     let take = min length (max 0 (Bytes.length !data - hd.pos)) in
     blit_to_mem t !data hd.pos destination take;

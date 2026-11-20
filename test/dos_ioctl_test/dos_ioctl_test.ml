@@ -144,6 +144,50 @@ let () =
   error "4408h D:" m 7 0x0F;
   error "4402h" m 8 1
 
+(* The EMM driver's device opens by name, as the Id engine games open it to
+   find expanded memory: any directory, any case, any extension. The open
+   handle's 4400h tells a device (80C0h) from a file (0002h), so a file whose
+   name only starts with the device's stays a file. *)
+let () =
+  let first_open = 5 in
+  let at_of i = 0x2300 + (i * 0x20) in
+  let open_and_ask i =
+    mov_dx (at_of i) ^ mov_ax 0x3D00 ^ int_ 0x21 ^ record i
+    ^ mov_bx_ax ^ ioctl (first_open + i) ~ax:0x4400
+  in
+  let paths = [ "EMMXXXX0"; "emmxxxx0"; "C:\\EMMXXXX0.XXX"; "EMMXXXXA"; "EMMXXXX" ] in
+  let code = String.concat "" (List.mapi (fun i _ -> open_and_ask i) paths) ^ quit in
+  let placed =
+    List.fold_left
+      (fun acc (i, path) -> acc ^ String.make (at_of i - 0x100 - String.length acc) '\x00' ^ path ^ "\x00")
+      code
+      (List.mapi (fun i p -> (i, p)) paths)
+  in
+  let m = run ~mounts:[ ("EMMXXXXA", "X") ] placed in
+  List.iteri
+    (fun i (name, want) ->
+      ok ("open " ^ name) m i;
+      check (name ^ ": 4400h") (dx_of m (first_open + i)) want)
+    [ ("EMMXXXX0", 0x80C0); ("emmxxxx0", 0x80C0); ("C:\\EMMXXXX0.XXX", 0x80C0); ("EMMXXXXA", 0x0002) ];
+  error "open EMMXXXX (no such file)" m 4 2
+
+(* the EMM handle answers 4407h and closes *)
+let () =
+  let at = 0x2300 in
+  let code =
+    mov_dx at ^ mov_ax 0x3D00 ^ int_ 0x21 ^ mov_bx_ax
+    ^ ioctl 0 ~ax:0x4407 ^ mov_ah 0x3E ^ int_ 0x21 ^ record 1
+    ^ ioctl 2 ~ax:0x4400
+  in
+  let placed =
+    code ^ quit ^ String.make (at - 0x100 - String.length code - String.length quit) '\x00' ^ "EMMXXXX0\x00"
+  in
+  let m = run placed in
+  ok "4407h on the EMM handle" m 0;
+  check "EMM handle: output ready" (ax_of m 0 land 0xFF) 0xFF;
+  ok "close the EMM handle" m 1;
+  error "4400h on the closed EMM handle" m 2 6
+
 let () =
   if !failed > 0 then begin
     Printf.eprintf "%d failure(s)\n%!" !failed;

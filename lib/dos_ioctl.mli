@@ -8,7 +8,7 @@
 
     - 4400h: device information. For a device, DX is the high byte of its
       attribute word over the low byte of its [sf_flags]: CON 80D3h, AUX
-      80C0h, PRN A0C0h. For a file, DX is the drive number (0002h). AX
+      80C0h, PRN A0C0h, EMMXXXX0 80C0h. For a file, DX is the drive number (0002h). AX
       returns the same value. A handle that is not open is error 6.
     - 4406h: input status, AL = FFh ready or 00h not. A file is ready
       until its position reaches its end. The console is ready when a key

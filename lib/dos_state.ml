@@ -19,13 +19,25 @@ let max_handles = 20
 (* 이 기계의 드라이브는 C: 하나다(0 = A:). *)
 let default_drive = 2
 
-(* The devices SYSINIT opens at boot (MS-DOS 4.0 BIOS/SYSINIT1.ASM). *)
+(* The character devices a handle can name. CON, AUX and PRN are the ones
+   SYSINIT opens at boot (MS-DOS 4.0 BIOS/SYSINIT1.ASM). EMM is the
+   expanded memory driver's device (Dos_ems): a program opens it by name
+   to learn the driver is there, as the Id engine games do. *)
 type standard_device =
   | Con
   | Aux
   | Prn
+  | Emm
 
-let device_name = function Con -> "CON" | Aux -> "AUX" | Prn -> "PRN"
+(* The name the EMM driver's device header carries (Dos_ems.emm_name is
+   this same string). *)
+let emm_device_name = "EMMXXXX0"
+
+let device_name = function
+  | Con -> "CON"
+  | Aux -> "AUX"
+  | Prn -> "PRN"
+  | Emm -> emm_device_name
 
 (* What a handle names. A file's [data] is shared: every handle opened on
    the same [hname] (through [Dos_dos.open_file], not [dup]) points at
