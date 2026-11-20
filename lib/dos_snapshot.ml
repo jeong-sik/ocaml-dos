@@ -102,8 +102,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    longer carry a copy.
    40: the video state's picture kind follows graphics controller
    register 5 bit 6; 13h loads that register as 40h.
-   41: a handle record may name the EMM device (target tag 4). *)
-let format_version = 41
+   41: a handle record may name the EMM device (target tag 4).
+   42: the ports no longer carry the port 3DAh bit 0 toggle; bit 0 follows
+   the frame time. *)
+let format_version = 42
 
 let digest_hex_len = 32
 let checksum_len = 16

@@ -1,4 +1,5 @@
-(* 포트 0x3DA bit3(수직 귀선) — VGA 한 프레임에 한 번, 두 줄 동안 켜진다.
+(* 포트 0x3DA bit3(수직 귀선)은 VGA 한 프레임에 한 번, 두 줄 동안 켜지고
+   bit0(블랭킹)은 수평·수직 블랭킹에서 켜진다.
    줄 수와 귀선 자리는 SeaBIOS stdvgamodes.c 의 CRTC 표, 한 줄은 800 도트 /
    25.175MHz 다. 아래 사이클 값은 4.77MHz(속도 4) 기준이다. *)
 
@@ -101,12 +102,111 @@ let test_speed () =
   let q = ports ~speed:fast ~mode:0x13 in
   check_int "fast: retraces per second" (rising_edges q ~until:(Dos_ports.cpu_hz q)) 70
 
-let test_display_enable () =
-  (* bit0 은 지금처럼 읽을 때마다 뒤집힌다 — 이 PR 은 bit3 만 바꾼다. *)
+(* ---------- bit0: 수평·수직 블랭킹 ----------
+   bit0 은 화면을 그리는 동안 0, 한 줄 800 도트 가운데 수평 블랭킹과 표시
+   줄이 끝난 뒤 프레임 끝까지 1 이다. 수평 블랭킹은 640 도트부터 640 도트
+   폭 모드는 784, 320 도트 폭 모드는 768 미만이다(SeaBIOS CRTC 표). *)
+let blank_bit p = Dos_ports.port_in p status_port land 1 <> 0
+
+let blank_at p c =
+  Dos_ports.set_now p c;
+  blank_bit p
+
+(* 프레임 첫머리에서 [dot] 도트째가 되는 가장 이른 사이클 *)
+let cycle_of_dot p dot =
+  let hz = Dos_ports.cpu_hz p in
+  ((dot * hz) + 25_174_999) / 25_175_000
+
+let line_dot line in_line = (line * 800) + in_line
+
+let test_display_enable_edges () =
+  (* 4.77MHz 에서 한 줄은 151.65 사이클, 640 도트는 121.3, 784 도트는
+     148.6 사이클째다. *)
   let p = ports ~speed:pc ~mode:0x13 in
-  let a = Dos_ports.port_in p status_port land 1 in
-  let b = Dos_ports.port_in p status_port land 1 in
-  check "bit0 flips on each read" (a <> b)
+  check "13h c=121 draws" (not (blank_at p 121));
+  check "13h c=122 hblank" (blank_at p 122);
+  check "13h c=148 hblank" (blank_at p 148);
+  check "13h c=149 draws" (not (blank_at p 149));
+  check "13h c=152 next line draws" (not (blank_at p 152));
+  (* 표시 줄 400 개는 60,666.6 사이클째에 끝난다. 399 번째 줄 표시 한가운데와
+     400 번째 줄 표시 한가운데를 가른다. *)
+  check "13h c=60600 line 399 draws" (not (blank_at p 60_600));
+  check "13h c=60700 line 400 vblank" (blank_at p 60_700);
+  check "13h c=68000 vblank" (blank_at p 68_000);
+  check "13h c=68098 next frame draws" (not (blank_at p 68_098));
+  (* 320 도트 폭 표는 끝이 768 도트(145.6 사이클째)다. 640 도트 폭은 아직 블랭킹이다. *)
+  let q = ports ~speed:pc ~mode:0x0D in
+  check "0Dh c=145 hblank" (blank_at q 145);
+  check "0Dh c=146 draws" (not (blank_at q 146));
+  check "13h c=146 still hblank" (blank_at p 146);
+  (* 350·480 줄 모드는 표시 줄 수가 다르다. *)
+  let r = ports ~speed:pc ~mode:0x10 in
+  check "10h c=53000 line 349 draws" (not (blank_at r 53_000));
+  check "10h c=53200 line 350 vblank" (blank_at r 53_200);
+  let v = ports ~speed:pc ~mode:0x12 in
+  check "12h c=72600 line 478 draws" (not (blank_at v 72_600));
+  check "12h c=73000 line 481 vblank" (blank_at v 73_000)
+
+let test_display_enable_speed () =
+  (* 도트 시각으로 보면 CPU 속도와 상관없다. *)
+  List.iter (fun (name, speed) ->
+      let p = ports ~speed ~mode:0x13 in
+      let at line in_line = blank_at p (cycle_of_dot p (line_dot line in_line)) in
+      check (name ^ ": line 10 dot 100 draws") (not (at 10 100));
+      check (name ^ ": line 10 dot 700 hblank") (at 10 700);
+      check (name ^ ": line 10 dot 790 draws") (not (at 10 790));
+      check (name ^ ": line 399 dot 700 hblank") (at 399 700);
+      check (name ^ ": line 400 dot 100 vblank") (at 400 100);
+      check (name ^ ": line 448 dot 100 vblank") (at 448 100))
+    [ ("pc", pc); ("12MHz", fast) ]
+
+(* 100MHz 에서는 한 도트에 사이클이 4 개라 모든 도트 자리를 정확히 짚는다.
+   경계: 640 도트부터 784 미만이 블랭킹이다(320 도트 폭 모드는 768 미만). *)
+let test_display_enable_exact_dots () =
+  let hundred =
+    match Dos_ports.speed_of_mhz 100. with Ok s -> s | Error e -> failwith e
+  in
+  let at p line in_line = blank_at p (cycle_of_dot p (line_dot line in_line)) in
+  let p = ports ~speed:hundred ~mode:0x13 in
+  check "exact: line 0 dot 0 draws" (not (at p 0 0));
+  check "exact: dot 639 draws" (not (at p 10 639));
+  check "exact: dot 640 hblank" (at p 10 640);
+  check "exact: dot 783 hblank" (at p 10 783);
+  check "exact: dot 784 draws" (not (at p 10 784));
+  check "exact: line 399 dot 799 draws" (not (at p 399 799));
+  check "exact: line 400 dot 0 vblank" (at p 400 0);
+  check "exact: last line dot 799 vblank" (at p 448 799);
+  let q = ports ~speed:hundred ~mode:0x0D in
+  check "exact 0Dh: dot 767 hblank" (at q 10 767);
+  check "exact 0Dh: dot 768 draws" (not (at q 10 768))
+
+(* 표시 줄 안에서 bit0 이 이어서 1 인 구간은 수평 블랭킹 하나(27 사이클)뿐이다.
+   수직 블랭킹은 몇 천 사이클을 이어서 1 이다. 게임이 "블랭킹이 N 번 읽는 동안
+   이어지면 수직 귀선" 으로 가르는 것이 이 차이에 기댄다. *)
+let longest_blank_run p ~from ~until ~stride =
+  let rec go c run best =
+    if c >= until then max run best
+    else
+      let b = blank_at p c in
+      go (c + stride) (if b then run + 1 else 0) (max best (if b then run + 1 else 0))
+  in
+  go from 0 0
+
+let test_blank_runs () =
+  let p = ports ~speed:pc ~mode:0x13 in
+  (* 표시 줄 400 개: 27 사이클 / 5 = 최대 6 번 읽는 동안 *)
+  let h = longest_blank_run p ~from:0 ~until:60_600 ~stride:5 in
+  check_int "hblank run at stride 5 is 6 reads" h 6;
+  (* 수직 블랭킹 60,700 부터 프레임 끝 68,097 까지 *)
+  let v = longest_blank_run p ~from:60_700 ~until:68_097 ~stride:5 in
+  check "vblank run is over 1000 reads" (v > 1000)
+
+(* 프레임 한 번에 1 인 사이클 수: 400 줄 × 27.3 + 49 줄 × 151.65 = 18,351 *)
+let test_blank_share () =
+  let p = ports ~speed:pc ~mode:0x13 in
+  let rec count c n = if c >= 68_097 then n else count (c + 1) (if blank_at p c then n + 1 else n) in
+  let n = count 0 0 in
+  check "blank cycles per frame near 18351" (n >= 18_100 && n <= 18_600)
 
 (* 게스트가 3DAh 를 돌며 귀선이 켜지는 횟수를 BIOS 틱 18 번 동안 센다.
    18 틱 = 18 × 65536 × 4 = 4,718,592 사이클. 귀선은 62486 + 68097k
@@ -134,6 +234,26 @@ let counter_com =
 
 let com_psp = 0x10000
 
+(* 3DAh bit0 이 60 번 이어서 1 일 때까지 기다린다. 한 번 읽는 데 20 사이클
+   넘게 드니 수평 블랭킹(27 사이클)으로는 끝나지 않고 수직 블랭킹에서만
+   끝난다. 읽을 때마다 뒤집히는 bit0 이면 영원히 끝나지 않는다. *)
+let vblank_wait_com =
+  "\xBA\xDA\x03"                      (* mov dx,03DAh *)
+  ^ "\xB9\x3C\x00"                    (* L: mov cx,60 *)
+  ^ "\xEC\xA8\x01\x74\xFB"            (* W: in al,dx; test al,1; jz W *)
+  ^ "\xEC\x24\x01\xE0\xFB"            (* R: in al,dx; and al,1; loopne R *)
+  ^ "\x09\xC9\x75\xEF"                (* or cx,cx; jnz L *)
+  ^ "\x89\x0E\x00\x03"                (* mov [0300h],cx *)
+  ^ "\xB8\x00\x4C\xCD\x21"            (* mov ax,4C00h; int 21h *)
+
+let test_vblank_wait () =
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m vblank_wait_com;
+  Dos_machine.run m ~max_steps:2_000_000;
+  check "vblank wait exited" (Dos_machine.exited m);
+  let rd a = Dos_machine.mem_read m a in
+  check_int "vblank wait cx" (rd (com_psp + 0x300) lor (rd (com_psp + 0x301) lsl 8)) 0
+
 let test_guest () =
   let m = Dos_machine.create () in
   Dos_machine.load_com m counter_com;
@@ -146,8 +266,13 @@ let test_guest () =
 let () =
   test_families ();
   test_speed ();
-  test_display_enable ();
+  test_display_enable_edges ();
+  test_display_enable_speed ();
+  test_display_enable_exact_dots ();
+  test_blank_runs ();
+  test_blank_share ();
   test_guest ();
+  test_vblank_wait ();
   if !failed = 0 then print_endline "dos vretrace: all passed"
   else begin
     Printf.eprintf "dos vretrace: %d failures\n%!" !failed;

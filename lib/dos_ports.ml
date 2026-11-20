@@ -92,7 +92,6 @@ type t = {
   (* CRTC *)
   (* 기타 *)
   mutable port_b : int;                 (** 0x61 래치 *)
-  mutable cga_status : bool;
   mutable mode_control : int;           (** 0x3D8 *)
   cmos : Dos_cmos.t;  (** 포트 70h·71h *)
   (* OPL2 — 타이머 둘과 상태 포트만 있다. 소리는 없다. *)
@@ -183,7 +182,6 @@ let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
     dac_phase = 0;
     dac_mask = 0xFF;
     port_b = 0;
-    cga_status = false;
     mode_control = 0x29;
     cmos;
     opl_reg = 0;
@@ -220,22 +218,28 @@ let at_speed t pc_cycles = pc_cycles * t.speed / pc_speed
    - 프레임 줄 수 = 수직 전체(06h, 07h 비트 0·5) + 2
    - 귀선 시작 = 10h(07h 비트 2·7)
    - 귀선 끝 = 시작 + ((11h 아래 4 비트 - 시작) land 0Fh)
+   - 표시 줄 수 = 수직 표시 끝(12h, 07h 비트 1·6) + 1
    한 줄은 800 도트 / 25.175MHz = 31.78µs 다. 9 도트 글자의 텍스트
    모드는 900 도트 / 28.322MHz 라서 0.0005% 짧지만 같은 길이로 둔다.
    시간 값이 줄 단위라서 [at_speed] 대신 [cpu_hz] 로 사이클을 낸다. *)
-type vga_frame = { lines : int; retrace_start : int; retrace_lines : int }
+type vga_frame = {
+  lines : int;
+  display_lines : int;
+  retrace_start : int;
+  retrace_lines : int;
+}
 
 let vga_dot_hz = 25_175_000
 let vga_line_dots = 800
 
 (* 200·400 줄 모드: VT 1BFh, VRS 19Ch, VRE Eh. 70.09Hz *)
-let frame_400 = { lines = 449; retrace_start = 412; retrace_lines = 2 }
+let frame_400 = { lines = 449; display_lines = 400; retrace_start = 412; retrace_lines = 2 }
 
 (* 350 줄 모드(0Fh·10h): VT 1BFh, VRS 183h, VRE 5h. 70.09Hz *)
-let frame_350 = { lines = 449; retrace_start = 387; retrace_lines = 2 }
+let frame_350 = { lines = 449; display_lines = 350; retrace_start = 387; retrace_lines = 2 }
 
 (* 480 줄 모드(11h·12h): VT 20Bh, VRS 1EAh, VRE Ch. 59.94Hz *)
-let frame_480 = { lines = 525; retrace_start = 490; retrace_lines = 2 }
+let frame_480 = { lines = 525; display_lines = 480; retrace_start = 490; retrace_lines = 2 }
 
 (* 모르는 모드는 [Dos_video.spec] 처럼 텍스트(400 줄)로 본다. *)
 let frame_of_mode = function
@@ -252,6 +256,31 @@ let in_vertical_retrace t =
   let pos = t.now mod line_cycles t f.lines in
   pos >= line_cycles t f.retrace_start
   && pos < line_cycles t (f.retrace_start + f.retrace_lines)
+
+(* 포트 0x3DA bit0 은 화면을 그리는 동안 0 이고 수평 블랭킹이나 수직
+   블랭킹에서 1 이다(FreeVGA "Input Status #1"). 수평 블랭킹은 한 줄 800
+   도트 가운데 시작 640 도트부터다. 끝은 SeaBIOS stdvgamodes.c 의 CRTC 표가
+   정한다: 끝 글자 = (시작 글자 윗자리 40h) | (03h 아래 5 비트) | (05h 비트
+   7 을 5 번째 비트로).
+   - 640 도트 폭 표(02h·03h·06h·07h·0Eh-13h): HT 5Fh 라 글자가 8 도트, 03h 와
+     05h 가 82h·80h(텍스트는 81h)여서 끝 글자 62h 가 784 도트다.
+   - 320 도트 폭 표(00h·01h·04h·05h·0Dh): HT 2Dh 라 글자가 16 도트, 03h 와
+     05h 가 90h·80h(텍스트는 A0h)여서 끝 글자 30h 가 768 도트다.
+   수직은 표시 줄이 끝난 뒤 프레임 끝까지 1 이다. 두 규칙은 DOSBox Staging
+   vga_misc.cpp 의 vga_read_p3da 와 같다. *)
+let hblank_start_dots = 640
+
+let hblank_end_dots = function
+  | 0x00 | 0x01 | 0x04 | 0x05 | 0x0D -> 768
+  | _ -> 784
+
+let in_blanking t =
+  let mode = Dos_video.mode t.video in
+  let f = frame_of_mode mode in
+  let pos = t.now mod line_cycles t f.lines in
+  let dot = pos * vga_dot_hz / cpu_hz t in
+  let line = dot / vga_line_dots and in_line = dot mod vga_line_dots in
+  line >= f.display_lines || (in_line >= hblank_start_dots && in_line < hblank_end_dots mode)
 
 
 (* ---------- OPL2 타이머 ---------- *)
@@ -575,16 +604,15 @@ let port_in t p =
      30h 로 돌아가고, 읽기도 그 값을 본다. *)
   | 0x3D9 -> Dos_video.cga_color_select t.video
   | 0x3BA | 0x3DA ->
-    (* 재주사 상태: 읽을 때마다 bit0(디스플레이 인에이블)을 뒤집는다.
-       CRT 루틴이 VRAM 직접 쓰기 전에 "clear 대기 → set 대기" 상승
-       에지를 본다 — 고정값이면 한쪽 대기가 안 풀린다(ZZT 실측).
-       bit3(수직 귀선)은 [in_vertical_retrace] 가 프레임 시각으로 정한다. *)
+    (* 재주사 상태: bit0(블랭킹)은 [in_blanking] 이, bit3(수직 귀선)은
+       [in_vertical_retrace] 가 프레임 시각으로 정한다. CRT 루틴이 VRAM
+       직접 쓰기 전에 "clear 대기 → set 대기" 상승 에지를 보는데(ZZT 실측),
+       한 줄 안에 두 구간이 다 있어서 두 대기가 모두 풀린다. *)
     (* 실기에서는 이 레지스터를 읽으면 속성 컨트롤러의 index/data
        번갈이도 index 로 돌아간다. 그 부수효과에 기대는 코드가 있다. *)
     Dos_video.reset_attr_flip t.video;
-    t.cga_status <- not t.cga_status;
     let vsync = if in_vertical_retrace t then 0x08 else 0x00 in
-    (if t.cga_status then 0x01 else 0x00) lor vsync
+    (if in_blanking t then 0x01 else 0x00) lor vsync
   | 0x388 -> opl_status t
   | _ -> 0xff
 
@@ -696,7 +724,7 @@ let get_opl_at r =
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
         speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
-        dac_phase; dac_mask; port_b; cga_status;
+        dac_phase; dac_mask; port_b;
         mode_control; cmos; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; opl; pit2; mpu;
         audio = _ (* an observer, not machine state *) } = t
@@ -724,7 +752,6 @@ let write_state w t =
   put "dac_phase" dac_phase_r dac_phase;
   put "dac_mask" C.byte dac_mask;
   put "port_b" C.byte port_b;
-  C.put_bool w cga_status;
   put "mode_control" C.byte mode_control;
   Dos_cmos.write_state w cmos;
   put "opl_reg" C.byte opl_reg;
@@ -769,7 +796,6 @@ let read_state r t =
   t.dac_phase <- get "dac_phase" dac_phase_r;
   t.dac_mask <- get "dac_mask" C.byte;
   t.port_b <- get "port_b" C.byte;
-  t.cga_status <- C.get_bool r;
   t.mode_control <- get "mode_control" C.byte;
   Dos_cmos.read_state r t.cmos;
   t.opl_reg <- get "opl_reg" C.byte;
