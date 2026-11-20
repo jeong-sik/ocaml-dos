@@ -783,6 +783,12 @@ let video t =
      | 0x15 ->
        let r, g, b = pal.(Cpu86.reg16 cpu 3 land 0xff) in
        Cpu86.set_reg8 cpu 6 r; Cpu86.set_reg8 cpu 5 g; Cpu86.set_reg8 cpu 1 b
+     | 0x1A ->
+       (* 색 페이지 상태 읽기(VGA 전용). BL=페이징 방식, BH=현재 쪽(RBIL INT
+          10/AX=101Ah). 게임은 BX=FFFFh 로 불러 BX 가 바뀌었는지로 VGA 인지
+          가린다 — 이 서브기능이 없는 BIOS 는 BX 를 그대로 둔다. *)
+       Cpu86.set_reg8 cpu 3 (Dos_video.color_paging t.video);
+       Cpu86.set_reg8 cpu 7 (Dos_video.color_page t.video)
      | 0x17 ->
        let first = Cpu86.reg16 cpu 3 land 0xff in
        let count = Cpu86.reg16 cpu 1 in
