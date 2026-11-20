@@ -1,0 +1,3 @@
+(test
+ (name dos_vga_color_page_test)
+ (libraries dosmachine))

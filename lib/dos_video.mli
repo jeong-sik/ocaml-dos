@@ -89,6 +89,13 @@ val attr_palette : t -> int array
 
 val set_attr_palette : t -> int -> int -> unit
 
+val color_paging : t -> int
+(** 모드 제어 레지스터(10h) 비트 7: 0 = 64색 4쪽, 1 = 16색 16쪽. *)
+
+val color_page : t -> int
+(** 색 선택 레지스터(14h)가 그 방식에서 고른 쪽. 4쪽이면 비트 3-2, 16쪽이면
+    비트 3-0. 렌더링은 이 값을 쓰지 않는다. *)
+
 val text_cell : t -> row:int -> col:int -> int
 (** 텍스트 화면 [row] 행 [col] 열에 보이는 글자 바이트의 물리 주소.
     속성은 그 다음 바이트다. 자리는 CRTC 가 정한다 — 시작 주소 + 행 ×

@@ -192,6 +192,7 @@ let crtc_table = function
    바탕을 밝게 해 바탕도 열여섯 색이 된다. *)
 let attr_mode_control = 0x10
 let attr_overscan = 0x11
+let attr_color_select = 0x14
 let mode_control_blink = 0x08
 
 (* 모드를 세울 때 10h 에 싣는 값. SeaBIOS vgasrc/stdvgamodes.c 의 actl_*
@@ -293,6 +294,15 @@ let set_text_blink t on =
   t.attr.(attr_mode_control) <-
     (if on then v lor mode_control_blink else v land lnot mode_control_blink)
 let overscan t = t.attr.(attr_overscan)
+
+(* 모드 제어(10h)의 비트 7(P54S)이 DAC 번호의 윗비트를 어디서 받을지 정한다.
+   0 이면 색 선택(14h) 비트 3-2 가 6-7 이 되는 4쪽 방식, 1 이면 비트 3-0 이
+   4-7 이 되는 16쪽 방식이다. 이 모델은 렌더링에 색 선택을 쓰지 않는다. *)
+let color_paging t = (t.attr.(attr_mode_control) lsr 7) land 1
+
+let color_page t =
+  let select = t.attr.(attr_color_select) in
+  if color_paging t = 0 then (select lsr 2) land 3 else select land 0x0F
 let set_overscan t v = t.attr.(attr_overscan) <- v
 let cga_color_select t = t.cga_color_select
 let set_cga_color_select t v = t.cga_color_select <- v land 0xff
