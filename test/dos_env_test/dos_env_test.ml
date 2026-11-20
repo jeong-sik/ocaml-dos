@@ -111,7 +111,8 @@ let run ?name ?(files = [ ("CHILD.COM", child) ]) ?(setup = fun _ -> ()) image =
   m
 
 let tail name = "\x01\x00" ^ name ^ "\x00"
-let empty_list = "\x00\x00"
+(* 루트 환경의 목록: COMSPEC 하나와 끝의 NUL *)
+let root_list = "COMSPEC=C:\\COMMAND.COM\x00\x00"
 
 let () =
   (* 1) 루트: 이름을 주면 0x500 에 빈 목록과 꼬리 C:\NAME, 없으면 목록만 *)
@@ -119,37 +120,41 @@ let () =
   Dos_machine.load_com ~name:"game.com" m (parent []);
   let root_env = 0x500 * 16 in
   check "root PSP points at 0x500" (word m ((parent_seg * 16) + 0x2C)) 0x500;
-  let want = empty_list ^ tail "C:\\GAME.COM" in
+  let want = root_list ^ tail "C:\\GAME.COM" in
   check_s "root tail" (bytes_at m root_env (String.length want)) want;
   let m = Dos_machine.create () in
-  Dos_machine.mem_write m (root_env + 2) 0x77;
+  Dos_machine.mem_write m (root_env + String.length root_list) 0x77;
   Dos_machine.load_com m (parent []);
-  check_s "no name, no tail" (bytes_at m root_env 3) (empty_list ^ "\x77");
-  (* 0x500..0x5FF 를 넘는 이름은 거절. 바이트 수 = 목록 2 + 워드 2 + "C:\\"
-     3 + 이름 + NUL 1 이라 248 자까지 들어간다. *)
-  let long = String.make 249 'A' in
+  check_s "no name, no tail"
+    (bytes_at m root_env (String.length root_list + 1)) (root_list ^ "\x77");
+  (* 0x500..0x5FF 를 넘는 이름은 거절. 바이트 수 = 목록 24 + 워드 2 + "C:\\"
+     3 + 이름 + NUL 1 이라 226 자까지 들어간다. *)
+  let fits = 0x100 - (String.length root_list + 2 + 3 + 1) in
+  check "the longest name is 226 characters" fits 226;
   check "a name past the root environment is refused"
-    (try Dos_machine.load_com ~name:long (Dos_machine.create ()) (parent []); 0
+    (try Dos_machine.load_com ~name:(String.make (fits + 1) 'A') (Dos_machine.create ()) (parent []); 0
      with Invalid_argument _ -> 1)
     1;
   check "a name filling the root environment fits"
-    (try Dos_machine.load_com ~name:(String.make 248 'A') (Dos_machine.create ()) (parent []); 1
+    (try Dos_machine.load_com ~name:(String.make fits 'A') (Dos_machine.create ()) (parent []); 1
      with Invalid_argument _ -> 0)
     1
 
 let () =
   (* 2) EPB 환경 0: 부모 환경의 목록(꼬리는 빼고)을 새 블록에 옮기고 자식
      꼬리를 붙인다. 이름은 호출자가 준 그대로(소문자)다. 블록은 부모 블록
-     바로 뒤(0x1020), 자식 PSP 는 그 다음 문단. *)
+     바로 뒤(0x1020), 자식 PSP 는 그 뒤. 목록 24 + 꼬리 2 + 이름 10 = 36
+     바이트라 블록은 3 문단이고 PSP 는 0x1023 이다. *)
   let m =
     run ~name:"PARENT.COM" (parent [ Shrink 0x20; Exec { name = "child.com"; env = 0 } ])
   in
   check "child code" (word m exec_ax_slot) child_code;
   let env = word m child_env_slot in
   check "child environment block" env 0x1020;
-  check "child PSP after its environment" (word m child_cs_slot) 0x1021;
-  check_s "child environment bytes" (bytes_at m (env * 16) 14)
-    (empty_list ^ tail "child.com")
+  check "child PSP after its environment" (word m child_cs_slot) 0x1023;
+  check_s "child environment bytes"
+    (bytes_at m (env * 16) (String.length root_list + 12))
+    (root_list ^ tail "child.com")
 
 let () =
   (* 3) EPB 가 준 환경을 옮긴다 — 같은 세그먼트를 쓰지 않는다. 목록 9 바이트
@@ -224,8 +229,9 @@ let () =
   check "no environment, PSP at the first free paragraph" (word m child_cs_slot) 0x1020
 
 let () =
-  (* 7) 상주 종료는 환경 블록을 남긴다(RBIL INT 21/31). TSR 의 환경 0x1020,
-     PSP 0x1021, 남긴 PSP 블록 (0x1021, 0x13). 다음 자식의 환경은 0x1034. *)
+  (* 7) 상주 종료는 환경 블록을 남긴다(RBIL INT 21/31). TSR 의 환경 0x1020
+     (3 문단), PSP 0x1023, 남긴 PSP 블록 (0x1023, 0x13). 다음 자식의 환경은
+     0x1036. *)
   let tsr = "\xba\x20\x01\xcd\x27" in                     (* mov dx,0x120; int 27h *)
   let m =
     run ~files:[ ("CHILD.COM", child); ("TSR.COM", tsr) ]
@@ -234,7 +240,7 @@ let () =
            Exec { name = "CHILD.COM"; env = 0 } ])
   in
   check "child after a TSR" (word m (exec_ax_slot + 2)) child_code;
-  check "TSR environment stays" (word m child_env_slot) 0x1034
+  check "TSR environment stays" (word m child_env_slot) 0x1036
 
 let () =
   if !failed = 0 then print_endline "dos environment: all passed"
