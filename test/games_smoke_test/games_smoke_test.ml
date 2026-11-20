@@ -107,6 +107,14 @@ let games_386 = [
       { press = []; until = Text "Select Sound Card"; budget = 40_000_000 };
       { press = [ "enter"; "enter"; "down"; "down"; "enter" ];
         until = Graphics { mode = 0x13; min_colors = 3 }; budget = 100_000_000 } ] };
+  (* 시작하자마자 66h 접두를 쓴다. 제목 메뉴는 모드 13h 에 100색이 넘는다 *)
+  { name = "superworms"; exe = "SW.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x13; min_colors = 64 }; budget = 40_000_000 } ] };
+  (* 인트로 애니메이션(OPEN2B.FLI)이 모드 13h 에 100색까지 올라간다 *)
+  { name = "rotm"; exe = "ROTM.EXE";
+    stages = [
+      { press = []; until = Graphics { mode = 0x13; min_colors = 64 }; budget = 40_000_000 } ] };
 ]
 
 let contains text needle =
