@@ -23,6 +23,12 @@ let gc_color_dont_care = 7
 let gc_bit_mask = 8
 let gc_count = 9
 
+(* GC05 bit 6: 256색 시프트. 서 있으면 평면 넷의 바이트가 그대로 한 픽셀(13h·
+   Mode X)이고, 꺼져 있으면 비트마다 한 픽셀인 16색 평면 모드다. 게임은 BIOS
+   모드를 바꾸지 않고 이 비트와 CRTC·속성 컨트롤러를 직접 써서 256색 화면과
+   16색 화면을 오간다(Pinball Fantasies). *)
+let gc_shift256 = 0x40
+
 (* 시퀀서: 2 번이 평면 쓰기 마스크, 4 번이 메모리 모드 *)
 let seq_map_mask = 2
 let seq_memory_mode = 4
@@ -174,6 +180,12 @@ let spec = function
 
 let kind_of_mode m = let k, _, _, _ = spec m in k
 
+(* 그래픽 모드의 그림 방식은 GC05 bit 6 을 따른다. 텍스트와 CGA 는 그대로다. *)
+let kind_of_shift kind ~gc_mode =
+  match kind with
+  | Planar | Linear256 -> if gc_mode land 0x40 <> 0 then Linear256 else Planar
+  | (Text | Cga4 | Cga2) as k -> k
+
 (* 모드를 세울 때 CRTC 에 싣는 표. CGA 그래픽 화면은 CRTC 를 거치지 않고
    모드표에서 그리므로 표를 싣지 않는다. *)
 let crtc_table = function
@@ -270,10 +282,10 @@ let crtc_dims t ~dots =
   ((r crtc_h_display_end + 1) * dots, max 1 (lines / per_row))
 
 let dims t =
-  match spec t.mode with
-  | Planar, _, _, _ -> crtc_dims t ~dots:dots_16
-  | Linear256, _, _, _ -> crtc_dims t ~dots:dots_256
-  | (Text | Cga4 | Cga2), w, h, _ -> (w, h)
+  match t.kind with
+  | Planar -> crtc_dims t ~dots:dots_16
+  | Linear256 -> crtc_dims t ~dots:dots_256
+  | Text | Cga4 | Cga2 -> let _, w, h, _ = spec t.mode in (w, h)
 let text_cols t = let _, _, _, c = spec t.mode in c
 
 (* BIOS 글자 행: 480줄 모드는 8x16 글자로 30행, 나머지는 25행. 글자
@@ -333,6 +345,7 @@ let set_mode t m ~clear =
   t.seq.(seq_map_mask) <- 0x0F;
   t.gc.(gc_bit_mask) <- 0xFF;
   t.seq.(seq_memory_mode) <- memory_mode_of t.kind;
+  if t.kind = Linear256 then t.gc.(gc_mode) <- gc_shift256;
   load_crtc_table t.crtc m;
   Array.blit (default_attr m) 0 t.attr 0 attr_count;
   t.cga_color_select <- 0x30;
@@ -495,7 +508,12 @@ let port_out t p v =
   | 0x3C4 -> t.seq_index <- v land 0x1f; true
   | 0x3C5 -> if t.seq_index < seq_count then t.seq.(t.seq_index) <- v; true
   | 0x3CE -> t.gc_index <- v land 0x1f; true
-  | 0x3CF -> if t.gc_index < gc_count then t.gc.(t.gc_index) <- v; true
+  | 0x3CF ->
+    if t.gc_index < gc_count then begin
+      t.gc.(t.gc_index) <- v;
+      if t.gc_index = gc_mode then t.kind <- kind_of_shift t.kind ~gc_mode:v
+    end;
+    true
   | 0x3C0 ->
     (* 한 포트가 번갈아 index 와 data 를 받는다. 어느 차례인지는 이
        어댑터가 기억하고, 0x3DA 를 읽으면 index 차례로 되돌아간다. *)
@@ -670,15 +688,16 @@ let screen_digest t =
       h := digest_step !h (Char.code (Bytes.get bytes (base + i)))
     done
   in
-  (match spec t.mode with
-   | Text, _, _, cols ->
+  (match t.kind with
+   | Text ->
+     let _, _, _, cols = spec t.mode in
      let cell = text_cell t in
      for row = 0 to text_rows t - 1 do
        for col = 0 to cols - 1 do over t.mem (cell ~row ~col) 2 done
      done
-   | (Cga4 | Cga2), _, _, _ -> over t.mem cga_base 0x4000
-   | Planar, _, _, _ -> scan_chars t ~dots:dots_16 (fun a -> h := digest_step !h (char_planes t a))
-   | Linear256, _, _, _ -> iter256 t (fun c -> h := digest_step !h c));
+   | Cga4 | Cga2 -> over t.mem cga_base 0x4000
+   | Planar -> scan_chars t ~dots:dots_16 (fun a -> h := digest_step !h (char_planes t a))
+   | Linear256 -> iter256 t (fun c -> h := digest_step !h c));
   !h
 
 let get_pixel t ~x ~y =
@@ -724,7 +743,7 @@ module C = Dos_snap_codec
    both name the same range for each field. *)
 let write_state w t =
   let { mem = _ (* the machine's RAM: the machine writes it *);
-        planes; latches; mode; kind = _ (* derived from mode *); gc_index; gc; seq_index; seq; attr_index;
+        planes; latches; mode; kind = _ (* derived from mode and gc.(5) *); gc_index; gc; seq_index; seq; attr_index;
         attr_is_data; attr; cga_color_select; crtc_index; crtc } = t
   in
   let put what v = C.put w ~what C.byte v in
@@ -747,9 +766,9 @@ let read_state r t =
   Array.iter (C.fill_bytes r) t.planes;
   C.fill_int_array r ~what:"latches" C.byte t.latches;
   t.mode <- get "video mode";
-  t.kind <- kind_of_mode t.mode;
   t.gc_index <- get "gc_index";
   C.fill_int_array r ~what:"gc" C.byte t.gc;
+  t.kind <- kind_of_shift (kind_of_mode t.mode) ~gc_mode:t.gc.(gc_mode);
   t.seq_index <- get "seq_index";
   C.fill_int_array r ~what:"seq" C.byte t.seq;
   t.attr_index <- get "attr_index";

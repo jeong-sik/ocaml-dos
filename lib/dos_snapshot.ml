@@ -99,8 +99,10 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    38: a handle record carries its access mode and whether EXEC's child
    gets it, between the target and the position.
    39: port 3D9h's value lives only in the video state; the ports no
-   longer carry a copy. *)
-let format_version = 39
+   longer carry a copy.
+   40: the video state's picture kind follows graphics controller
+   register 5 bit 6; 13h loads that register as 40h. *)
+let format_version = 40
 
 let digest_hex_len = 32
 let checksum_len = 16
