@@ -5,5 +5,5 @@
  (name dosharness)
  (public_name ocaml-dos.harness)
  (wrapped false)
- (modules dos_scenario host_tree)
- (libraries dosmachine))
+ (modules cpu_flag dos_scenario host_tree)
+ (libraries cpu86core dosmachine))
