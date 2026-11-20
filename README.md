@@ -156,7 +156,7 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 | 66h RET | FFFFh 위 EIP 는 INT 13 이다 |
 | 67h SIB 인덱스 없음(4) | 배율이 베이스에 곱해진다 |
 
-`dosboot --cpu 386` 이면 기계가 `I80386` 으로 돈다. 32 비트 레지스터·FS·GS·
+`dosboot --cpu 386` 과 `dosplay --cpu 386` 이면 기계가 `I80386` 으로 돈다. 32 비트 레지스터·FS·GS·
 0Fh 명령을 쓰는 게임이 돌고, 스냅숏도 386 상태를 담는다. 보호 모드는 아직
 없다(RFC 0005).
 
@@ -600,6 +600,10 @@ dune build --root . --profile release
   게임 설정이 Sound Blaster 인데 카드가 없으면 게임이 DSP 를 기다리며
   멈춘다(The Even More Incredible Machine 는 제목 화면 전에 멈춘다).
   `--state` 로 이어 할 때는 상태 파일에 든 기계를 쓰므로 이 옵션이 필요 없다.
+- `--cpu 286|386` 은 CPU 모델을 고른다(`dosboot --cpu` 와 같다). 기본은 286
+  이다. 386 이 필요한 게임은 `--cpu 386` 없이 시작하면 첫 386 명령에서
+  `Cpu86_state.Unsupported` 예외로 죽는다. `--state` 로 이어 할 때는 상태
+  파일에 든 모델을 쓴다.
 - `--cpu-mhz MHZ` 는 CPU 속도를 바꾼다(`dosboot --cpu-mhz` 와 같은 변환: PIT
   정수배로 맞추고 1.19~1193MHz 를 받는다). 사이클은 8086 명령표 값이라
   기본 4.77MHz 는 386 시대 게임에게 느리다. 소리를 타이머 인터럽트로
