@@ -350,6 +350,7 @@ let init_memory t ~psp_seg ~block_end =
 (* PSP 칸(RBIL INT 21/AH=26h 표 01378). 값은 MS-DOS 4.0 MISC.ASM SETMEM·
    $Dup_PDB 가 적는 것이다. *)
 let psp_saved_vectors = 0x0A   (* IVT 22h·23h·24h 사본: 종료, Ctrl-Break, 치명 오류 *)
+let psp_len = 0x100            (* PSP 크기: 뒤에 COM 이 실린다 *)
 let psp_parent = 0x16
 let psp_previous = 0x38        (* 이전 PSP. SHARE 가 쓰고 기본은 FFFFFFFFh *)
 let psp_dos_call = 0x50        (* INT 21h; RETF — far call 로 부르는 DOS 입구 *)
@@ -444,7 +445,9 @@ let child_environment t ~source ~name =
 
 let env_word = function No_environment -> 0 | Environment seg -> seg
 
-let write_psp ?(init = true) ?(block_end = conv_mem_top) ~env t psp_seg =
+(* PSP 의 고정 칸: INT 20h, 메모리 끝, IVT 사본, 부모, 이전 PSP, DOS 입구.
+   MS-DOS 4.0 MISC.ASM SETMEM 이 쓰는 칸이다. *)
+let write_psp_header t ~parent ~block_end psp_seg =
   let psp = psp_seg * 16 in
   wr8 t psp 0xCD;                      (* int 20h *)
   wr8 t (psp + 1) 0x20;
@@ -452,18 +455,33 @@ let write_psp ?(init = true) ?(block_end = conv_mem_top) ~env t psp_seg =
   for i = 0 to saved_vectors_len - 1 do
     wr8 t (psp + psp_saved_vectors + i) (rd8 t (saved_vectors_ivt + i))
   done;
-  (* 자식은 부른 쪽, 루트는 자기 자신이 부모다. COMMAND.COM 처럼 사슬의
-     끝이 저를 가리켜, 부모를 따라가는 프로그램이 여기서 멈춘다. *)
-  wr16 t (psp + psp_parent) (if init then psp_seg else t.psp_seg);
+  wr16 t (psp + psp_parent) parent;
   wr16 t (psp + psp_previous) no_previous_psp;
   wr16 t (psp + psp_previous + 2) no_previous_psp;
-  List.iteri (fun i b -> wr8 t (psp + psp_dos_call + i) b) dos_call_code;
+  List.iteri (fun i b -> wr8 t (psp + psp_dos_call + i) b) dos_call_code
+
+let write_psp ?(init = true) ?(block_end = conv_mem_top) ~env t psp_seg =
+  let psp = psp_seg * 16 in
+  (* 자식은 부른 쪽, 루트는 자기 자신이 부모다. COMMAND.COM 처럼 사슬의
+     끝이 저를 가리켜, 부모를 따라가는 프로그램이 여기서 멈춘다. *)
+  write_psp_header t ~parent:(if init then psp_seg else t.psp_seg) ~block_end psp_seg;
   wr16 t (psp + 0x2C) env;             (* 환경 세그먼트 *)
   wr8 t (psp + 0x80) 0;                (* 커맨드라인 길이 0 *)
   wr8 t (psp + 0x81) 0x0D;
   t.psp_seg <- psp_seg;
   t.dta <- physical psp_seg 0x80;      (* 기본 DTA = PSP:0x80 *)
   if init then init_memory t ~psp_seg ~block_end
+
+(* AH=55h — MS-DOS 4.0 MISC.ASM $Dup_PDB 와 SETMEM. DX = 새 PSP 의 세그먼트,
+   SI = 그 블록 바로 위 세그먼트. 현재 PSP 의 앞 100h 바이트를 그대로
+   복사한 뒤(환경 세그먼트·커맨드라인·FCB 도 따라간다) 고정 칸을 새로 쓰고,
+   부모는 지금의 PSP, 현재 PSP 는 새 것으로 둔다. DTA 는 건드리지 않는다.
+   핸들은 이 기계가 PSP 가 아니라 한 표에 두니 따로 복제하지 않는다. *)
+let create_child_psp t ~seg ~block_end =
+  let src = t.psp_seg * 16 and dst = seg * 16 in
+  for i = 0 to psp_len - 1 do wr8 t (dst + i) (rd8 t (src + i)) done;
+  write_psp_header t ~parent:t.psp_seg ~block_end seg;
+  t.psp_seg <- seg
 
 (* COM: 실기 DOS 는 PSP 를 독립 세그먼트에 준다. 세그 0 에 두면 PSP 가
    IVT·BDA 와 겹쳐 부팅 스텁을 지운다(실측: PSP:0x80 쓰기가 IVT[20h]
@@ -709,6 +727,25 @@ let restore_saved_vectors t psp_seg =
     wr8 t (saved_vectors_ivt + i) (rd8 t ((psp_seg * 16) + psp_saved_vectors + i))
   done
 
+(* EXEC 를 거치지 않고 만든 PSP(AH=55h 로 만들어 AH=50h 로 옮겨 탄 로더의
+   자식)가 끝날 때 돌아갈 곳. MS-DOS 4.0 CTRLC.ASM reset_environment 는 끝나는
+   PSP 의 부모를 현재 PSP 로 되돌리고 그 PSP 의 종료 주소(0Ah)로 돈다.
+   부모가 자기 자신인 루트와, 종료 주소가 기본 IRET 스텁(셸로 돌아간다는
+   뜻)인 PSP 는 None 이다. 이때 기계가 멈춘다.
+   WORKAROUND: SS:SP 와 레지스터를 부모의 INT 21h 시점으로 되돌리지 않고,
+   끝난 PSP 의 블록·핸들도 풀지 않는다(블록에 주인이 없다). 종료 주소 쪽이
+   스택을 스스로 다시 잡는 로더(DEMO.COM)만 맞다. 근본 해결: INT 21h 마다
+   SS:SP 를 현재 PSP 의 2Eh 에 쓰고 레지스터를 그 스택에 저장하며, 블록에
+   주인 PSP 를 단다. *)
+let foreign_terminate_target t =
+  let parent = rd16 t ((t.psp_seg * 16) + psp_parent) in
+  if parent = t.psp_seg then None
+  else begin
+    restore_saved_vectors t t.psp_seg;
+    if Dos_bios.ivt_is_iret_stub t 0x22 then None
+    else Some (rd16 t (saved_vectors_ivt + 2), rd16 t saved_vectors_ivt, parent)
+  end
+
 (* 자식 종료. 프레임이 없으면(루트) 기계가 멈춘다. 있으면 부모를
    되살린다 — [keep] 은 TSR(AH=31h·INT 27h) 이 자기 블록을 남기는
    크기다. 자식이 연 핸들은 닫는다(쓴 데이터는 마운트 표로 돌아간다),
@@ -716,8 +753,22 @@ let restore_saved_vectors t psp_seg =
 let child_exit t ~code ~keep =
   match t.exec_frames with
   | [] ->
-    t.exited <- true;
-    t.exit_code <- code
+    (match foreign_terminate_target t with
+     | None ->
+       t.exited <- true;
+       t.exit_code <- code
+     | Some (seg, off, parent) ->
+       (* 상주 종료(AH=31h)는 PSP 가 든 블록만 [keep] 문단으로 줄인다. 블록을
+          키우지는 않는다: 위 블록과 겹친다 *)
+       (match keep with
+        | Some paras ->
+          t.blocks <- List.map (fun (s, n) -> if s = t.psp_seg then (s, min paras n) else (s, n)) t.blocks
+        | None -> ());
+       t.last_child_code <- code;
+       t.psp_seg <- parent;
+       Cpu86.set_seg t.cpu 1 seg;
+       Cpu86.set_ip t.cpu off;
+       Cpu86.set_flags t.cpu (Cpu86.flags t.cpu lor Cpu86.f_interrupt))
   | f :: rest ->
     t.exec_frames <- rest;
     t.last_child_code <- code;
@@ -2003,6 +2054,7 @@ let service_immediate t =
     (* DISP.ASM $SET_CURRENT_PDB: MOV [CurrentPDB],BX 하고 IRET. 다른 레지스터와
        CF 는 그대로다. DTA 도 건드리지 않는다 *)
     t.psp_seg <- Cpu86.reg16 cpu 3
+  | 0x55 -> create_child_psp t ~seg:(Cpu86.reg16 cpu 2) ~block_end:(Cpu86.reg16 cpu 6)
   | 0x51 | 0x62 ->
     (* DISP.ASM 은 둘 다 $GET_CURRENT_PDB 로 보낸다: BX 만 쓰고 IRET.
        51h 는 DOS 2 때의 내부 이름 *)
