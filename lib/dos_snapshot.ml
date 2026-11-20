@@ -101,8 +101,9 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    39: port 3D9h's value lives only in the video state; the ports no
    longer carry a copy.
    40: the video state's picture kind follows graphics controller
-   register 5 bit 6; 13h loads that register as 40h. *)
-let format_version = 40
+   register 5 bit 6; 13h loads that register as 40h.
+   41: a handle record may name the EMM device (target tag 4). *)
+let format_version = 41
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -332,7 +333,7 @@ let handle_pool t =
 
 let put_buffer w buf = C.put_bytes w !buf
 
-let target_tag = C.range 0 3
+let target_tag = C.range 0 4
 
 let access_tag = C.range 0 2
 
@@ -343,7 +344,8 @@ let put_handle w (target, access, inheritable, pos) =
      tag 0; C.put_string w hname; C.put w ~what:"handle buffer" C.count buffer_idx
    | Saved_device Con -> tag 1
    | Saved_device Aux -> tag 2
-   | Saved_device Prn -> tag 3);
+   | Saved_device Prn -> tag 3
+   | Saved_device Emm -> tag 4);
   C.put w ~what:"handle access" access_tag
     (match access with Read_only -> 0 | Write_only -> 1 | Read_write -> 2);
   C.put_bool w inheritable;
@@ -685,6 +687,7 @@ let read_payload r =
              | 1 -> Device Con
              | 2 -> Device Aux
              | 3 -> Device Prn
+             | 4 -> Device Emm
              | _ -> C.fail "invalid handle target"
            in
            let access =

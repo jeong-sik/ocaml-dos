@@ -11,6 +11,7 @@ let attribute = function
   | Con -> 0x8013    (* character device, INT 29h, standard output, standard input *)
   | Aux -> 0x8000    (* character device *)
   | Prn -> 0xA040    (* character device, output until busy, generic IOCTL *)
+  | Emm -> 0x8000    (* character device; 4402h and 4403h are not served, so no IOCTL bit *)
 
 (* Opening a device sets the low byte of [sf_flags] to the attribute's low
    byte with C0h (device, not at end of file) added (IOCHK). IOCHK also
@@ -36,7 +37,7 @@ let input_ready t hd =
   match hd.target with
   | File { data; _ } -> hd.pos < Bytes.length !data
   | Device Con -> console_ready t
-  | Device (Aux | Prn) -> true
+  | Device (Aux | Prn | Emm) -> true
 
 let status_byte ready = if ready then 0xFF else 0x00
 

@@ -11,7 +11,7 @@
 open Dos_state
 module P = Dos_ems_pages
 
-let emm_name = "EMMXXXX0"
+let emm_name = Dos_state.emm_device_name
 let emm_version = 0x40                           (* 4.0 *)
 let page_frame = P.page_frame
 let frame_pages = P.frame_pages
