@@ -57,6 +57,7 @@ let crtc_v_display_end = 0x12
 let crtc_offset = 0x13
 let crtc_underline = 0x14
 let crtc_mode_control = 0x17
+let crtc_line_compare = 0x18
 
 (* 0x11 bit7 이 서 있으면 0-7 번은 쓰기가 막힌다. 7 번(overflow)의 bit4
    (line compare 의 9번째 비트)만 예외다. *)
@@ -69,6 +70,8 @@ let overflow_vde8_shift = 1          (* 07h bit1 = 표시 끝 bit8 *)
 let overflow_vde9_shift = 6          (* 07h bit6 = 표시 끝 bit9 *)
 let max_scan_rows = 0x1f             (* 09h: 행 하나의 줄 수 - 1 *)
 let max_scan_double = 0x80           (* 09h: 두 배 주사 *)
+let max_scan_line_compare9 = 0x40    (* 09h bit6 = line compare bit9 *)
+let overflow_line_compare8_shift = 4 (* 07h bit4 = line compare bit8 *)
 let underline_dword = 0x40           (* 14h: dword 주소 *)
 let mode_byte = 0x40                 (* 17h: 1 = byte, 0 = word *)
 let mode_wrap_ma15 = 0x20            (* 17h: word 모드에서 MA15 를 0번 비트로 *)
@@ -266,6 +269,10 @@ let kind t = t.kind
    비트)를 한 행이 차지하는 줄 수로 나눈 값이다. 행 하나는 0x09 의 아래 다섯
    비트 + 1 줄이고, bit7(scan doubling)이 서 있으면 그 두 배다. 13h 부팅값은
    320x200 이고, Mode X 는 세로 레지스터를 바꿔 320x240 을 만든다. *)
+let scan_lines_per_row t =
+  let msl = t.crtc.(crtc_max_scan_line) in
+  ((msl land max_scan_rows) + 1) * (if msl land max_scan_double <> 0 then 2 else 1)
+
 let crtc_dims t ~dots =
   let r i = t.crtc.(i) in
   let o = r crtc_overflow in
@@ -275,11 +282,7 @@ let crtc_dims t ~dots =
      lor (((o lsr overflow_vde9_shift) land 1) lsl 9))
     + 1
   in
-  let msl = r crtc_max_scan_line in
-  let per_row =
-    ((msl land max_scan_rows) + 1) * (if msl land max_scan_double <> 0 then 2 else 1)
-  in
-  ((r crtc_h_display_end + 1) * dots, max 1 (lines / per_row))
+  ((r crtc_h_display_end + 1) * dots, max 1 (lines / scan_lines_per_row t))
 
 let dims t =
   match t.kind with
@@ -622,16 +625,35 @@ let start_address t = (t.crtc.(crtc_start_high) lsl 8) lor t.crtc.(crtc_start_lo
    [scan_address] 가 곱한다. *)
 let row_stride t = t.crtc.(crtc_offset) * 2
 
+(* line compare(18h, 07h bit4 가 8번째, 09h bit6 이 9번째 비트)는 화면을 가로로
+   나누는 줄 번호다. 그 줄 다음부터 CRTC 는 주소 0 에서 다시 읽는다 — 게임이
+   위쪽은 스크롤하면서 아래 점수판은 붙박이로 둘 때 쓴다(FreeVGA CRTC 18h). *)
+let line_compare t =
+  let o = t.crtc.(crtc_overflow) and msl = t.crtc.(crtc_max_scan_line) in
+  t.crtc.(crtc_line_compare)
+  lor (((o lsr overflow_line_compare8_shift) land 1) lsl 8)
+  lor (if msl land max_scan_line_compare9 <> 0 then 1 lsl 9 else 0)
+
+(* 행 y 가 읽기 시작하는 MA. 이 모델의 행은 [scan_lines_per_row] 줄이고,
+   나뉜 화면은 행 (line compare + 1) / 그 줄 수 에서 시작한다(dosbox-staging
+   vga_draw.cpp 의 split_line 과 같은 식). 그 행부터는 시작 주소 대신
+   0 에서 센다. 값이 표시 행 수 이상이면 어느 행도 나뉘지 않는다. 픽셀
+   패닝은 모델에 없으므로 나뉜 화면의 주소는 항상 0 이다. *)
+let row_origin t =
+  let start = start_address t and stride = row_stride t in
+  let split = (line_compare t + 1) / scan_lines_per_row t in
+  fun y -> if y >= split then (y - split) * stride else start + (y * stride)
+
 (* CRTC 가 화면을 훑는 차례대로 글자 하나가 읽는 평면 주소를 [f] 에
-   넘긴다. 행 y 는 MA = 시작 주소 + y × [row_stride] 에서 시작하고, 글자
-   하나가 MA 를 하나 늘린다. 한 행의 글자 수는 가로를 [dots] 로 나눈
-   값이다. split screen(line compare)과 픽셀 패닝은 모델에 없다. *)
+   넘긴다. 행 y 는 MA = [row_origin] y 에서 시작하고(시작 주소 + y ×
+   [row_stride], 나뉜 화면에서는 0 부터), 글자 하나가 MA 를 하나 늘린다.
+   한 행의 글자 수는 가로를 [dots] 로 나눈 값이다. 픽셀 패닝은 모델에 없다. *)
 let scan_chars t ~dots f =
   let w, h = crtc_dims t ~dots in
   let address = scan_address t in
-  let start = start_address t and stride = row_stride t in
+  let origin = row_origin t in
   for y = 0 to h - 1 do
-    let row = start + (y * stride) in
+    let row = origin y in
     for c = 0 to (w / dots) - 1 do
       f (address (row + c))
     done
@@ -739,7 +761,7 @@ let get_pixel t ~x ~y =
     else Char.code (Bytes.get t.planes.(t.gc.(gc_read_map) land 3) off)
 
 let screen_pixel t ~x ~y =
-  let ma ~dots = start_address t + (y * row_stride t) + (x / dots) in
+  let ma ~dots = row_origin t y + (x / dots) in
   match kind t with
   | Linear256 -> plane_byte t (x land 3) (scan_address t (ma ~dots:dots_256))
   | Planar ->

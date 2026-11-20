@@ -344,7 +344,10 @@ CGA 그래픽(4-6)은 CRTC 를 거치지 않고 모드표대로 그린다. INT 1
 CRTC 와 상관없이 모드표의 줄 너비로 점을 찍고 읽는다.
 chain-4 쓰기는 맵 마스크·그래픽 컨트롤러를 거치지 않고 바이트를 그대로
 둔다 — 실기가 chain-4 에서 맵 마스크를 어떻게 쓰는지는 확인하지 못했다.
-split screen(line compare)과 픽셀 패닝은 아직 없다.
+split screen 은 16색·256색 그래픽에서만 따른다: line compare(CRTC 18h,
+07h bit4, 09h bit6)로 정한 행부터 주소 0 에서 다시 읽는다(행 번호는
+(line compare + 1) / 행당 줄 수, dosbox-staging 와 같은 식). 텍스트 화면과
+픽셀 패닝은 아직 없다.
 
 텍스트는 쪽 여덟 장을 가진다(SeaBIOS `vgasrc/vgabios.c` 규칙).
 

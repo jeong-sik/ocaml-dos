@@ -1,0 +1,3 @@
+(test
+ (name dos_vga_split_test)
+ (libraries dosmachine))
