@@ -1,0 +1,3 @@
+(test
+ (name cpu_flag_test)
+ (libraries cpu86core dosmachine dosharness))

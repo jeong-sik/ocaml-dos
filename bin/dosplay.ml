@@ -199,6 +199,7 @@ let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
   let fps = ref default_fps and mouse = ref true and state = ref "" and save_dir = ref "" in
   let audio_cmd = ref "" and sound_blaster = ref false and cpu_mhz = ref None in
+  let cpu = ref None in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
@@ -211,6 +212,13 @@ let () =
        "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다");
       ("--save-dir", Arg.Set_string save_dir,
        "DIR  게임이 바꾼 파일을 끝날 때 여기에 쓴다. 시작할 때 여기 파일을 --dir 위에 싣는다");
+      ("--cpu", Arg.String (fun s ->
+         match Cpu_flag.parse s with
+         | Ok model -> cpu := Some model
+         | Error e ->
+           prerr_endline e;
+           exit 2),
+       "286|386  CPU 모델(기본 286). 386 이면 32비트 레지스터·FS·GS·0Fh 명령이 돈다. --state 로 이어 할 때는 상태 파일의 기계를 쓴다");
       ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
        "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다. --state 로 되살린 기계는 저장된 속도를 쓴다");
       ("--sound-blaster", Arg.Set sound_blaster,
@@ -248,7 +256,7 @@ let () =
   in
   let originals = ref [] in
   let fresh () =
-    let m = Dos_machine.create ~speed ~sound_blaster:!sound_blaster () in
+    let m = Dos_machine.create ?model:!cpu ~speed ~sound_blaster:!sound_blaster () in
     List.iter (mount_dir m) (List.rev !dirs);
     List.iter
       (fun spec ->

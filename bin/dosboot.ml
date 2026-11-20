@@ -151,12 +151,6 @@ let hex s =
 let audio_flush_steps = 100_000
 let audio_sample_bytes = 2
 
-(* --cpu 의 값: 정확히 같은 글자만 받는다. *)
-let model_of_flag = function
-  | "286" -> Some Cpu86.I80286
-  | "386" -> Some Cpu86.I80386
-  | _ -> None
-
 let () =
   let cpu = ref None in
   let com = ref "" and exe = ref "" and demo = ref "" and steps = ref 100000
@@ -183,10 +177,10 @@ let () =
        "NAME=PATH  끝난 뒤 게스트가 쓴 파일을 호스트로 꺼낸다");
       ("--steps", Arg.Int (fun n -> steps := n), "N  최대 machine step 수 (입력 대기·idle 포함)");
       ("--cpu", Arg.String (fun s ->
-         match model_of_flag s with
-         | Some model -> cpu := Some model
-         | None ->
-           prerr_endline ("bad --cpu " ^ s ^ " (want 286 or 386)");
+         match Cpu_flag.parse s with
+         | Ok model -> cpu := Some model
+         | Error e ->
+           prerr_endline e;
            exit 2),
        "286|386  CPU 모델 (기본 286). 386 이면 32 비트 레지스터·FS·GS·0Fh 명령이 돈다");
       ("--feed", Arg.Set_string feed,
