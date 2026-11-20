@@ -1,0 +1,3 @@
+(test
+ (name dos_int15_joystick_test)
+ (libraries dosmachine))

@@ -1378,6 +1378,15 @@ let system t =
   | 0x88 -> Cpu86.set_reg16 cpu 0 extended_memory_kb; set_cf t false
   | 0x4F -> set_cf t true (* 키보드 가로채기: 그 스캔 코드를 그대로 쓰라 *)
   | 0x90 | 0x91 -> () (* 장치 바쁨·끝남 알림: SeaBIOS 도 아무것도 안 한다 *)
+  | 0x84 when Cpu86.reg16 cpu 2 <= 1 ->
+    (* 조이스틱 지원(RBIL INT 15/AH=84h). DX=0 은 게임 포트의 윗 네 비트(버튼),
+       DX=1 은 네 축의 위치(AX BX CX DX)를 CF=0 으로 준다. 이 기계는 포트 201h 가
+       조이스틱 없는 값(축 비트 0, 버튼 비트 1)이라 위치는 모두 0 이고 버튼은
+       모두 뗀 상태다. RBIL 은 게임 포트가 없으면 DX=0 이 AL=00h 라고 적는다;
+       이 모델은 BIOS 가 포트를 읽는 대로 포트 값을 준다. *)
+    if Cpu86.reg16 cpu 2 = 0 then Cpu86.set_reg8 cpu 0 Dos_ports.game_port_released
+    else List.iter (fun r -> Cpu86.set_reg16 cpu r 0) [ 0; 1; 2; 3 ];
+    set_cf t false
   | 0x83 -> event_wait t
   | _ ->
     (* 집계는 AX 가 바뀌기 전에 올린다 *)

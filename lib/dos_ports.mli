@@ -23,6 +23,10 @@ type speed
 val pit_hz : int
 (** PIT 입력 클록(1.193182MHz). 한 펄스가 PIT 한 틱이다. *)
 
+val game_port_released : int
+(** 포트 201h 가 주는 값: 버튼 넷이 떼어지고(비트 4-7 = 1) 축 넷이
+    방전된(비트 0-3 = 0) 조이스틱 없는 상태. *)
+
 val pc_speed : speed
 (** IBM PC 의 4.77MHz(PIT 한 틱에 4 사이클). *)
 
