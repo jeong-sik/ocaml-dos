@@ -135,9 +135,15 @@ let le16 v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xff))
 
    틱이 하루치 이상이 되면 0 으로 돌리고 0x470 을 하나 올린다(SeaBIOS
    src/clock.c clock_update). DOS 는 INT 1Ah AH=00h 가 돌려주는 이 값을
-   보고 날짜를 넘긴다. *)
+   보고 날짜를 넘긴다.
+
+   AX·DX·DS 를 저장한다. INT 1Ch 훅이 바꾼 레지스터는 인터럽트를 받은
+   프로그램에 보이면 안 된다. SeaBIOS 는 handle_08 이 0 으로 채운 별도
+   레지스터 묶음으로 INT 1Ch 를 불러 이 격리를 얻는다. Castle Adventure
+   의 INT 1Ch 훅은 DX 를 저장하지 않고 `xor dx,dx` 로 지우므로, DX 를
+   저장하지 않으면 틱이 끼어든 곳의 DX 가 0 이 된다. *)
 let bios_int8 =
-  "\x1e\x50"                        (* push ds; push ax *)
+  "\x1e\x50\x52"                    (* push ds; push ax; push dx *)
   ^ "\x31\xc0\x8e\xd8"              (* xor ax,ax; mov ds,ax *)
   ^ "\xa1\x6c\x04\x40\xa3\x6c\x04"  (* mov ax,[046C]; inc ax; mov [046C],ax *)
   ^ "\x75\x04"                      (* jnz +4 — 자리올림 없으면 고워드 skip *)
@@ -152,7 +158,7 @@ let bios_int8 =
   ^ "\xfe\x06\x70\x04"              (* inc byte [0470] *)
   ^ "\xcd\x1c"                      (* hook: int 1Ch — 사용자 틱 훅 *)
   ^ "\xb0\x20\xe6\x20"              (* mov al,20h; out 20h,al (EOI) *)
-  ^ "\x58\x1f\xcf"                  (* pop ax; pop ds; iret *)
+  ^ "\x5a\x58\x1f\xcf"              (* pop dx; pop ax; pop ds; iret *)
 
 (* IRQ0-7 의 벡터(08h-0Fh). 쓰는 장치가 없는 줄의 기본 루틴은 EOI 를
    보내고 IRET 한다 — SeaBIOS post.c 가 08h-0Fh 를 entry_hwpic1 로 채우고,
