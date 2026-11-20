@@ -11,8 +11,13 @@
     - A component is upper-cased and cut to 8.3 as DOS cuts it:
       [LONGFILENAME.TEXT] is [LONGFILE.TEX]. A second dot, an empty
       name, or a character DOS does not allow in a name (a double
-      quote, any of [* + , / : ; < = > ? |], a bracket, a backslash, a
-      space or a control character) is an error.
+      quote, any of [* + , / : ; < = > ? |], a bracket, a backslash or a
+      control character) is an error.
+    - A space is allowed after the first character (MS-DOS 4.0 FCB.ASM
+      NameTrans, "We must allow spaces in pathnames"): [A B] is a name.
+      Spaces at the end of the name or of the extension are dropped
+      (SEARCH.ASM PackName), so [INFO.CC1   ] is [INFO.CC1]. A name that
+      starts with a space is an error.
 
     A path is always absolute and in that canonical form, so two names
     for one file give the same path. *)
