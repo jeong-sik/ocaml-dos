@@ -26,6 +26,15 @@ and Magic I·II, Master of Orion II 도 보호 모드 게임이라는 조사가 
 확인하지 않았다(확인 필요). 그 조사에서 이름이 나온 익스텐더는 모두 DOS/4GW
 계열이었다.
 
+로컬 서베이에서도 같은 벽이 나온다(2026-11-21). classicdosgames.com 에서 받은
+게임을 386 모델로 3천만 스텝씩 돌린 결과 파일을 합치면, 32 비트 LGDT(`0F 01
+/2`)에서 `Unsupported` 로 멈춘 게임이 44개다. 그중 39개가 같은 주소
+(1248:031f)에서 멈춘다. 같은 DOS/4GW 빌드의 raw 전환 자리로 읽힌다(그 주소의
+바이트를 원문과 맞추지 않았다: 확인 필요). Hexen, Strife, Tomb Raider, Mortal
+Kombat II·3, SimCity 2000, Star Wars: Dark Forces, The Need for Speed, MDK,
+Worms 가 여기에 든다. 나머지 5개는 다른 익스텐더 주소에서 멈춘다(Alien Breed,
+Astro3D, Axia, ShadowCaster, Super Street Fighter II Turbo).
+
 삼국지3 같은 실모드 게임은 RFC 0001 과 지금 열린 PR 들이 다룬다. 이 RFC 는
 그 바깥의 게임을 위한 것이다.
 
@@ -205,7 +214,7 @@ with an LTR instruction, not a task switch").
 ### 7 단계: DOS/4GW 프로그램
 
 - raw 경로로 DOS/4GW 프로그램 하나가 `main` 까지 간다.
-- 로컬에 DOS/4GW 게임이 없다. 무엇으로 확인할지는 「정할 것」에 둔다.
+- 확인할 게임은 「정할 것」 3 에 둔다.
 
 ## 범위 밖
 
@@ -235,7 +244,10 @@ with an LTR instruction, not a task switch").
    NASM 3 에서는 소스 110 줄을 고쳐야 하니 NASM 2.16 을 고정할지도 같이 정한다.
 2. XMS 저장소를 CPU 메모리로 합칠지, 아니면 둘을 따로 두고 1MB 위 메모리를
    새로 둘지.
-3. 7 단계를 무엇으로 확인할지(로컬 DOS/4GW 프로그램).
+3. 7 단계를 무엇으로 확인할지. 로컬 조사 폴더(저장소 밖)에 DOS/4GW 를 싣는
+   게임이 있다(「왜」 참고). 게임 파일은 저장소에 두지 않고, 폴더가 있을 때만
+   도는 시험으로 한다(SST 와 같은 방식). 어느 게임으로 할지는 7 단계 PR 에서
+   정한다.
 
 ## 확인 방법 요약
 
