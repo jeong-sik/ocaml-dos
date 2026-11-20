@@ -10,21 +10,41 @@ let separator = '\\'
 
 let is_separator c = c = '\\' || c = '/'
 
-(* MS-DOS 5 refuses these in a name; everything else from 0x21 up, the
-   bytes from 0x80 included, is allowed. *)
+(* A name may not hold these; everything else from 0x21 up, the bytes from
+   0x80 included, is allowed. *)
 let forbidden = "\"*+,/:;<=>?[\\]|"
 
 let name_char c = Char.code c > 0x20 && not (String.contains forbidden c)
 let wild_char c = name_char c || c = '?' || c = '*'
 
+(* MS-DOS 4.0 FCB.ASM NameTrans sets SpaceFlag, with the comment "We must
+   allow spaces in pathnames": after its first character a component may
+   hold spaces, in the name and in the extension. The first character may
+   not be one: the name would be empty and CopyComponent fails. A space
+   inside is an ordinary character and a name made of one is a name. *)
+let inner_char ok c = c = ' ' || ok c
+
 let truncate n s = if String.length s > n then String.sub s 0 n else s
 
+(* SEARCH.ASM PackName drops the spaces at the end of the name and of the
+   extension: [INFO.CC1   ] and [INFO.CC1] are one file, and so are [A  .TXT]
+   and [A.TXT]. *)
+let trim_end s =
+  let n = ref (String.length s) in
+  while !n > 0 && s.[!n - 1] = ' ' do decr n done;
+  String.sub s 0 !n
+
 (* One component, upper-cased and cut to 8.3. [ok] says which characters
-   it may hold. *)
+   it may hold. MUSTGETWORD keeps reading past the 8th character of the name
+   and the 3rd of the extension and drops what it reads, then PackName trims:
+   the cut comes first. *)
 let component ~ok raw =
   let s = String.uppercase_ascii raw in
-  let canonical b e = if e = "" then truncate base_len b else truncate base_len b ^ "." ^ truncate ext_len e in
-  if not (String.for_all (fun c -> c = '.' || ok c) s) then Error Bad_name
+  let canonical b e =
+    let b = trim_end (truncate base_len b) and e = trim_end (truncate ext_len e) in
+    if e = "" then b else b ^ "." ^ e
+  in
+  if s = "" || s.[0] = ' ' || not (String.for_all (fun c -> c = '.' || inner_char ok c) s) then Error Bad_name
   else
     match String.split_on_char '.' s with
     | [ b ] when b <> "" -> Ok (canonical b "")
@@ -88,7 +108,8 @@ let parse_pattern ~cwd s =
   | last :: dirs_rev ->
     let* dir = walk start (List.rev dirs_rev) in
     let pattern = String.uppercase_ascii last in
-    if String.for_all (fun c -> c = '.' || wild_char c) pattern then Ok (dir, pattern)
+    if pattern <> "" && pattern.[0] <> ' ' && String.for_all (fun c -> c = '.' || inner_char wild_char c) pattern
+    then Ok (dir, pattern)
     else Error Bad_name
 
 let key t = String.concat (String.make 1 separator) t

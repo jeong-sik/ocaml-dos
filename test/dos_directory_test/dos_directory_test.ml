@@ -36,8 +36,20 @@ let test_path () =
   check "a run after .." (parsed ~cwd:(under "DATA") "..//Y" = Ok [ "Y" ]);
   List.iter
     (fun s -> check (Printf.sprintf "%S is not a name" s) (parsed s = Error Bad_name))
-    [ ""; "A.B.C"; "DATA\\"; "DATA\\\\"; "\\\\SERVER\\X"; "C:/\\X"; "//"; "A B"; "A*"; ".X";
-      "A?B"; "A|B"; "..." ];
+    [ ""; "A.B.C"; "DATA\\"; "DATA\\\\"; "\\\\SERVER\\X"; "C:/\\X"; "//"; " A"; "A*"; ".X";
+      "A?B"; "A|B"; "..."; "DATA\\ X"; "A\x01B" ];
+  (* MS-DOS 4.0 NameTrans allows spaces after the first character and PackName
+     drops the ones at the end of the name and of the extension. A retail demo
+     (Beauty and the Beast, Capstone 1993) opens "Info.cc1" followed by twelve
+     spaces. *)
+  check "a space inside a name is a name" (parsed "A B" = Ok [ "A B" ]);
+  check "a space inside the extension" (parsed "A.B C" = Ok [ "A.B C" ]);
+  check "spaces at the end of the extension are dropped" (parsed "Info.cc1            " = Ok [ "INFO.CC1" ]);
+  check "spaces at the end of the name are dropped" (parsed "A   " = Ok [ "A" ]);
+  check "spaces between the name and the dot are dropped" (parsed "A  .TXT" = Ok [ "A.TXT" ]);
+  check "an extension of spaces is no extension" (parsed "A.   " = Ok [ "A" ]);
+  check "the cut comes before the trim" (parsed "ABCDEFG HIJ" = Ok [ "ABCDEFG" ]);
+  check "a space in a directory name" (parsed "MY DIR\\X" = Ok [ "MY DIR"; "X" ]);
   check "a pattern keeps its wildcards"
     (Result.map (fun ((d : Dos_path.t), p) -> ((d :> string list), p)) (parse_pattern ~cwd:root "data\\*.dat")
      = Ok ([ "DATA" ], "*.DAT"));
@@ -283,7 +295,7 @@ let test_mount_names () =
   let m = machine () in
   let refused name = match Dos_machine.mount_file m name "x" with Error _ -> true | Ok () -> false in
   ignore (Dos_machine.mount_file m "DATA/A.DAT" "a");
-  check "a name DOS cannot hold is refused" (refused "A.B.C" && refused "FOO BAR" && refused "");
+  check "a name DOS cannot hold is refused" (refused "A.B.C" && refused " FOO" && refused "");
   check "another drive is refused" (refused "D:\\X");
   check "a directory's name is refused" (refused "DATA");
   check "the root is refused" (refused "\\");
