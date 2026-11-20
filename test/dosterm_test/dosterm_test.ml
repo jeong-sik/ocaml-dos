@@ -49,6 +49,10 @@ let test_keys () =
   events "letter" "a" [ Key 0x1E61 ];
   events "capital" "A" [ Key 0x1E41 ];
   events "digit" "7" [ Key 0x0837 ];
+  events "period" "." [ Key 0x342E ];
+  events "colon" ":" [ Key 0x273A ];
+  events "backslash" "\\" [ Key 0x2B5C ];
+  events "minus" "-" [ Key 0x0C2D ];
   events "return" "\r" [ enter ];
   events "tab" "\t" [ Key 0x0F09 ];
   events "delete byte" "\127" [ Key 0x0E08 ];

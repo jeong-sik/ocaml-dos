@@ -132,6 +132,32 @@ let test_keymap () =
     (Dos_keymap.modifier_of_code 0xB8 = Some (Dos_keymap.Alt, Dos_keymap.Up));
   check "keymap: 1Eh is no modifier" (Dos_keymap.modifier_of_code 0x1E = None)
 
+(* Every printable ASCII character has a key, and the word it gives is one
+   the BIOS table gives for that key: the key's own scan code, the
+   character's ASCII, and shift held when the table says so. Before, only
+   letters and digits had a key, so a terminal player could not type "." or
+   ":" at all. *)
+let test_every_printable_character_has_its_key () =
+  for code = 0x20 to 0x7E do
+    let c = Char.chr code in
+    let name = Printf.sprintf "key for %C" c in
+    match Dos_machine.key_of_string (String.make 1 c) with
+    | Error _ -> check (name ^ ": exists") false
+    | Ok word ->
+      check (name ^ ": ASCII") (word land 0xFF = code);
+      (match Dos_keymap.of_word word with
+       | None -> check (name ^ ": the BIOS table gives this word") false
+       | Some k -> check (name ^ ": scan code is the key's") (k.Dos_keymap.scan = word lsr 8))
+  done;
+  let word c = Dos_machine.key_of_string (String.make 1 c) in
+  check "key: ':' is shift of 27h" (word ':' = Ok 0x273A);
+  check "key: ';' is 27h" (word ';' = Ok 0x273B);
+  check "key: backslash is 2Bh" (word '\\' = Ok 0x2B5C);
+  check "key: '.' is 34h" (word '.' = Ok 0x342E);
+  check "key: '?' is shift of 35h" (word '?' = Ok 0x353F);
+  check "key: '-' is 0Ch" (word '-' = Ok 0x0C2D);
+  check "key: a character with no key is refused" (Result.is_error (word '\xe9'))
+
 (* B: the same hook, but it chains to the vector it found, as most do; the
    program then reads the key with INT 16h AH=00 and exits. *)
 let chained_result_off = 0x13f
@@ -458,6 +484,7 @@ let () =
   test_upper_case_is_shifted ();
   test_modifiers_from_the_table ();
   test_keymap ();
+  test_every_printable_character_has_its_key ();
   test_bios_ctrl_alt_state ();
   test_hook_chains_to_bios ();
   test_bios_shift_state ();
