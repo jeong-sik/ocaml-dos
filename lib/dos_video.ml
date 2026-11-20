@@ -321,9 +321,20 @@ let set_cga_color_select t v = t.cga_color_select <- v land 0xff
 
 (* 시퀀서 1 번(clocking mode)의 bit 5 가 서면 화면을 그리지 않는다. 그동안
    화면 전체가 DAC 0 번 색이다(RBIL INT 10/AH=12h BL=36h). 모드를 세우면
-   시퀀서가 0 으로 돌아가 다시 켜진다. *)
+   bit 5 가 꺼져 다시 켜진다. *)
 let seq_clocking_mode = 1
 let seq_screen_off = 0x20
+
+(* 시퀀서 1 번에 VGA BIOS 가 모드마다 싣는 값(DOSBox vga_modes 의 시퀀서
+   줄과 같다). bit 0 은 한 칸이 8 점 폭(꺼지면 9 점), bit 3 은 점 클럭
+   절반(320 폭 모드)이다. 화면을 끄는 게임은 이 값을 읽어 두었다가 켤 때
+   되돌리고, 읽은 값이 0 이면 되돌리기를 건너뛴다(Trugg). 0 으로 두면 그
+   게임의 화면이 꺼진 채 남는다. 80 열 텍스트와 모르는 번호는 0 이다. *)
+let clocking_mode_of = function
+  | 0 | 1 -> 0x08
+  | 4 | 5 | 0x0D -> 0x09
+  | 6 | 0x0E | 0x0F | 0x10 | 0x11 | 0x12 | 0x13 -> 0x01
+  | _ -> 0x00
 
 let screen_blanked t = t.seq.(seq_clocking_mode) land seq_screen_off <> 0
 let set_screen_blanked t off =
@@ -343,6 +354,7 @@ let set_mode t m ~clear =
   Array.fill t.latches 0 plane_count 0;
   (* 모드 세팅 직후의 기본값: 네 평면 모두 쓰기 가능, 비트 전부 통과. *)
   t.seq.(seq_map_mask) <- 0x0F;
+  t.seq.(seq_clocking_mode) <- clocking_mode_of m;
   t.gc.(gc_bit_mask) <- 0xFF;
   t.seq.(seq_memory_mode) <- memory_mode_of t.kind;
   if t.kind = Linear256 then t.gc.(gc_mode) <- gc_shift256;
