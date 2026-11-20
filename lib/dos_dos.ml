@@ -373,7 +373,7 @@ let saved_vectors_len = 3 * 4
    루트의 환경은 0x500:0 에 둔다(IVT·BDA 위의 스크래치, 블록 표 밖).
    세그먼트가 0 이면 KOEI 로더처럼 AH=49h 로 환경을 지우고 AH=4Ah 로
    줄이는 프로그램이 연쇄로 실패해 EXEC 자리가 안 생긴다(실측). 문자열은
-   비어 있다. 이름을 모르면 꼬리를 쓰지 않는다. EXEC 자식은
+   COMSPEC 하나다(아래). 이름을 모르면 꼬리를 쓰지 않는다. EXEC 자식은
    [child_environment] 로 블록을 따로 받는다. *)
 let root_env_seg = 0x500
 let root_psp_seg = 0x1000               (* 루트 프로그램의 PSP — COM·EXE 공통 *)
@@ -393,7 +393,14 @@ let environment_bytes ~list ~name =
   Buffer.add_char b '\x00';
   Buffer.contents b
 
-let empty_env_list = "\x00\x00"
+(* 루트 환경의 문자열은 COMSPEC 하나다. 실기는 부팅 때 늘 이 변수를 두고,
+   Borland C 의 system() 은 이 변수가 없으면 EXEC 를 부르지도 않고 실패한다
+   (Iron Blood 데모의 DEMO.EXE 가 TITLE.EXE 를 이렇게 부른다). 가리키는
+   파일이 디스크에 없으면 [exec_program] 의 COMMAND.COM /C 처리가 받는다. *)
+let comspec_file = "COMMAND.COM"
+let boot_drive_letter = Char.chr (Char.code 'A' + default_drive)
+let root_env_list =
+  Printf.sprintf "COMSPEC=%c:\\%s\x00\x00" boot_drive_letter comspec_file
 
 (* 루트 환경을 0x500 에 쓴다. [name] 은 C: 루트 디렉터리의 파일 이름이다
    — 이 기계의 루트 프로그램은 거기 있다. 꼬리에는 드라이브와 역슬래시를
@@ -401,11 +408,10 @@ let empty_env_list = "\x00\x00"
 let write_root_env t ~name =
   let bytes =
     match name with
-    | None -> empty_env_list
+    | None -> root_env_list
     | Some file ->
-      let drive = Char.chr (Char.code 'A' + default_drive) in
-      environment_bytes ~list:empty_env_list
-        ~name:(Printf.sprintf "%c:\\%s" drive (String.uppercase_ascii file))
+      environment_bytes ~list:root_env_list
+        ~name:(Printf.sprintf "%c:\\%s" boot_drive_letter (String.uppercase_ascii file))
   in
   if String.length bytes > root_env_room then
     invalid_arg "program name does not fit the root environment";
@@ -843,6 +849,165 @@ let load_overlay t image =
 let exec_load_and_run = 0x00
 let exec_load_overlay = 0x03
 
+(* ---------- COMMAND.COM /C ---------- *)
+
+(* COMSPEC 의 COMMAND.COM 은 "/C 명령줄" 로 불리면 명령줄의 프로그램을 돌리고
+   끝난다(Borland C 의 system() 이 이렇게 부른다). 디스크에 COMMAND.COM 이
+   없으면 호스트가 이 한 가지 일만 한다: 명령줄의 첫 낱말을 .COM·.EXE 파일로
+   찾아 자식으로 돌리고, 나머지 글을 자식의 꼬리로 준다. 내장 명령(DIR, CLS,
+   ECHO ...)·리디렉션·파이프·배치 파일은 하지 않는다. 그 줄은 AH=4Bh 가
+   오류 1(지원 안 함)이나 2(프로그램 없음)로 답한다. 자식의 종료 코드는
+   AH=4Dh 가 그대로 준다. *)
+
+(* 꼬리 글 "/C 프로그램 인자들" 을 (프로그램 낱말, 인자 글) 로 가른다. 인자
+   글은 프로그램 낱말 바로 뒤부터라 앞의 공백이 남는다 — 자식 꼬리에 넘기는
+   모양이다. *)
+let split_command_line line =
+  let n = String.length line in
+  let blank i = line.[i] = ' ' || line.[i] = '\t' in
+  let rec skip i = if i < n && blank i then skip (i + 1) else i in
+  let rec word_end i = if i < n && not (blank i) then word_end (i + 1) else i in
+  let sw = skip 0 in
+  if sw + 1 < n && line.[sw] = '/' && (line.[sw + 1] = 'C' || line.[sw + 1] = 'c') then begin
+    let start = skip (sw + 2) in
+    let stop = word_end start in
+    if stop = start then None
+    else Some (String.sub line start (stop - start), String.sub line stop (n - stop))
+  end
+  else None
+
+let has_redirection line =
+  String.exists (fun c -> c = '<' || c = '>' || c = '|') line
+
+type command_target = { program : Dos_path.t; image : Bytes.t; args : string }
+
+(* 프로그램 낱말을 파일로 찾는다. 확장자가 없으면 .COM 을 먼저, 없으면 .EXE 를
+   본다(COMMAND.COM 의 순서). .COM·.EXE 가 아닌 확장자와 .BAT 는 지원 밖이다. *)
+let command_target t line =
+  if has_redirection line then Error invalid_function
+  else
+    match split_command_line line with
+    | None -> Error invalid_function
+    | Some (word, args) ->
+      let last =
+        match String.rindex_opt word '\\' with
+        | Some i -> String.sub word (i + 1) (String.length word - i - 1)
+        | None -> word
+      in
+      let find name =
+        match Dos_path.parse ~cwd:t.cwd name with
+        | Error _ -> None
+        | Ok p -> Option.map (fun image -> (p, image)) (Hashtbl.find_opt t.host_files (Dos_path.key p))
+      in
+      let ends_with ext p =
+        match Dos_path.base p with
+        | Some b -> Filename.check_suffix b ext
+        | None -> false
+      in
+      let runnable p = ends_with ".COM" p || ends_with ".EXE" p in
+      if String.contains last '.' then
+        match find word with
+        | Some (p, image) when runnable p -> Ok { program = p; image; args }
+        | Some _ -> Error invalid_function
+        | None -> Error file_not_found
+      else
+        match find (word ^ ".COM"), find (word ^ ".EXE") with
+        | Some (p, image), _ | None, Some (p, image) -> Ok { program = p; image; args }
+        | None, None ->
+          if find (word ^ ".BAT") <> None then Error invalid_function else Error file_not_found
+
+(* EPB(ES:BX)의 명령줄 꼬리를 글로 읽는다. 꼬리 포인터가 0:0 이면 None. *)
+let epb_tail t =
+  let epb = (Cpu86.seg t.cpu 0 lsl 4) + Cpu86.reg16 t.cpu 3 in
+  let seg = rd16 t (epb + 4) and off = rd16 t (epb + 2) in
+  if seg = 0 && off = 0 then None
+  else
+    let src = (seg lsl 4) + off in
+    Some (String.init (rd8 t src) (fun i -> Char.chr (rd8 t (src + 1 + i))))
+
+(* [image] 를 자식으로 돌린다. [name] 은 환경 꼬리에 들어가는 이름, [tail] 은
+   자식 PSP 의 명령줄 꼬리(None 이면 비워 둔다). EPB 의 환경·FCB 는 ES:BX 에서
+   읽는다. *)
+let exec_image t ~return_to ~image ~name ~tail =
+  let cpu = t.cpu in
+  (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
+  let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
+  let epb_env = rd16 t epb in
+  let fcb1_seg = rd16 t (epb + 8) and fcb1_off = rd16 t (epb + 6) in
+  let fcb2_seg = rd16 t (epb + 12) and fcb2_off = rd16 t (epb + 10) in
+  (* EXEC.ASM 순서: 환경(10·8) → 헤더(11) → 프로그램 자리(8). 뒤에서
+     실패하면 환경 블록을 놓는다(exec_bomb → exec_dealloc). EPB 의
+     환경이 0 이면 부모의 환경을 옮긴다. *)
+  let parent_blocks = t.blocks in
+  let source =
+    if epb_env <> 0 then epb_env else rd16 t ((t.psp_seg * 16) + 0x2C)
+  in
+  let give_up code = t.blocks <- parent_blocks; fail t code; Completed in
+  match child_environment t ~source ~name with
+  | Error code -> fail t code; Completed
+  | Ok env ->
+  (* 헤더가 파일 안의 적재 모듈을 말하지 않으면(짧은 헤더, 모자란 파일,
+     파일 밖 재배치 표) DOS 오류 11(잘못된 형식)로 답한다 — 이 호출만
+     실패하고 부모는 그대로 산다. *)
+  match loadable image with
+  | Error (Header_too_short | Pages_end_in_header | File_short_by_a_page
+          | Relocations_past_file) -> give_up 11
+  | Ok kind ->
+  let placement =
+    match kind with
+    | Exe_image m ->
+      exe_child_psp t ~img_paras:m.load_paras ~minalloc:(header_u16 image 0x0A)
+    | Com_image -> find_free t 0x1000
+  in
+  match placement with
+  | None ->
+    t.blocks <- parent_blocks;
+    Cpu86.set_reg16 cpu 3 (largest_free t);
+    fail t error_not_enough_memory; Completed
+  | Some psp ->
+     t.exec_frames <-
+       {
+         parent = snapshot_cpu t;
+         parent_service_return = return_to;
+         parent_psp = t.psp_seg;
+         parent_dta = t.dta;
+         parent_free_base = t.free_base;
+         parent_free_top = t.free_top;
+         parent_blocks;
+         parent_handles =
+           List.sort (fun (a, _) (b, _) -> compare a b)
+             (Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles []);
+       }
+       :: t.exec_frames;
+     (* The child's table is the parent's without the opens made with
+        AL bit 7 ($Dup_PDB, MISC.ASM). Child exit puts them back with
+        the rest of [parent_handles]. *)
+     Hashtbl.filter_map_inplace
+       (fun _ hd -> if hd.inheritable then Some hd else None)
+       t.handles;
+     let env = env_word env in
+     (match kind with
+      | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true ~env t image m
+      | Com_image -> load_com_at ~psp_seg:psp ~child:true ~env t image);
+     (* 커맨드라인·FCB 를 자식 PSP 에 옮긴다 *)
+     let cpsp = t.psp_seg * 16 in
+     let copy_dword_into dst seg off n =
+       if seg <> 0 || off <> 0 then
+         for i = 0 to n - 1 do
+           wr8 t (dst + i) (rd8 t ((seg lsl 4) + off + i))
+         done
+     in
+     (match tail with
+      | None -> ()
+      | Some text ->
+        let n = String.length text in
+        wr8 t (cpsp + 0x80) n;
+        String.iteri (fun i c -> wr8 t (cpsp + 0x81 + i) (Char.code c)) text;
+        wr8 t (cpsp + 0x81 + n) 0x0D);
+     copy_dword_into (cpsp + 0x5C) fcb1_seg fcb1_off 12;
+     copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12;
+     Control_transferred
+
 (* INT 21h AH=4Bh — AL=00 불러 실행하기, AL=03 오버레이 싣기. AL=01(불러만)
    은 아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
 let exec_program t ~return_to =
@@ -855,90 +1020,23 @@ let exec_program t ~return_to =
     | Error e -> fail t e; Completed
     | Ok p ->
     match Hashtbl.find_opt t.host_files (Dos_path.key p) with
-    | None -> fail t file_not_found; Completed
     | Some img_bytes when al = exec_load_overlay ->
       load_overlay t (Bytes.to_string img_bytes);
       Completed
     | Some img_bytes ->
-      let image = Bytes.to_string img_bytes in
-      (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
-      let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
-      let epb_env = rd16 t epb in
-      let tail_seg = rd16 t (epb + 4) and tail_off = rd16 t (epb + 2) in
-      let fcb1_seg = rd16 t (epb + 8) and fcb1_off = rd16 t (epb + 6) in
-      let fcb2_seg = rd16 t (epb + 12) and fcb2_off = rd16 t (epb + 10) in
-      (* EXEC.ASM 순서: 환경(10·8) → 헤더(11) → 프로그램 자리(8). 뒤에서
-         실패하면 환경 블록을 놓는다(exec_bomb → exec_dealloc). EPB 의
-         환경이 0 이면 부모의 환경을 옮긴다. *)
-      let parent_blocks = t.blocks in
-      let source =
-        if epb_env <> 0 then epb_env else rd16 t ((t.psp_seg * 16) + 0x2C)
-      in
-      let give_up code = t.blocks <- parent_blocks; fail t code; Completed in
-      match child_environment t ~source ~name:raw_name with
-      | Error code -> fail t code; Completed
-      | Ok env ->
-      (* 헤더가 파일 안의 적재 모듈을 말하지 않으면(짧은 헤더, 모자란 파일,
-         파일 밖 재배치 표) DOS 오류 11(잘못된 형식)로 답한다 — 이 호출만
-         실패하고 부모는 그대로 산다. *)
-      match loadable image with
-      | Error (Header_too_short | Pages_end_in_header | File_short_by_a_page
-              | Relocations_past_file) -> give_up 11
-      | Ok kind ->
-      let placement =
-        match kind with
-        | Exe_image m ->
-          exe_child_psp t ~img_paras:m.load_paras ~minalloc:(header_u16 image 0x0A)
-        | Com_image -> find_free t 0x1000
-      in
-      match placement with
-      | None ->
-        t.blocks <- parent_blocks;
-        Cpu86.set_reg16 cpu 3 (largest_free t);
-        fail t error_not_enough_memory; Completed
-      | Some psp ->
-         t.exec_frames <-
-           {
-             parent = snapshot_cpu t;
-             parent_service_return = return_to;
-             parent_psp = t.psp_seg;
-             parent_dta = t.dta;
-             parent_free_base = t.free_base;
-             parent_free_top = t.free_top;
-             parent_blocks;
-             parent_handles =
-               List.sort (fun (a, _) (b, _) -> compare a b)
-                 (Hashtbl.fold (fun h v acc -> (h, v) :: acc) t.handles []);
-           }
-           :: t.exec_frames;
-         (* The child's table is the parent's without the opens made with
-            AL bit 7 ($Dup_PDB, MISC.ASM). Child exit puts them back with
-            the rest of [parent_handles]. *)
-         Hashtbl.filter_map_inplace
-           (fun _ hd -> if hd.inheritable then Some hd else None)
-           t.handles;
-         let env = env_word env in
-         (match kind with
-          | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true ~env t image m
-          | Com_image -> load_com_at ~psp_seg:psp ~child:true ~env t image);
-         (* 커맨드라인·FCB 를 자식 PSP 에 옮긴다 *)
-         let cpsp = t.psp_seg * 16 in
-         let copy_dword_into dst seg off n =
-           if seg <> 0 || off <> 0 then
-             for i = 0 to n - 1 do
-               wr8 t (dst + i) (rd8 t ((seg lsl 4) + off + i))
-             done
-         in
-         if tail_seg <> 0 || tail_off <> 0 then begin
-           let src = (tail_seg lsl 4) + tail_off in
-           let n = rd8 t src in
-           wr8 t (cpsp + 0x80) n;
-           copy_dword_into (cpsp + 0x81) tail_seg (tail_off + 1) n;
-           wr8 t (cpsp + 0x81 + n) 0x0D
-         end;
-         copy_dword_into (cpsp + 0x5C) fcb1_seg fcb1_off 12;
-         copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12;
-         Control_transferred
+      exec_image t ~return_to ~image:(Bytes.to_string img_bytes) ~name:raw_name
+        ~tail:(epb_tail t)
+    | None when al = exec_load_and_run && Dos_path.base p = Some comspec_file ->
+      (match Option.to_result ~none:invalid_function (epb_tail t) with
+       | Error code -> fail t code; Completed
+       | Ok line ->
+         match command_target t line with
+         | Error code -> fail t code; Completed
+         | Ok target ->
+           exec_image t ~return_to ~image:(Bytes.to_string target.image)
+             ~name:(Printf.sprintf "%c:\\%s" boot_drive_letter (Dos_path.key target.program))
+             ~tail:(Some target.args))
+    | None -> fail t file_not_found; Completed
 
 (* INT 27h — 옛 방식의 상주 종료. DX 는 '마지막 상주 바이트 다음
    오프셋' 이고 블록은 16바이트로 올림한 만큼(마지막 한 칸은 여유)을

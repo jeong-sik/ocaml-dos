@@ -1,0 +1,3 @@
+(test
+ (name dos_command_com_test)
+ (libraries dosmachine))

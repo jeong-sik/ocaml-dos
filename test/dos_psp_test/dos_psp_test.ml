@@ -19,10 +19,10 @@ let w16 n = Printf.sprintf "%c%c" (Char.chr (n land 0xff)) (Char.chr ((n lsr 8) 
 let exit_with code = "\xb8" ^ w16 (0x4C00 lor code) ^ "\xcd\x21"
 
 (* 루트 COM 의 PSP 는 1000h 다. 부모가 20h 문단으로 줄이면 첫 자식의
-   환경 블록이 1020h(1 문단)에 오고 자식 PSP 는 1021h 다 — dos_exec_test
-   의 배치와 같다. *)
+   환경 블록이 1020h(3 문단: 루트의 COMSPEC 목록 24 바이트 + 꼬리)에 오고
+   자식 PSP 는 1023h 다 — dos_exec_test 의 배치와 같다. *)
 let root_psp = 0x10000
-let child_psp = 0x10210
+let child_psp = 0x10230
 let root_seg = 0x1000
 
 let rd m a = Dos_machine.mem_read m a
