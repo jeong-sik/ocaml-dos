@@ -267,7 +267,9 @@ let test_key_names () =
   (* US 자판에 자리가 없는 글자를 0 번 스캔 코드로 넣으면 게스트가 엉뚱한
      키로 읽는다 — 조용히 통과시키지 않는다. *)
   check_true "자리 없는 글자는 거절"
-    (Result.is_error (Dos_machine.key_of_string "~"));
+    (Result.is_error (Dos_machine.key_of_string "\xe9"));
+  (* ~ 는 ` 키를 윗글쇠로 치는 글자다 *)
+  ok "~" 0x297E;
   check_s "이름으로 되돌리기" (Dos_machine.key_to_string 0x4800) "up";
   check_s "글자로 되돌리기" (Dos_machine.key_to_string 0x1E61) "a"
 
