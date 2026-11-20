@@ -1068,20 +1068,24 @@ let int27 t =
 
 (* ---------- findfirst / findnext ---------- *)
 
+let hit_fields t hit =
+  match hit with
+  | File_hit k ->
+    let size = match Hashtbl.find_opt t.host_files k with Some d -> Bytes.length d | None -> 0 in
+    let name = match Option.bind (Dos_path.of_key k) Dos_path.base with Some n -> n | None -> k in
+    (name, attr_archive, size)
+  | Dir_hit name -> (name, attr_directory, 0)
+
+(* DOS 날짜 워드: 상위 7비트 연도-1980, 다음 4비트 월, 하위 5비트 일.
+   0x2821 은 2000-01-01 이다. 마운트 표에는 시각이 없어 고정값을 준다. *)
+let find_time = 0
+let find_date = 0x2821
+
 let fill_find_block t hit =
-  let name, attr, size =
-    match hit with
-    | File_hit k ->
-      let size = match Hashtbl.find_opt t.host_files k with Some d -> Bytes.length d | None -> 0 in
-      let name = match Option.bind (Dos_path.of_key k) Dos_path.base with Some n -> n | None -> k in
-      (name, attr_archive, size)
-    | Dir_hit name -> (name, attr_directory, 0)
-  in
+  let name, attr, size = hit_fields t hit in
   wr8 t (t.dta + 0x15) attr;
-  wr16 t (t.dta + 0x16) 0;                   (* 시각 *)
-  (* DOS 날짜 워드: 상위 7비트 연도-1980, 다음 4비트 월, 하위 5비트 일.
-     0x2821 은 2000-01-01 이다. 마운트 표에는 시각이 없어 고정값을 준다. *)
-  wr16 t (t.dta + 0x18) 0x2821;
+  wr16 t (t.dta + 0x16) find_time;
+  wr16 t (t.dta + 0x18) find_date;
   wr16 t (t.dta + 0x1A) (size land 0xffff);
   wr16 t (t.dta + 0x1C) ((size lsr 16) land 0xffff);
   String.iteri (fun i c -> wr8 t (t.dta + 0x1E + i) (Char.code c)) name;
@@ -1376,6 +1380,65 @@ let fcb_delete t =
        | found ->
          List.iter (fun (k, _, _) -> Hashtbl.remove t.host_files k) found;
          fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 11h·12h 가 DTA 에 쓰는 것 (SEARCH.ASM $DIR_SEARCH_FIRST SearchSet).
+   확장 FCB 면 FFh, 0 다섯 개, 검색 속성이 먼저 온다. 그다음이 드라이브
+   바이트(FCB 의 값, 0 이면 현재 드라이브)와 32 바이트 디렉터리 항목이다:
+   이름 8 + 확장자 3, 속성, 예약 10, 시각, 날짜, 첫 클러스터, 크기. 이
+   기계에는 클러스터가 없어 첫 클러스터는 0 이다. *)
+let fcb_write_find_result t addr hit =
+  let name, attr, size = hit_fields t hit in
+  let fcb = Dos_fcb.locate t addr in
+  let drive_byte =
+    match rd8 t (fcb + Dos_fcb.drive) with 0 -> default_drive + 1 | d -> d
+  in
+  let at = ref t.dta in
+  let put8 v = wr8 t !at v; incr at in
+  let put16 v = wr16 t !at v; at := !at + 2 in
+  if fcb <> addr then begin
+    put8 0xFF;
+    for _ = 1 to 5 do put8 0 done;
+    put8 (Dos_fcb.search_attribute t addr)
+  end;
+  put8 drive_byte;
+  String.iter (fun c -> put8 (Char.code c)) (fcb_fields name);
+  put8 attr;
+  for _ = 1 to 10 do put8 0 done;
+  put16 find_time;
+  put16 find_date;
+  put16 0;
+  put16 (size land 0xffff);
+  put16 ((size lsr 16) land 0xffff)
+
+(* 11h. 패턴에 맞는 첫 파일을 DTA 에 쓰고 나머지는 12h 몫으로 둔다. 4Eh 와
+   같은 find_queue 를 쓴다 — 한 번에 하나만 찾는다. *)
+let fcb_find_first t =
+  let addr = seg_off t 3 2 in
+  let code =
+    match fcb_pattern_at t (Dos_fcb.locate t addr + Dos_fcb.name) with
+    | None -> t.find_queue <- []; fcb_error
+    | Some pattern ->
+      (match List.map (fun (k, _, _) -> File_hit k) (fcb_sources t addr pattern) with
+       | [] -> t.find_queue <- []; fcb_error
+       | first :: rest ->
+         t.find_queue <- rest;
+         fcb_write_find_result t addr first;
+         fcb_ok)
+  in
+  Cpu86.set_reg8 t.cpu 0 code
+
+(* 12h. 11h 이 남긴 다음 파일. *)
+let fcb_find_next t =
+  let addr = seg_off t 3 2 in
+  let code =
+    match t.find_queue with
+    | [] -> fcb_error
+    | next :: rest ->
+      t.find_queue <- rest;
+      fcb_write_find_result t addr next;
+      fcb_ok
   in
   Cpu86.set_reg8 t.cpu 0 code
 
@@ -2198,6 +2261,8 @@ let service_immediate t =
   | 0x28 -> fcb_io t ~dir:Fcb_write ~where:Random_block
   | 0x23 -> fcb_file_size t
   | 0x24 -> fcb_set_random t
+  | 0x11 -> fcb_find_first t
+  | 0x12 -> fcb_find_next t
   | 0x13 -> fcb_delete t
   | 0x17 -> fcb_rename t
   | 0x18 | 0x1D | 0x1E | 0x20 | 0x61 ->
