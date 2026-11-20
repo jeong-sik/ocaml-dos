@@ -10,4 +10,4 @@
  (public_name ocaml-dos.dosplay)
  (modules dosplay audio_pipe frame_out host_file quicksave save_dir terminal)
  (package ocaml-dos)
- (libraries dosmachine dosterm unix))
+ (libraries dosmachine dosharness dosterm unix))

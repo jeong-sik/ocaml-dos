@@ -183,14 +183,17 @@ let play st =
   Unix.gettimeofday () -. start
 
 let mount_dir m dir =
-  Array.iter
-    (fun name ->
-      let path = Filename.concat dir name in
-      if Sys.file_exists path && not (Sys.is_directory path) then
+  match Host_tree.files dir with
+  | Error e ->
+    prerr_endline ("cannot use " ^ e);
+    exit 2
+  | Ok files ->
+    List.iter
+      (fun (name, path) ->
         match Dos_machine.mount_file m name (Host_file.read path) with
         | Ok () -> ()
         | Error e -> prerr_endline ("skipped " ^ path ^ ": " ^ e))
-    (Sys.readdir dir)
+      files
 
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
@@ -200,7 +203,7 @@ let () =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
       ("--dir", Arg.String (fun d -> dirs := d :: !dirs),
-       "DIR  폴더의 파일을 모두 대문자 이름으로 마운트한다");
+       "DIR  폴더의 파일을 하위 폴더까지 모두 대문자 이름으로 마운트한다");
       ("--mount", Arg.String (fun s -> mounts := s :: !mounts), "NAME=PATH  파일 하나를 마운트");
       ("--fps", Arg.Set_int fps, "N  초당 프레임(기본 30)");
       ("--no-mouse", Arg.Clear mouse, "  마우스 드라이버를 붙이지 않는다");
