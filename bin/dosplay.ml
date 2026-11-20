@@ -3,14 +3,14 @@
    받는다. Ghostty·kitty 처럼 두 프로토콜을 아는 터미널이 대상이다. F12 로
    끝낸다.
 
-   기계는 벽시계에 맞춰 돈다: 흐른 시간만큼의 CPU 사이클(4.77MHz)을
+   기계는 벽시계에 맞춰 돈다: 흐른 시간만큼의 CPU 사이클(기본 4.77MHz, [--cpu-mhz] 로 바꾼다)을
    돌리고, 화면은 그 사이에 초당 [--fps] 번까지 그린다. 터미널이 늦으면
    프레임을 건너뛸 뿐 게스트 시간은 밀리지 않는다. 호스트가 에뮬레이션
    자체를 못 따라가면 느려질 뿐 빨라지지는 않는다. 바뀐 프레임만 보낸다. *)
 
-(* 이 프로그램은 기본 속도(IBM PC 4.77MHz)로 기계를 만든다
-   ([Dos_machine.create ()]). 사이클을 초로 바꿀 때 그 클록을 쓴다. *)
-let cpu_hz = Dos_ports.speed_hz Dos_ports.pc_speed
+(* 기계가 자기 CPU 속도를 안다. 스냅숏을 되살리면 저장된 속도로 바뀌므로
+   사이클을 초로 바꿀 때마다 지금 기계에게 묻는다. *)
+let cpu_hz m = Dos_ports.cpu_hz m.Dos_state.ports
 
 let default_fps = 30
 
@@ -157,11 +157,11 @@ let play st =
   let start = Unix.gettimeofday () in
   let origin = ref start in
   let next_draw = ref start in
-  let cycles_at now = int_of_float ((now -. !origin) *. float_of_int cpu_hz) in
+  let cycles_at now = int_of_float ((now -. !origin) *. float_of_int (cpu_hz st.m)) in
   while not (st.quit || Option.is_some !stop_signal || Dos_machine.exited st.m) do
     poll_input st;
     let now = Unix.gettimeofday () in
-    let behind = float_of_int (cycles_at now - st.guest_cycles) /. float_of_int cpu_hz in
+    let behind = float_of_int (cycles_at now - st.guest_cycles) /. float_of_int (cpu_hz st.m) in
     if behind > max_lag then origin := !origin +. (behind -. max_lag);
     run_to st (cycles_at now);
     pump_audio st;
@@ -195,7 +195,7 @@ let mount_dir m dir =
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
   let fps = ref default_fps and mouse = ref true and state = ref "" and save_dir = ref "" in
-  let audio_cmd = ref "" and sound_blaster = ref false in
+  let audio_cmd = ref "" and sound_blaster = ref false and cpu_mhz = ref None in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
       ("--exe", Arg.Set_string exe, "PATH  MZ EXE 이미지");
@@ -208,6 +208,8 @@ let () =
        "FILE  F11 이 상태를 저장하고 Shift+F11 이 읽는 파일. --com·--exe 없이 주면 거기서 이어 한다");
       ("--save-dir", Arg.Set_string save_dir,
        "DIR  게임이 바꾼 파일을 끝날 때 여기에 쓴다. 시작할 때 여기 파일을 --dir 위에 싣는다");
+      ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
+       "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다. --state 로 되살린 기계는 저장된 속도를 쓴다");
       ("--sound-blaster", Arg.Set sound_blaster,
        "  Sound Blaster 2.0 을 꽂는다(220h, IRQ 7, DMA 1). 게임 설정이 Sound Blaster \
         인 게임은 카드가 없으면 DSP 를 기다리며 멈춘다. --state 로 이어 할 때는 상태 파일의 기계를 쓴다");
@@ -218,6 +220,16 @@ let () =
   in
   Arg.parse specs (fun a -> raise (Arg.Bad ("unexpected " ^ a)))
     "dosplay [--dir DIR] (--com PATH | --exe PATH | --state FILE) — Kitty 그래픽 터미널에서 실행, F12 로 끝";
+  let speed =
+    match !cpu_mhz with
+    | None -> Dos_ports.pc_speed
+    | Some mhz -> (
+      match Dos_ports.speed_of_mhz mhz with
+      | Ok speed -> speed
+      | Error e ->
+        prerr_endline ("bad --cpu-mhz: " ^ e);
+        exit 2)
+  in
   if not (Unix.isatty Unix.stdin && Unix.isatty Unix.stdout) then begin
     prerr_endline "dosplay needs a terminal on stdin and stdout";
     exit 2
@@ -233,7 +245,7 @@ let () =
   in
   let originals = ref [] in
   let fresh () =
-    let m = Dos_machine.create ~sound_blaster:!sound_blaster () in
+    let m = Dos_machine.create ~speed ~sound_blaster:!sound_blaster () in
     List.iter (mount_dir m) (List.rev !dirs);
     List.iter
       (fun spec ->
@@ -307,7 +319,7 @@ let () =
      else prerr_endline "stopped with F12");
   (* 게스트 시간이 벽시계보다 많이 짧으면 이 호스트가 실시간을 못 따라갔다. *)
   Printf.eprintf "guest time %.2fs, wall time %.2fs, frames sent %d (%d via temp files)\n"
-    (float_of_int st.guest_cycles /. float_of_int cpu_hz) wall o.sent o.via_files;
+    (float_of_int st.guest_cycles /. float_of_int (cpu_hz st.m)) wall o.sent o.via_files;
   Option.iter (Printf.eprintf "temp-file frames not used: %s\n") o.gave_up;
   Option.iter Quicksave.report st.state_file;
   Option.iter
