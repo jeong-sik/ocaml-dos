@@ -116,10 +116,107 @@ let test_tsr () =
   check_ivt "TSR 뒤" m;
   checki "TSR 뒤 IVT 09h 는 남는다" (rd16 m (ivt 0x09)) 0x5678
 
+(* ---- AH=55h 와, EXEC 를 거치지 않는 자식 ----
+   Beauty and the Beast 데모(DEMO.COM)는 로더다. AH=55h 로 PSP 를 만들고,
+   그 PSP 의 종료 주소(0Ah)를 제 이어하기 주소로 고치고, AH=50h 로 그 PSP 를
+   현재로 옮긴 뒤 자식 코드를 돌린다. 자식이 끝나면 DOS 가 이어하기 주소로
+   돌려준다(MS-DOS 4.0 MISC.ASM $Dup_PDB·SETMEM, CTRLC.ASM reset_environment).
+   아래 프로그램은 nasm -f bin 으로 어셈블한 것이다. *)
+let new_psp = 0x30000
+let new_seg = 0x3000
+
+(* 55h: DX=3000h SI=4000h. 새 PSP 는 현재 PSP 의 100h 바이트 사본이다. 커맨드라인 82h 에
+   'Q' 를 미리 써 두고, 55h 뒤 현재 PSP 와 DTA 를 읽는다. *)
+let create_code =
+  "\xc6\x06\x82\x00\x51"
+  ^ "\xba\x00\x30" ^ "\xbe\x00\x40" ^ "\xb4\x55" ^ "\xcd\x21"     (* mov dx,3000h; mov si,4000h; mov ah,55h; int 21h *)
+  ^ "\xb4\x51" ^ "\xcd\x21" ^ "\x89\x1e\x00\x03"                     (* 51h: [0300] = 현재 PSP *)
+  ^ "\xb4\x2f" ^ "\xcd\x21" ^ "\x89\x1e\x02\x03" ^ "\x8c\x06\x04\x03"  (* 2Fh: [0302] = DTA 오프셋, [0304] = 세그먼트 *)
+  ^ "\xbb\x00\x10" ^ "\xb4\x50" ^ "\xcd\x21"                          (* 루트 PSP 를 돌려준다 *)
+  ^ exit_with 0
+
+let test_create_psp () =
+  let m = run_root create_code ~steps:2000 in
+  checki "새 PSP 의 INT 20h" (rd16 m new_psp) 0x20CD;
+  checki "새 PSP 02h = SI" (rd16 m (new_psp + 0x02)) 0x4000;
+  check_saved "새 PSP" m new_psp;
+  checki "새 PSP 16h 부모 = 만든 쪽" (rd16 m (new_psp + 0x16)) root_seg;
+  checki "새 PSP 38h 이전 PSP" (rd16 m (new_psp + 0x38)) 0xFFFF;
+  checki "새 PSP 50h INT" (rd m (new_psp + 0x50)) 0xCD;
+  checki "새 PSP 52h RETF" (rd m (new_psp + 0x52)) 0xCB;
+  checki "새 PSP 2Ch 환경은 사본" (rd16 m (new_psp + 0x2C)) (rd16 m (root_psp + 0x2C));
+  checki "새 PSP 82h 커맨드라인은 사본" (rd m (new_psp + 0x82)) 0x51;
+  checki "55h 뒤 현재 PSP" (rd16 m (root_psp + 0x300)) new_seg;
+  (* 2Fh 는 물리 주소를 seg:off 로 나눠 준다(1008:0000): 루트 PSP:0080 과 같은 자리다 *)
+  checki "55h 는 DTA 를 안 바꾼다" ((rd16 m (root_psp + 0x304) lsl 4) + rd16 m (root_psp + 0x302)) (root_psp + 0x80)
+
+(* 자식 PSP(3000h)를 만들고 종료 주소를 handler 로 고친 뒤 현재로 옮겨 7 로 끝낸다.
+   handler: 4Dh 코드를 [0300], 현재 PSP 를 [0302] 에 두고 9 로 끝난다. *)
+let term_code =
+  "\xba\x00\x30" ^ "\xbe\x00\x40" ^ "\xb4\x55" ^ "\xcd\x21"
+  ^ "\xb8\x00\x30" ^ "\x8e\xc0"
+  ^ "\x26\xc7\x06\x0a\x00\x28\x01"                                  (* mov word [es:0Ah],handler(0128h) *)
+  ^ "\x8c\xc8" ^ "\x26\xa3\x0c\x00"                                  (* mov [es:0Ch],cs *)
+  ^ "\xbb\x00\x30" ^ "\xb4\x50" ^ "\xcd\x21"                        (* 자식을 현재 PSP 로 *)
+  ^ "\xb8\x07\x4c" ^ "\xcd\x21"                                       (* 자식이 7 로 끝난다 *)
+  ^ "\xb4\x4d" ^ "\xcd\x21" ^ "\xa3\x00\x03"                          (* handler: [0300] = 4Dh *)
+  ^ "\xb4\x51" ^ "\xcd\x21" ^ "\x89\x1e\x02\x03"                     (* [0302] = 현재 PSP *)
+  ^ "\xb8\x09\x4c" ^ "\xcd\x21"
+
+let handler_off = 0x0128
+
+let test_foreign_terminate () =
+  let m = run_root term_code ~steps:2000 in
+  checki "이어하기 주소에서 4Dh 가 자식 코드를 준다" (rd m (root_psp + 0x300)) 7;
+  checki "끝난 뒤 현재 PSP 는 부모" (rd16 m (root_psp + 0x302)) root_seg;
+  checki "루트가 9 로 끝난다" (Dos_machine.exit_code m) 9;
+  checki "IVT 22h = 자식 PSP 의 종료 주소(오프셋)" (rd16 m (ivt 0x22)) handler_off;
+  checki "IVT 22h = 자식 PSP 의 종료 주소(세그먼트)" (rd16 m (ivt 0x22 + 2)) root_seg;
+  checki "IVT 23h 는 자식 PSP 사본(오프셋)" (rd16 m (ivt 0x23)) 0x3333;
+  checki "IVT 24h 는 자식 PSP 사본(세그먼트)" (rd16 m (ivt 0x24 + 2)) 0x6666
+
+(* 상주 종료(31h, DX=20h)로 끝나면 PSP 가 든 블록 A(100h 문단)가 20h 문단으로 준다.
+   A 위에 블록 B 가 있어, 30h 문단짜리가 아닌 C0h 문단을 first fit 으로 달라고 하면
+   줄어든 A 의 꼬리가 나온다: AX = A + 20h. *)
+let tsr_code =
+  "\xb4\x4a" ^ "\xbb\x20\x00" ^ "\xcd\x21"                            (* 이 COM 위를 내놓는다 *)
+  ^ "\xb4\x48" ^ "\xbb\x00\x01" ^ "\xcd\x21" ^ "\xa3\x10\x03"       (* 블록 A = 100h 문단, [0310] *)
+  ^ "\xb4\x48" ^ "\xbb\x10\x00" ^ "\xcd\x21"                          (* 블록 B 가 그 위 *)
+  ^ "\x8b\x16\x10\x03" ^ "\x89\xd6" ^ "\x81\xc6\x00\x01" ^ "\xb4\x55" ^ "\xcd\x21"  (* 55h: DX=A SI=A+100h *)
+  ^ "\x8e\x06\x10\x03"
+  ^ "\x26\xc7\x06\x0a\x00\x47\x01"                                  (* 종료 주소 = handler(0147h) *)
+  ^ "\x8c\xc8" ^ "\x26\xa3\x0c\x00"
+  ^ "\x8b\x1e\x10\x03" ^ "\xb4\x50" ^ "\xcd\x21"                      (* A 의 PSP 를 현재로 *)
+  ^ "\xb8\x00\x31" ^ "\xba\x20\x00" ^ "\xcd\x21"                      (* 31h: 20h 문단을 남긴다 *)
+  ^ "\xb4\x4d" ^ "\xcd\x21" ^ "\xa3\x00\x03"                          (* handler: [0300] = 4Dh *)
+  ^ "\xb4\x48" ^ "\xbb\xc0\x00" ^ "\xcd\x21" ^ "\xa3\x12\x03"       (* C0h 문단: [0312] *)
+  ^ exit_with 0
+
+let test_foreign_tsr () =
+  let m = run_root tsr_code ~steps:5000 in
+  let a = rd16 m (root_psp + 0x310) in
+  checki "블록 A 는 1020h 위 어딘가" (if a > root_seg then 1 else 0) 1;
+  checki "상주 종료 뒤 first fit 은 줄어든 A 의 꼬리" (rd16 m (root_psp + 0x312)) (a + 0x20);
+  checki "4Dh 코드" (rd m (root_psp + 0x300)) 0
+
+(* 종료 주소가 기본 IRET 스텁이면(로더가 안 고친 자식) 셸로 돌아가는 것이니 기계가 끝난다 *)
+let test_foreign_default_exit () =
+  let m = Dos_machine.create () in
+  Dos_machine.load_com m
+    ("\xba\x00\x30" ^ "\xbe\x00\x40" ^ "\xb4\x55" ^ "\xcd\x21"
+     ^ "\xbb\x00\x30" ^ "\xb4\x50" ^ "\xcd\x21" ^ exit_with 9);
+  Dos_machine.run m ~max_steps:2000;
+  checki "기본 스텁이면 기계가 끝난다" (if Dos_machine.exited m then 1 else 0) 1;
+  checki "종료 코드" (Dos_machine.exit_code m) 9
+
 let () =
   test_root ();
   test_child ();
   test_tsr ();
+  test_create_psp ();
+  test_foreign_terminate ();
+  test_foreign_tsr ();
+  test_foreign_default_exit ();
   if !failed = 0 then print_endline "dos psp: all passed"
   else begin
     Printf.eprintf "dos psp: %d failures\n%!" !failed;
