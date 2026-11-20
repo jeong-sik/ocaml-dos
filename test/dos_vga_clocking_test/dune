@@ -1,0 +1,3 @@
+(test
+ (name dos_vga_clocking_test)
+ (libraries dosmachine))
