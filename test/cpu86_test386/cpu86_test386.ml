@@ -1,5 +1,5 @@
 (* test386.asm (github.com/barotto/test386.asm) against the bare I80386,
-   RFC 0005 stage 0.
+   RFC 0005.
 
    The ROM is not in this repository (GPL-3.0); TEST386_BIN names a 64KB
    build. Without it the test is skipped. The ROM sits at physical F0000h,
@@ -8,14 +8,15 @@
    error routine, which halts; the last POST code names the test. 0xFF is
    the end.
 
-   INT n and faults go through the real-mode IVT the ROM sets up, the way the
-   chip does it: FLAGS, CS, IP pushed, IF and TF cleared.
+   INT n and faults in real mode go through the real-mode IVT the ROM sets up,
+   the way the chip does it: FLAGS, CS, IP pushed, IF and TF cleared.
 
-   What passes at this stage: every real-mode POST (00h-06h), then POST 08h,
-   where the protected-mode tests begin and the CPU stops at the first
-   instruction it does not have yet (a 32-bit LGDT). A halt, a run out of
-   steps, or a stop before POST 08h fails. Later stages raise
-   [expected_prefix] as the CPU learns protected mode. *)
+   What passes at this stage: every real-mode POST (00h-06h), POST 08h (build
+   the tables, enter protected mode with paging over the identity map), POST 09h
+   (the stack in protected mode), and then POST 20h, where ring 3 begins and the
+   CPU stops at the first privilege-level change it does not have yet. A halt,
+   a run out of steps, or a stop before POST 20h fails. Later stages raise
+   [expected_prefix] as the CPU learns the rest of protected mode. *)
 
 let rom_size = 0x10000
 let rom_base = 0xF0000
@@ -33,7 +34,7 @@ let unconnected_port = 0xFF
 
 (* The POST codes test386 writes in order up to where this CPU stops. 07h is
    not used by test386. *)
-let expected_prefix = [ 0x00; 0x01; 0x02; 0x03; 0x04; 0x05; 0x06; 0x08 ]
+let expected_prefix = [ 0x00; 0x01; 0x02; 0x03; 0x04; 0x05; 0x06; 0x08; 0x09; 0x20 ]
 
 type stop =
   | Halted of string     (* the error routine, or a HLT nobody expected *)

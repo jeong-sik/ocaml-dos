@@ -132,10 +132,10 @@ let () =
     check "386: IDTR comes back"
       (x.Cpu86.saved_idtr_base = 0x345678 && x.Cpu86.saved_idtr_limit = 0x1234)
 
-(* A snapshot whose CR0 has PE or PG on is refused as corrupt, not restored
-   into a machine that cannot run it and not raised from [Cpu86.load_state].
-   The CR0 word is found by the three values the program above left in CR0,
-   CR2 and CR3, then rewritten, and the payload checksum is recomputed. *)
+(* A snapshot whose CR0 has PG on with PE off is refused as corrupt, not raised
+   from [Cpu86.load_state]; PE alone, or PE with PG, restores. The CR0 word is
+   found by the three values the program above left in CR0, CR2 and CR3, then
+   rewritten, and the payload checksum is recomputed. *)
 let () =
   let boot () =
     let t = Dos_machine.create ~model:Cpu86.I80386 () in
@@ -169,8 +169,83 @@ let () =
       | Ok _ | Error _ -> false
     in
     check "CR0 = 0Ch restores" (match Dos_snapshot.restore (with_cr0 0xC) with Ok _ -> true | Error _ -> false);
-    check "CR0 with PE is corrupt" (corrupt 0xD);
-    check "CR0 with PG is corrupt" (corrupt 0x8000000C)
+    let restores cr0 =
+      match Dos_snapshot.restore (with_cr0 cr0) with Ok _ -> true | Error _ -> false
+    in
+    check "CR0 with PE restores" (restores 0xD);
+    check "CR0 with PE and PG restores" (restores 0x8000000D);
+    check "CR0 with PG and no PE is corrupt" (corrupt 0x8000000C)
+
+(* A 386 machine in protected mode: the caches of CS, DS and SS, a GDT-loaded LDT
+   and the instruction pointer travel with the snapshot, and a restored machine
+   goes on as the original does. The program is a COM file: it enters protected
+   mode with a 64KB code segment (D=1) and 32-bit data and stack segments based
+   at the COM segment, loads an LDT, pushes a dword and spins. *)
+let pm386_com ~seg =
+  let w16 v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xFF)) in
+  let w32 v = String.init 4 (fun i -> Char.chr ((v lsr (8 * i)) land 0xFF)) in
+  let base = seg * 16 in
+  let desc ~base ~limit ~access ~flags =
+    w16 (limit land 0xFFFF) ^ w16 (base land 0xFFFF)
+    ^ String.make 1 (Char.chr ((base lsr 16) land 0xFF))
+    ^ String.make 1 (Char.chr access)
+    ^ String.make 1 (Char.chr ((flags lsl 4) lor ((limit lsr 16) land 0xF)))
+    ^ String.make 1 (Char.chr ((base lsr 24) land 0xFF))
+  in
+  let gdt =
+    String.make 8 '\000'
+    ^ desc ~base ~limit:0xFFFF ~access:0x9A ~flags:4
+    ^ desc ~base ~limit:0xFFFF ~access:0x92 ~flags:4
+    ^ desc ~base:(base + 0x200) ~limit:0x1F ~access:0x82 ~flags:0
+  in
+  let code_bytes = 46 in
+  let gdt_at = 0x100 + code_bytes in
+  let gdtr_at = gdt_at + String.length gdt in
+  let pm_at = 0x100 + 19 in
+  "\xFA"                                         (* cli *)
+  ^ "\x0F\x01\x16" ^ w16 gdtr_at                (* lgdt [gdtr] *)
+  ^ "\x0F\x20\xC0\x0C\x01\x0F\x22\xC0"       (* mov eax,cr0; or al,1; mov cr0,eax *)
+  ^ "\xEA" ^ w16 pm_at ^ w16 0x08                (* jmp 0008:pm *)
+  ^ "\x66\xB8\x10\x00\x8E\xD8\x8E\xD0"       (* pm: mov ax,10h; mov ds,ax; mov ss,ax *)
+  ^ "\xBC\x00\xF0\x00\x00"                    (* mov esp,0F000h *)
+  ^ "\x66\xB8\x18\x00\x0F\x00\xD0"           (* mov ax,18h; lldt ax *)
+  ^ "\x66\xB8\x34\x12\x50"                    (* mov ax,1234h; push eax *)
+  ^ "\xEB\xFE"                                   (* spin: jmp spin *)
+  ^ gdt
+  ^ w16 (String.length gdt - 1) ^ w32 (base + gdt_at)  (* gdtr: limit, base *)
+
+let () =
+  let seg =
+    let t = Dos_machine.create ~model:Cpu86.I80386 () in
+    Dos_machine.load_com t "\x90";
+    Cpu86.seg t.Dos_state.cpu 1
+  in
+  let image = pm386_com ~seg in
+  let boot () =
+    let t = Dos_machine.create ~model:Cpu86.I80386 () in
+    Dos_machine.load_com t image;
+    t
+  in
+  let a = boot () in
+  run a 50;
+  let cpu = a.Dos_state.cpu in
+  check "protected mode: the program reached protected mode"
+    (match (Cpu86.save_state cpu).Cpu86.saved_386 with
+     | Some x -> x.Cpu86.saved_cr0 land 1 = 1 && x.Cpu86.saved_code32
+     | None -> false);
+  let saved = round_trip ~name:"386 protected mode" ~boot ~n:50 ~m:50 in
+  match (Cpu86.save_state (restore_exn saved).Dos_state.cpu).Cpu86.saved_386 with
+  | None -> check "a 386 saves its protected-mode state" false
+  | Some x ->
+    check "protected mode: PE comes back" (x.Cpu86.saved_cr0 land 1 = 1);
+    check "protected mode: CS.D comes back" x.Cpu86.saved_code32;
+    check "protected mode: SS.B comes back" x.Cpu86.saved_stack32;
+    check "protected mode: the LDT comes back"
+      (x.Cpu86.saved_ldt_selector = 0x18 && x.Cpu86.saved_ldt_limit = 0x1F);
+    check "protected mode: the segment bases come back"
+      (x.Cpu86.saved_bases.(1) = seg * 16 && x.Cpu86.saved_bases.(3) = seg * 16);
+    check "protected mode: the segment limits come back"
+      (x.Cpu86.saved_limits.(1) = 0xFFFF && x.Cpu86.saved_limits.(3) = 0xFFFF)
 
 (* The CPU refuses a saved state of the other kind before writing anything. *)
 let () =

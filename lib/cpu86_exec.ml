@@ -1,6 +1,7 @@
 (* step: 명령 하나를 디코드해 돌린다. *)
 
 open Cpu86_state
+open Cpu86_segment
 open Cpu86_fault
 open Cpu86_decode
 open Cpu86_alu
@@ -23,7 +24,11 @@ let step t =
     let entry_tf = t.tf in
     (match t.model with
      | I80286 -> t.fetch_end <- (base_ip + t.fetch_limit) land 0xffff
-     | I80386 -> t.fetch_end <- min (base_ip + t.fetch_limit) segment_end
+     | I80386 ->
+       (* [min] 은 다형 비교를 부르는 함수라 정수는 직접 비교한다(삼국지3 5백만 스텝의 386
+          호스트 명령 수가 6% 가량 준다). *)
+       let by_length = base_ip + t.fetch_limit and by_limit = t.limits.(sreg_cs) + 1 in
+       t.fetch_end <- (if by_length <= by_limit then by_length else by_limit)
      | I8086 | I80186 -> ());
     let used_cycles =
       try begin
@@ -202,11 +207,11 @@ let step t =
         let nesting = fetch8 t land 0x1f in
         atomic t (fun () ->
             push16 t (reg16 t 5);
-            let frame = t.regs.(4) in
+            let frame = stack_pointer t in
             if nesting > 0 then begin
               for _ = 1 to nesting - 1 do
-                t.regs.(5) <- (t.regs.(5) - 2) land 0xffff;
-                push16 t (read16 t sreg_ss t.regs.(5))
+                set_frame_pointer t ((frame_pointer t - 2) land stack_mask t);
+                push16 t (read16 t sreg_ss (frame_pointer t))
               done;
               push16 t frame
             end;
@@ -214,11 +219,11 @@ let step t =
                아래 — size 가 지역변수 자리다(Intel: SP <- SP - Size). 프레임에서
                빼면 nesting>0 일 때 지역변수가 방금 민 디스플레이를 덮는다. *)
             set_reg16 t 5 frame;
-            set_reg16 t 4 ((t.regs.(4) - size) land 0xffff);
+            set_stack_pointer t ((stack_pointer t - size) land stack_mask t);
             19)
       | 0xc9 (* leave *) ->
         atomic t (fun () ->
-            set_reg16 t 4 (reg16 t 5);
+            set_stack_pointer t (frame_pointer t);
             set_reg16 t 5 (pop16 t);
             8)
       (* --- hlt --- *)
@@ -378,7 +383,7 @@ let step t =
         (match rm with
          | Mem (b, o) | Mem32 (b, o) ->
            let off = read16 t b o in
-           let segv = read16 t b (o + 2) in
+           let segv = read16 t b (second_offset rm o 2) in
            set_reg16 t regf off;
            if opcode = 0xc4 then set_seg t 0 segv else set_seg t 3 segv
          | Reg _ -> (undefined_on_286 t true; unsupported t ctx "les/lds reg"));
@@ -405,7 +410,7 @@ let step t =
       | 0xc2 ->
         let n = fetch16 t in
         t.ip <- pop16 t;
-        t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+        drop_stack t n;
         10
       (* RETF — 서드파티 첫 요구(ZZT @1b21:002a). far call/인터럽트 스타일
          프레임에서 CS:IP 를 스택에서 되돌린다. *)
@@ -419,7 +424,7 @@ let step t =
         atomic t (fun () ->
             t.ip <- pop16 t;
             set_seg t 1 (pop16 t);
-            t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+            drop_stack t n;
             18)
       | 0xc3 -> t.ip <- pop16 t; 8
       | 0xc6 | 0xc7 ->
@@ -546,7 +551,7 @@ let step t =
            (match rm with
             | Mem (b, o) | Mem32 (b, o) ->
               let off = read16 t b o in
-              let sg = read16 t b (o + 2) in
+              let sg = read16 t b (second_offset rm o 2) in
               ignore
                 (atomic t (fun () ->
                      push16 t (seg t 1);
@@ -561,7 +566,7 @@ let step t =
            (match rm with
             | Mem (b, o) | Mem32 (b, o) ->
               let off = read16 t b o in
-              set_seg t 1 (read16 t b (o + 2));
+              set_seg t 1 (read16 t b (second_offset rm o 2));
               t.ip <- off
             | Reg _ -> (undefined_on_286 t true; unsupported t ctx "jmp far reg"))
          (* /7 은 문서에 없지만 실칩은 /6 과 같은 push 로 응답한다.
@@ -598,10 +603,10 @@ let step t =
              match t.model with
              | I80386 ->
                let lower = sx (read16 t b o) in
-               let upper = sx (read16 t b (o + 2)) in
+               let upper = sx (read16 t b (second_offset rm o 2)) in
                idx < lower || idx > upper
              | I8086 | I80186 | I80286 ->
-               idx < sx (read16 t b o) || idx > sx (read16 t b (o + 2))
+               idx < sx (read16 t b o) || idx > sx (read16 t b (second_offset rm o 2))
            in
            if out_of_bounds then
              (* 186 은 다음 명령으로 돌아가는 트랩으로 둔다. 286 은 BOUND
@@ -639,12 +644,16 @@ let step t =
       (* --- 386 의 66h 형태([operand32_form])는 0xFF 를 넘어 여기에만 닿는다.
              나머지는 예외로 알린다 — 조용한 오동작 대신 하네스가 다음에
              구현할 명령을 읽는다. --- *)
+      | 0x63 when t.model = I80386 -> Cpu86_protected.arpl t ctx
       | _ ->
         if opcode land operand32_form <> 0 then Cpu86_exec32.dispatch t ctx
         else unsupported t ctx (Printf.sprintf "opcode %02x" opcode)
       end
       with Fault vector ->
         t.ip <- base_ip;
+        if t.cr0 land cr0_pe <> 0 then
+          raise (Unsupported (Printf.sprintf "fault %d in protected mode needs %s @%04x:%04x"
+                                vector protected_mode_delivery (seg t 1) base_ip));
         (match t.int_hook with
          | Some f -> f vector
          | None ->
@@ -655,7 +664,11 @@ let step t =
     t.cycles <- t.cycles + used_cycles;
     (* 단일 스텝 트랩: TF 가 켜진 채 명령이 끝나면 INT 1. 훅이 IVT 로
        전달하며 TF 를 지우므로 핸들러 안에서 재귀하지 않는다. *)
-    if entry_tf && t.tf then
-      (match t.int_hook with Some f -> f 1 | None -> ());
+    if entry_tf && t.tf then begin
+      if t.cr0 land cr0_pe <> 0 then
+        raise (Unsupported (Printf.sprintf "single-step trap in protected mode needs %s @%04x:%04x"
+                              protected_mode_delivery (seg t 1) t.ip));
+      (match t.int_hook with Some f -> f 1 | None -> ())
+    end;
     used_cycles
   end

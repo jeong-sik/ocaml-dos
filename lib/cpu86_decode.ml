@@ -128,14 +128,16 @@ let decode_pop_target t ~addr ~bytes =
   match addr with
   | A16 | A16_seg _ -> decode_modrm t ~addr
   | A32 | A32_seg _ ->
-    let sp = t.regs.(4) in
-    t.regs.(4) <- (sp + bytes) land 0xffff;
+    let sp = stack_pointer t in
+    set_stack_pointer t ((sp + bytes) land stack_mask t);
     let decoded = decode_modrm t ~addr in
-    t.regs.(4) <- sp;
+    set_stack_pointer t sp;
     decoded
 
-(* 세그먼트 베이스 + 오프셋 → 물리 주소. 오프셋은 16비트에서 감긴다. *)
-let at_base t base off = (base + (off land 0xffff)) land t.addr_mask
+(* 세그먼트 베이스 + 오프셋 → 물리 주소. 8086·186 의 오프셋은 16비트에서 감긴다.
+   286 은 접근 전에 한계를 따져 감길 오프셋이 없고, 386 은 오프셋이 32 비트다
+   ([offset_mask]). *)
+let at_base t base off = (base + (off land t.offset_mask)) land t.addr_mask
 let at t sreg off = at_base t t.bases.(sreg) off
 
 (* 286 실모드에서 오프셋 FFFF 의 워드는 세그먼트 끝을 넘는다. 8086 처럼
@@ -144,7 +146,7 @@ let at t sreg off = at_base t t.bases.(sreg) off
    메모리 접근은 모두 이 둘을 지난다. 끝은 [sreg] 의 한계([t.limits])다. *)
 let overruns t sreg off =
   match t.model with
-  | I80286 | I80386 -> (off land 0xffff) + 1 > t.limits.(sreg)
+  | I80286 | I80386 -> (off land t.offset_mask) + 1 > t.limits.(sreg)
   | I8086 | I80186 -> false
 
 (* 세그먼트 끝을 넘은 접근의 결함. 386 은 SS 면 INT 12(#SS), 다른
@@ -179,7 +181,7 @@ let write16 t s o v =
 (* 더블워드(386, 66h). 실모드에서는 오프셋 FFFDh 부터 네 바이트가 세그먼트
    끝을 넘는다 — 바이트 하나 오가기 전에 [overrun_vector] 결함이다. *)
 let check_dword t sreg off =
-  if (off land 0xffff) + 3 > t.limits.(sreg) then fault (overrun_vector t sreg)
+  if (off land t.offset_mask) + 3 > t.limits.(sreg) then fault (overrun_vector t sreg)
 
 let read32 t s o =
   check_dword t s o;
@@ -202,6 +204,14 @@ let write32 t s o v =
    바이트 하나 오가기 전에 결함이다. 16 비트 오프셋과 달리 감기지 않는다. *)
 let within t sreg off size =
   if off + size - 1 > t.limits.(sreg) then fault (overrun_vector t sreg)
+
+(* [Mem] 피연산자의 둘째 접근(far 포인터의 셀렉터, BOUND 의 상한)이 닿는 오프셋. 16 비트
+   주소는 64KB 에서 감긴다(SingleStepTests/80386: `0F B4 07` 의 BX=FFFEh 는 셀렉터를
+   오프셋 0 에서 읽는다). 32 비트 주소는 감기지 않는다. *)
+let second_offset opd o k =
+  match opd with
+  | Mem _ -> (o + k) land 0xffff
+  | Mem32 _ | Reg _ -> o + k
 
 (* 16 비트 far 포인터 m16:16 이 차지하는 바이트(LES·LDS·LSS·LFS·LGS, FF /3·/5). *)
 let far_pointer16_bytes = 4
@@ -274,28 +284,58 @@ let port_out32 t p v =
   port_out16 t p (v land 0xffff);
   port_out16 t ((p + 2) land 0xffff) ((v lsr 16) land 0xffff)
 
-(* SP 는 쓰기가 끝난 뒤에 내린다 — 넘치면 SP 도 그대로다. *)
+(* SP 는 쓰기가 끝난 뒤에 내린다 — 넘치면 SP 도 그대로다. SS 의 B 비트가 꺼진
+   스택(실모드와 16 비트 스택)은 SP 만 움직이고 ESP 의 위 절반은 그대로다. B 가
+   켜지면 ESP 가 움직인다.
+
+   16 비트 스택이 거의 전부라 그 길은 [Cpu86_state.stack_pointer] 같은 헬퍼를 부르지 않고
+   레지스터를 바로 쓴다. dune 개발 빌드는 모듈 사이 호출을 인라인하지 않아서, 헬퍼 셋을
+   부르면 삼국지3 5백만 스텝의 호스트 명령 수가 286 에서 1% 가량 늘었다(번갈아 3회 평균). *)
 let push16 t v =
-  let sp = (t.regs.(4) - 2) land 0xffff in
-  write16 t sreg_ss sp v;
-  t.regs.(4) <- sp
+  if t.stack32 then begin
+    let sp = (get32 t 4 - 2) land register32_mask in
+    write16 t sreg_ss sp v;
+    put32 t 4 sp
+  end else begin
+    let sp = (t.regs.(4) - 2) land 0xffff in
+    write16 t sreg_ss sp v;
+    t.regs.(4) <- sp
+  end
 
 let pop16 t =
-  let v = read16 t sreg_ss t.regs.(4) in
-  t.regs.(4) <- (t.regs.(4) + 2) land 0xffff;
-  v
+  if t.stack32 then begin
+    let sp = get32 t 4 in
+    let v = read16 t sreg_ss sp in
+    put32 t 4 ((sp + 2) land register32_mask);
+    v
+  end else begin
+    let v = read16 t sreg_ss t.regs.(4) in
+    t.regs.(4) <- (t.regs.(4) + 2) land 0xffff;
+    v
+  end
 
-(* 실모드 스택은 16 비트(SS 의 B 비트 0)라 32 비트 push·pop 도 SP 만
-   움직이고 ESP 의 위 절반은 그대로다. *)
 let push32 t v =
-  let sp = (t.regs.(4) - 4) land 0xffff in
-  write32 t sreg_ss sp v;
-  t.regs.(4) <- sp
+  if t.stack32 then begin
+    let sp = (get32 t 4 - 4) land register32_mask in
+    write32 t sreg_ss sp v;
+    put32 t 4 sp
+  end else begin
+    let sp = (t.regs.(4) - 4) land 0xffff in
+    write32 t sreg_ss sp v;
+    t.regs.(4) <- sp
+  end
 
 let pop32 t =
-  let v = read32 t sreg_ss t.regs.(4) in
-  t.regs.(4) <- (t.regs.(4) + 4) land 0xffff;
-  v
+  if t.stack32 then begin
+    let sp = get32 t 4 in
+    let v = read32 t sreg_ss sp in
+    put32 t 4 ((sp + 4) land register32_mask);
+    v
+  end else begin
+    let v = read32 t sreg_ss t.regs.(4) in
+    t.regs.(4) <- (t.regs.(4) + 4) land 0xffff;
+    v
+  end
 
 (* ---------- jcc 조건 ---------- *)
 
@@ -422,13 +462,27 @@ let with_address32 = function
   | A16 | A32 -> A32
   | A16_seg s | A32_seg s -> A32_seg s
 
+(* CS 의 D 비트가 켜진 코드의 기본 크기는 32 비트다. 접두가 끝난 뒤에 [addr] 를 한 번
+   뒤집는다: 67h 를 봤으면 [with_address32] 가 A32 로 만들어 두었으니 16 비트 주소가 되고,
+   못 봤으면 A16 이니 32 비트 주소가 된다. 같은 접두가 여럿이어도 한 번만 뒤집힌다. *)
+let toggle_address = function
+  | A16 -> A32
+  | A32 -> A16
+  | A16_seg s -> A32_seg s
+  | A32_seg s -> A16_seg s
+
+(* 피연산자 크기: D 비트가 꺼진 코드는 66h 가 32 비트로 올리고, 켜진 코드는 접두가
+   없을 때 32 비트이며 66h 가 16 비트로 되돌린다. 주소 크기는 [toggle_address] 가 정한다. *)
 let rec prefixes_after t ~base_ip addr rep lock =
   let b = fetch8 t in
   match t.prefixes.(b) with
   | Not_prefix ->
     let ctx = { base_ip; opcode = b; addr; rep } in
     if lock then check_lock t ctx;
-    ctx
+    if t.code32 then begin
+      let ctx = { ctx with addr = toggle_address addr } in
+      if operand_sized.(b) then { ctx with opcode = b lor operand32_form } else ctx
+    end else ctx
   | Segment s -> prefixes_after t ~base_ip (with_segment addr s) rep lock
   | Lock -> prefixes_after t ~base_ip addr rep true
   | Rep z -> prefixes_after t ~base_ip addr (Some z) lock
@@ -441,7 +495,9 @@ and prefixes_after_66 t ~base_ip addr rep lock =
   | Not_prefix ->
     let ctx = { base_ip; opcode = b; addr; rep } in
     if lock then check_lock t ctx;
-    if operand_sized.(b) then { ctx with opcode = b lor operand32_form } else ctx
+    if t.code32 then { ctx with addr = toggle_address addr }
+    else if operand_sized.(b) then { ctx with opcode = b lor operand32_form }
+    else ctx
   | Segment s -> prefixes_after_66 t ~base_ip (with_segment addr s) rep lock
   | Lock -> prefixes_after_66 t ~base_ip addr rep true
   | Rep z -> prefixes_after_66 t ~base_ip addr (Some z) lock

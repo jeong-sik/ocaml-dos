@@ -5,6 +5,7 @@
    [Cpu86_decode.operand_sized] 가 정한다. 흐름과 스택 명령은 [Cpu86_flow32] 에 있다. *)
 
 open Cpu86_state
+open Cpu86_segment
 open Cpu86_fault
 open Cpu86_decode
 open Cpu86_alu
@@ -48,7 +49,7 @@ let far_pointer t ctx rm what =
   match rm with
   | Mem (s, o) | Mem32 (s, o) ->
     let off = read32 t s o in
-    let sg = read16 t s (o + 4) in
+    let sg = read16 t s (second_offset rm o 4) in
     (off, sg)
   | Reg _ -> undefined_on_286 t true; unsupported t ctx what
 
@@ -58,13 +59,13 @@ let group_ff t ctx =
    | 0 -> op_write32 t rm (inc_dec t (op_read32 t rm) 0)
    | 1 -> op_write32 t rm (inc_dec t (op_read32 t rm) 5)
    | 2 ->
-     let target = check_target (op_read32 t rm) in
+     let target = check_target t (op_read32 t rm) in
      push32 t t.ip;
      t.ip <- target
    | 3 ->
      let off, sg = far_pointer t ctx rm "call far reg (66h)" in
      ignore (far_call t off sg)
-   | 4 -> t.ip <- check_target (op_read32 t rm)
+   | 4 -> t.ip <- check_target t (op_read32 t rm)
    | 5 ->
      let off, sg = far_pointer t ctx rm "jmp far reg (66h)" in
      far_jump t off sg
@@ -86,7 +87,7 @@ let bound32 t ctx =
    | Mem (s, o) | Mem32 (s, o) ->
      let idx = sign32 (get32 t regf) in
      let lower = sign32 (read32 t s o) in
-     let upper = sign32 (read32 t s (o + 4)) in
+     let upper = sign32 (read32 t s (second_offset rm o 4)) in
      if idx < lower || idx > upper then fault vector_bound
    | Reg _ -> undefined_on_286 t true; unsupported t ctx "bound on register (66h)");
   13
@@ -229,7 +230,7 @@ let dispatch t ctx =
   | 0xc8 -> enter32 t
   | 0xc9 ->
     atomic t (fun () ->
-        t.regs.(4) <- t.regs.(5);
+        set_stack_pointer t (frame_pointer t);
         put32 t 5 (pop32 t);
         8)
   | 0xca -> ret_far t (fetch16 t)
@@ -252,7 +253,7 @@ let dispatch t ctx =
   | 0xef -> port_out32 t t.regs.(2) (get32 t 0); 8
   | 0xe8 ->
     let d = fetch32 t in
-    let target = check_target (t.ip + d) in
+    let target = check_target t (t.ip + d) in
     push32 t t.ip;
     t.ip <- target;
     13
@@ -266,4 +267,5 @@ let dispatch t ctx =
   | 0xf7 -> group3_32 t ctx
   | 0xff -> group_ff t ctx
   | 0x0f -> Cpu86_exec0f.(dispatch t ctx Dword)
+  | 0x63 -> Cpu86_protected.arpl t ctx
   | _ -> unsupported t ctx (Printf.sprintf "opcode %02x (66h)" opcode)

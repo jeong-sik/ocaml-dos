@@ -113,8 +113,14 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    44: a 386 machine's CPU section, after GS, carries CR0, CR2, CR3, the GDTR
    and IDTR (base, then limit), DR0-DR7 and TR6, TR7: 17 ints and two array
    lengths, 19 eight-byte words, 152 bytes in all. The payload of an 8086, 186 or 286 machine has
-   the same bytes as format 43; only the header's number differs. *)
-let format_version = 44
+   the same bytes as format 43; only the header's number differs.
+   45: protected mode. A 386 machine's CPU section, after TR7, carries the six
+   segment bases and limits (an array each), CS.D and SS.B (one byte each),
+   then LDTR and TR (selector, base, limit): 20 eight-byte words and two bytes,
+   162 bytes in all. The instruction pointer is 33 bits wide, so a 386 in
+   32-bit code saves its EIP. The payload of an 8086, 186 or 286 machine has
+   the same bytes as format 44; only the header's number differs. *)
+let format_version = 45
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -145,6 +151,8 @@ let save_error_to_string (Unsaveable message) = "machine cannot be saved: " ^ me
 
 let reg = C.word
 let dword = C.range 0 0xffffffff
+let instruction_pointer = C.range 0 0x1ffffffff  (* EIP, and 10000h past a 64KB code segment *)
+let segment_limit = C.range Cpu86.no_limit 0xffffffff
 let handle_number = C.range 0 (max_handles - 1)
 let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
 let cursor_flag = C.range min_int 0
@@ -418,14 +426,16 @@ let write_payload w t =
   in
   C.put_int_array w ~what:"registers" reg saved_regs;
   C.put_int_array w ~what:"segments" reg saved_segs;
-  put "ip" reg saved_ip;
+  put "ip" instruction_pointer saved_ip;
   put "flags" reg saved_flags;
   C.put_bool w saved_halted;
   put "cycles" C.count saved_cycles;
   (match saved_386 with
    | Some { Cpu86.saved_regs_hi; saved_fs; saved_gs; saved_cr0; saved_cr2; saved_cr3;
             saved_gdtr_base; saved_gdtr_limit; saved_idtr_base; saved_idtr_limit;
-            saved_dr; saved_tr } ->
+            saved_dr; saved_tr; saved_bases; saved_limits; saved_code32; saved_stack32;
+            saved_ldt_selector; saved_ldt_base; saved_ldt_limit;
+            saved_task_selector; saved_task_base; saved_task_limit } ->
      C.put_int_array w ~what:"upper halves" reg saved_regs_hi;
      put "fs" reg saved_fs;
      put "gs" reg saved_gs;
@@ -437,7 +447,17 @@ let write_payload w t =
      put "idtr base" dword saved_idtr_base;
      put "idtr limit" reg saved_idtr_limit;
      C.put_int_array w ~what:"debug registers" dword saved_dr;
-     C.put_int_array w ~what:"test registers" dword saved_tr
+     C.put_int_array w ~what:"test registers" dword saved_tr;
+     C.put_int_array w ~what:"segment bases" dword saved_bases;
+     C.put_int_array w ~what:"segment limits" segment_limit saved_limits;
+     C.put_bool w saved_code32;
+     C.put_bool w saved_stack32;
+     put "ldtr selector" reg saved_ldt_selector;
+     put "ldtr base" dword saved_ldt_base;
+     put "ldtr limit" segment_limit saved_ldt_limit;
+     put "tr selector" reg saved_task_selector;
+     put "tr base" dword saved_task_base;
+     put "tr limit" segment_limit saved_task_limit
    | None -> ());
   C.put_bytes w mem;
   Dos_video.write_state w video;
@@ -669,7 +689,7 @@ let read_payload r =
   let get what rng = C.get r ~what rng in
   let saved_regs = get_int_array r ~what:"registers" ~len:8 reg in
   let saved_segs = get_int_array r ~what:"segments" ~len:4 reg in
-  let saved_ip = get "ip" reg in
+  let saved_ip = get "ip" instruction_pointer in
   let saved_flags = get "flags" reg in
   let saved_halted = C.get_bool r in
   let saved_cycles = get "cycles" C.count in
@@ -680,8 +700,8 @@ let read_payload r =
       let saved_fs = get "fs" reg in
       let saved_gs = get "gs" reg in
       let saved_cr0 = get "cr0" dword in
-      if saved_cr0 land Cpu86.cr0_unsupported_bits <> 0 then
-        C.fail "CR0 has PE or PG on: protected mode and paging are not supported";
+      if saved_cr0 land Cpu86.cr0_pg <> 0 && saved_cr0 land Cpu86.cr0_pe = 0 then
+        C.fail "CR0.PG is on with CR0.PE off";
       let saved_cr2 = get "cr2" dword in
       let saved_cr3 = get "cr3" dword in
       let saved_gdtr_base = get "gdtr base" dword in
@@ -690,9 +710,21 @@ let read_payload r =
       let saved_idtr_limit = get "idtr limit" reg in
       let saved_dr = get_int_array r ~what:"debug registers" ~len:8 dword in
       let saved_tr = get_int_array r ~what:"test registers" ~len:2 dword in
+      let saved_bases = get_int_array r ~what:"segment bases" ~len:6 dword in
+      let saved_limits = get_int_array r ~what:"segment limits" ~len:6 segment_limit in
+      let saved_code32 = C.get_bool r in
+      let saved_stack32 = C.get_bool r in
+      let saved_ldt_selector = get "ldtr selector" reg in
+      let saved_ldt_base = get "ldtr base" dword in
+      let saved_ldt_limit = get "ldtr limit" segment_limit in
+      let saved_task_selector = get "tr selector" reg in
+      let saved_task_base = get "tr base" dword in
+      let saved_task_limit = get "tr limit" segment_limit in
       Some { Cpu86.saved_regs_hi; saved_fs; saved_gs; saved_cr0; saved_cr2; saved_cr3;
              saved_gdtr_base; saved_gdtr_limit; saved_idtr_base; saved_idtr_limit;
-             saved_dr; saved_tr }
+             saved_dr; saved_tr; saved_bases; saved_limits; saved_code32; saved_stack32;
+             saved_ldt_selector; saved_ldt_base; saved_ldt_limit;
+             saved_task_selector; saved_task_base; saved_task_limit }
     | Cpu86.I8086 | Cpu86.I80186 | Cpu86.I80286 -> None
   in
   Cpu86.load_state t.cpu

@@ -50,6 +50,18 @@ let descriptor_table_top_byte_286 = 0xFF
 (* 기술자 표 레지스터 하나: GDTR·IDTR. *)
 type descriptor_table = { mutable table_base : int; mutable table_limit : int }
 
+(* 셀렉터로 고르는 시스템 세그먼트 레지스터 하나: LDTR·TR. 셀렉터와 그 기술자에서
+   읽은 base·limit 을 들고 있다(캐시). 적재한 뒤 표 메모리를 고쳐도 캐시는 그대로다. *)
+type system_segment = {
+  mutable sys_selector : int;
+  mutable sys_base : int;
+  mutable sys_limit : int;
+}
+
+(* LDTR·TR 의 리셋 값. 386 PRM 10.1 은 리셋 뒤 두 레지스터를 적지 않는다(확인
+   필요). 널 셀렉터와 빈 표로 둔다. *)
+let system_segment_reset () = { sys_selector = 0; sys_base = 0; sys_limit = 0 }
+
 (* CR0 의 비트. PE(보호 모드), MP·EM·TS(코프로세서), ET, PG(페이징). 386 PRM 10.1
    은 리셋 뒤 CR0 의 ET 가 80387 이 있을 때만 켜진다고 적었다. 이 기계에는
    코프로세서가 없어 모두 0 이다(확인 필요: 같은 절의 그림 10-2 는 못 읽었다).
@@ -63,9 +75,6 @@ let cr0_et = 0x00000010
 let cr0_pg = 0x80000000
 let cr0_defined = cr0_pe lor cr0_mp lor cr0_em lor cr0_ts lor cr0_et lor cr0_pg
 
-(* CR0 의 비트 가운데 아직 돌릴 코어가 없는 것: 보호 모드(RFC 0005 3b)와 페이징(5
-   단계). 쓰기와 [load_state] 가 이 비트가 켜진 값을 거절한다. 단계마다 하나씩 뺀다. *)
-let cr0_unsupported_bits = cr0_pe lor cr0_pg
 let cr0_reset = 0
 
 (* 386 의 32 비트 시스템 레지스터(CR2·CR3·DR·TR, 기술자 표 기준)가 담는 폭. *)
@@ -113,6 +122,9 @@ let classic_segments = segment_count I8086
 (* 실모드 세그먼트의 한계: 마지막으로 닿을 수 있는 오프셋. 세그먼트가 64KB 라
    FFFFh 다. [t.limits] 의 모든 칸이 이 값으로 시작한다. *)
 let real_mode_limit = 0xffff
+
+(* 널 셀렉터를 실은 DS·ES·FS·GS 의 limit. 오프셋 0 의 한 바이트도 한계 밖이다. *)
+let no_limit = -1
 
 (* 세그먼트 레지스터 번호: [segs] 의 칸이고 modrm reg 필드(8C·8E)의 값이다. *)
 let sreg_es = 0
@@ -163,16 +175,24 @@ let iopl_nt_bits = 0x7000
 let no_fetch_end = -1
 
 (* 페치 뒤 IP 가 도는 폭. 8086-286 은 FFFF 다음이 0 이다. 386 의 EIP 는 32
-   비트라 FFFF 의 바이트를 가져오면 10000h 가 되고, 그 자리를 가져오려 하면
-   CS 한계(FFFF) 밖이라 INT 13 이다([segment_end] 가 [fetch_end] 를 막는다).
+   비트라 CS 의 마지막 바이트를 가져오면 limit+1 이 되고, 그 자리를 가져오려 하면
+   CS 한계 밖이라 INT 13 이다(CS 의 limit+1 이 [fetch_end] 를 막는다).
    SingleStepTests/80386 의 ret·jmp·call·iret 이 FFFF 의 HLT 로 가면 끝난 뒤
-   EIP 가 10000h 다. *)
-let fetch_ip_mask = function I8086 | I80186 | I80286 -> 0xffff | I80386 -> 0x1ffff
-let segment_end = 0x10000
+   EIP 가 10000h 다. 한계가 FFFFFFFFh 인 CS 의 마지막 바이트 다음은 100000000h
+   라 33 비트를 담는다. *)
+let fetch_ip_mask = function I8086 | I80186 | I80286 -> 0xffff | I80386 -> 0x1ffffffff
+
+(* 메모리 접근의 오프셋을 자르는 폭. 8086·186 은 오프셋이 64KB 에서 감긴다. 286 은
+   오프셋 FFFF 의 워드가 한계 밖이라 접근 전에 결함이고, 386 은 오프셋이 32 비트다
+   (한계가 FFFFh 보다 큰 보호 모드 세그먼트). *)
+let offset_mask = function
+  | I8086 | I80186 | I80286 -> 0xffff
+  | I80386 -> 0xffffffff
 
 type t = {
   model : model;
   addr_mask : int;  (** [address_mask model] — 메모리 접근마다 쓰는 파생값 *)
+  offset_mask : int;  (** [offset_mask model] — 메모리 접근마다 쓰는 파생값 *)
   mutable regs : int array;  (** AX CX DX BX SP BP SI DI *)
   regs_hi : int array;
       (** 386 의 EAX…EDI 위 16 비트. 16 비트 쓰기는 [regs] 만 바꾸니 위
@@ -182,8 +202,15 @@ type t = {
       (** [segs] 칸마다 세그먼트 베이스. 주소를 세는 곳은 셀렉터×16 대신 이
           칸을 읽는다. [set_seg] 가 셀렉터×16 으로 쓴다 *)
   limits : int array;
-      (** [segs] 칸마다 마지막으로 닿을 수 있는 오프셋. 실모드는 늘
-          [real_mode_limit] 다 *)
+      (** [segs] 칸마다 마지막으로 닿을 수 있는 오프셋. 만들 때 [real_mode_limit]
+          이고, 실모드 적재는 쓰지 않는다. 널 셀렉터를 실은 DS·ES·FS·GS 는 -1 이라
+          어느 접근도 한계 밖이다 *)
+  mutable code32 : bool;
+      (** CS 의 D 비트. 켜지면 접두 없는 명령의 피연산자·주소 크기가 32 비트다.
+          실모드 적재는 쓰지 않는다 *)
+  mutable stack32 : bool;
+      (** SS 의 B 비트. 켜지면 스택 포인터가 SP 대신 ESP 다. 실모드 적재는 쓰지
+          않는다 *)
   mutable ip : int;
   mutable cf : bool;
   mutable pf : bool;
@@ -201,6 +228,8 @@ type t = {
   mutable cr3 : int;  (** 페이지 디렉터리 주소. 페이징이 쓴다 *)
   gdtr : descriptor_table;
   idtr : descriptor_table;
+  ldt : system_segment;  (** LDTR *)
+  task : system_segment;  (** TR *)
   dr : int array;  (** DR0-DR7: 쓴 값을 들고 있을 뿐 중단점은 걸지 않는다 *)
   tr : int array;  (** TR6·TR7: 쓴 값을 들고 있을 뿐이다 *)
   mutable halted : bool;
@@ -215,8 +244,13 @@ type t = {
   undo_regs : int array;  (** [atomic] 이 결함 때 되돌릴 범용 레지스터 *)
   undo_segs : int array;  (** 그때의 세그먼트 레지스터 *)
   undo_bases : int array;  (** 그때의 세그먼트 베이스 *)
-  read : int -> int;
-  write : int -> int -> unit;
+  undo_hi : int array;  (** 그때의 범용 레지스터 위 절반(386) *)
+  mutable read : int -> int;
+  mutable write : int -> int -> unit;
+      (** CPU 가 메모리를 읽고 쓰는 길. CR0.PG 가 켜져 있는 동안은 [set_paging_guard] 가 감싼 것 *)
+  raw_read : int -> int;
+  raw_write : int -> int -> unit;
+      (** 기계가 건넨 그대로의 버스. 호스트 서비스와 표 읽기는 선형이 아니라 물리 주소다 *)
   port_in : int -> int;
   port_out : int -> int -> unit;
 }
@@ -228,11 +262,14 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
   {
     model;
     addr_mask = address_mask model;
+    offset_mask = offset_mask model;
     regs = Array.make 8 0;
     regs_hi = Array.make (upper_halves model) 0;
     segs = Array.make (segment_count model) 0;
     bases = Array.make (segment_count model) 0;
     limits = Array.make (segment_count model) real_mode_limit;
+    code32 = false;
+    stack32 = false;
     ip = 0;
     cf = false; pf = false; af = false; zf = false; sf = false;
     tf = false; intf = true; df = false; of_ = false;
@@ -240,6 +277,8 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     cr0 = cr0_reset; cr2 = 0; cr3 = 0;
     gdtr = { table_base = descriptor_table_reset_base; table_limit = gdtr_reset_limit };
     idtr = { table_base = descriptor_table_reset_base; table_limit = idtr_reset_limit };
+    ldt = system_segment_reset ();
+    task = system_segment_reset ();
     dr = Array.make debug_register_count 0;
     tr = Array.make test_register_count 0;
     halted = false;
@@ -252,7 +291,8 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     undo_regs = Array.make 8 0;
     undo_segs = Array.make classic_segments 0;
     undo_bases = Array.make classic_segments 0;
-    read; write; port_in; port_out;
+    undo_hi = Array.make (upper_halves model) 0;
+    read; write; raw_read = read; raw_write = write; port_in; port_out;
   }
 
 let halted t = t.halted
@@ -275,6 +315,24 @@ let get32 t n = (t.regs_hi.(n) lsl 16) lor t.regs.(n)
 let put32 t n v =
   t.regs.(n) <- v land 0xffff;
   t.regs_hi.(n) <- (v lsr 16) land 0xffff
+
+(* 스택 포인터: SS 의 B 비트가 켜지면 ESP, 아니면 SP. 386 이 아닌 모델은 B 가
+   늘 꺼져 있어 [regs_hi] 를 건드리지 않는다. 호출하는 곳은 스택 명령이다. *)
+let stack_mask t = if t.stack32 then 0xffffffff else 0xffff
+
+let stack_pointer t = if t.stack32 then get32 t 4 else t.regs.(4)
+
+let set_stack_pointer t v =
+  if t.stack32 then put32 t 4 v else t.regs.(4) <- v land 0xffff
+
+(* SP·ESP 를 [n] 바이트 올린다(RET imm16 이 인자를 버린다). *)
+let drop_stack t n = set_stack_pointer t ((stack_pointer t + n) land stack_mask t)
+
+(* ENTER·LEAVE 의 프레임 포인터: 스택이 32 비트면 EBP, 아니면 BP. *)
+let frame_pointer t = if t.stack32 then get32 t 5 else t.regs.(5)
+
+let set_frame_pointer t v =
+  if t.stack32 then put32 t 5 v else t.regs.(5) <- v land 0xffff
 
 let reg32 t n =
   match t.model with
@@ -299,17 +357,40 @@ let set_reg8 t n v =
 
 let seg t n = t.segs.(n)
 
-(* 세그먼트 레지스터를 쓰는 곳은 여기와 [Cpu86_fault.atomic] 의 되돌림 둘뿐이다.
-   실모드라 베이스는 셀렉터×16 이다. 한계는 쓰지 않는다: 이 단계에서는 늘
-   [real_mode_limit] 다. *)
-let set_seg t n v =
+(* 실모드의 세그먼트 적재: 셀렉터와 base(셀렉터×16)만 쓴다. limit·D·B 는 그대로다 —
+   보호 모드에서 돌아온 386 이 FFFFh 보다 큰 limit 을 들고 실모드를 도는 것이
+   실칩 동작이다(Intel 80386 PRM 의 실모드 복귀 절은 돌아가기 전에 64KB limit 으로
+   다시 싣게 한다). 세그먼트 레지스터를 쓰는 곳은 이것, 보호 모드 적재
+   ([Cpu86_segment.set_seg]), [Cpu86_fault.atomic] 의 되돌림, [load_state] 다. *)
+let set_real_seg t n v =
   let selector = v land 0xffff in
   t.segs.(n) <- selector;
   t.bases.(n) <- selector lsl 4
 
 let dump_ip t = t.ip
-let bus_read t a = t.read a
-let bus_write t a v = t.write a v
+let bus_read t a = t.raw_read a
+let bus_write t a v = t.raw_write a v
+
+(* CR0.PG 동안의 1MB 한계([Cpu86_system.check_identity_map] 의 WORKAROUND 와 한 쌍). 선형
+   주소를 물리 주소로 쓰는 동안 1MB 위 접근은 멈춘다. 기계의 버스는 위쪽 주소 비트를
+   버려서(16MB 보드는 24 비트) E0000000h 같은 별칭이 아래 주소와 우연히 같아져 거짓으로
+   통과하기 때문이다. *)
+let paging_linear_end = 0x100000
+
+let linear_stop t a =
+  raise (Unsupported (Printf.sprintf
+    "linear address %08x is above 1MB while CR0.PG is on (page tables, RFC 0005 5) @%04x:%04x"
+    a t.segs.(sreg_cs) t.ip))
+
+(* 버스를 감싸는 것은 PG 가 켜질 때뿐이라 PG 가 꺼진 기계의 메모리 접근 경로는 그대로다. *)
+let set_paging_guard t on =
+  if on then begin
+    t.read <- (fun a -> if a >= paging_linear_end then linear_stop t a else t.raw_read a);
+    t.write <- (fun a v -> if a >= paging_linear_end then linear_stop t a else t.raw_write a v)
+  end else begin
+    t.read <- t.raw_read;
+    t.write <- t.raw_write
+  end
 let set_ip t v = t.ip <- v land 0xffff
 
 (* FLAGS 워드의 bit1 은 항상 1 이다. bits12-15 는 8086·186 에서 읽으면
@@ -406,6 +487,16 @@ type saved_386 = {
   saved_idtr_limit : int;
   saved_dr : int array;
   saved_tr : int array;
+  saved_bases : int array;
+  saved_limits : int array;
+  saved_code32 : bool;
+  saved_stack32 : bool;
+  saved_ldt_selector : int;
+  saved_ldt_base : int;
+  saved_ldt_limit : int;
+  saved_task_selector : int;
+  saved_task_base : int;
+  saved_task_limit : int;
 }
 
 type saved = {
@@ -424,10 +515,8 @@ let model t = t.model
    until a snapshot either carries it or says why it does not. *)
 let save_state t =
   let { model (* fixed by whoever creates the CPU; picks what [saved_386] holds *);
-        addr_mask = _ (* derived from the model *);
-        regs; segs; ip; regs_hi;
-        bases = _ (* follows [segs]: [load_state] writes it through [set_seg] *);
-        limits = _ (* real mode: always [real_mode_limit] *);
+        addr_mask = _; offset_mask = _ (* derived from the model *);
+        regs; segs; ip; regs_hi; bases; limits; code32; stack32; ldt; task;
         iopl_nt = _ (* in the flags word, [flags t] *);
         cr0; cr2; cr3; gdtr; idtr; dr; tr;
         cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
@@ -435,9 +524,10 @@ let save_state t =
         halted; cycles;
         fetch_limit = _ (* derived from the model *);
         fetch_end = _; fetch_ip_mask = _; prefixes = _ (* derived from the model *);
-        undo_regs = _; undo_segs = _; undo_bases = _
+        undo_regs = _; undo_segs = _; undo_bases = _; undo_hi = _
         (* scratch for the step in progress; a snapshot falls between steps *);
-        int_hook = _; read = _; write = _; port_in = _; port_out = _
+        int_hook = _; read = _; write = _; raw_read = _; raw_write = _; port_in = _;
+        port_out = _
         (* closures: the machine that owns this CPU wires them *) } = t
   in
   let saved_386 =
@@ -448,7 +538,13 @@ let save_state t =
              saved_cr0 = cr0; saved_cr2 = cr2; saved_cr3 = cr3;
              saved_gdtr_base = gdtr.table_base; saved_gdtr_limit = gdtr.table_limit;
              saved_idtr_base = idtr.table_base; saved_idtr_limit = idtr.table_limit;
-             saved_dr = Array.copy dr; saved_tr = Array.copy tr }
+             saved_dr = Array.copy dr; saved_tr = Array.copy tr;
+             saved_bases = Array.copy bases; saved_limits = Array.copy limits;
+             saved_code32 = code32; saved_stack32 = stack32;
+             saved_ldt_selector = ldt.sys_selector; saved_ldt_base = ldt.sys_base;
+             saved_ldt_limit = ldt.sys_limit;
+             saved_task_selector = task.sys_selector; saved_task_base = task.sys_base;
+             saved_task_limit = task.sys_limit }
     | I8086 | I80186 | I80286 -> None
   in
   { saved_regs = Array.copy regs; saved_segs = Array.sub segs 0 classic_segments;
@@ -468,8 +564,11 @@ let load_state t s =
      if Array.length x.saved_dr <> debug_register_count
         || Array.length x.saved_tr <> test_register_count then
        invalid_arg "Cpu86.load_state: 8 debug registers and 2 test registers";
-     if x.saved_cr0 land cr0_unsupported_bits <> 0 then
-       invalid_arg "Cpu86.load_state: CR0.PE or CR0.PG is on, not supported yet"
+     if Array.length x.saved_bases <> segment_count I80386
+        || Array.length x.saved_limits <> segment_count I80386 then
+       invalid_arg "Cpu86.load_state: 6 segment bases and 6 segment limits";
+     if x.saved_cr0 land cr0_pg <> 0 && x.saved_cr0 land cr0_pe = 0 then
+       invalid_arg "Cpu86.load_state: CR0.PG is on with CR0.PE off"
    | I80386, None -> invalid_arg "Cpu86.load_state: an 80386 needs its upper halves, FS and GS"
    | (I8086 | I80186 | I80286), Some _ ->
      invalid_arg "Cpu86.load_state: 80386 state for an older model"
@@ -477,9 +576,22 @@ let load_state t s =
   (match s.saved_386 with
    | Some x ->
      Array.iteri (fun i v -> t.regs_hi.(i) <- v land 0xffff) x.saved_regs_hi;
-     set_seg t sreg_fs x.saved_fs;
-     set_seg t sreg_gs x.saved_gs;
+     Array.iteri (fun i v -> t.segs.(i) <- v land 0xffff) s.saved_segs;
+     t.segs.(sreg_fs) <- x.saved_fs land 0xffff;
+     t.segs.(sreg_gs) <- x.saved_gs land 0xffff;
+     Array.iteri (fun i v -> t.bases.(i) <- v land register32_mask) x.saved_bases;
+     Array.iteri (fun i v -> t.limits.(i) <- max no_limit (min v register32_mask))
+       x.saved_limits;
+     t.code32 <- x.saved_code32;
+     t.stack32 <- x.saved_stack32;
+     t.ldt.sys_selector <- x.saved_ldt_selector land 0xffff;
+     t.ldt.sys_base <- x.saved_ldt_base land register32_mask;
+     t.ldt.sys_limit <- max no_limit (min x.saved_ldt_limit register32_mask);
+     t.task.sys_selector <- x.saved_task_selector land 0xffff;
+     t.task.sys_base <- x.saved_task_base land register32_mask;
+     t.task.sys_limit <- max no_limit (min x.saved_task_limit register32_mask);
      t.cr0 <- x.saved_cr0 land cr0_defined;
+     set_paging_guard t (t.cr0 land cr0_pg <> 0);
      t.cr2 <- x.saved_cr2 land register32_mask;
      t.cr3 <- x.saved_cr3 land register32_mask;
      t.gdtr.table_base <- x.saved_gdtr_base land register32_mask;
@@ -490,8 +602,10 @@ let load_state t s =
      Array.iteri (fun i v -> t.tr.(i) <- v land register32_mask) x.saved_tr
    | None -> ());
   Array.iteri (fun i v -> set_reg16 t i v) s.saved_regs;
-  Array.iteri (fun i v -> set_seg t i v) s.saved_segs;
-  set_ip t s.saved_ip;
+  (match s.saved_386 with
+   | Some _ -> ()
+   | None -> Array.iteri (fun i v -> set_real_seg t i v) s.saved_segs);
+  t.ip <- s.saved_ip land t.fetch_ip_mask;
   set_flags t s.saved_flags;
   t.halted <- s.saved_halted;
   t.cycles <- s.saved_cycles

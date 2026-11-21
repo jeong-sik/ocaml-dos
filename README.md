@@ -77,8 +77,8 @@ SST_FILES="$ALL" dune exec --root . test/sst/cpu86_sst386.exe
 ROM 으로 잰다. ROM 은 GPL-3.0 이라 저장소에 없고, `TEST386_BIN` 이 64KB
 빌드를 가리키면 `test/cpu86_test386` 이 돈다(없으면 건너뛴다). 러너는 맨
 `I80386` 에 1MB 를 붙이고 ROM 을 F0000h 에 둔 뒤 F000:FFF0 에서 시작한다.
-ROM 이 포트 190h 에 쓰는 POST 코드를 모은다. 지금은 실모드 POST 00h-06h 를
-지나 08h 의 `mov cr0, eax`(CR0.PE 를 켜는 쓰기)에서 멈추는 것이 기대값이다.
+ROM 이 포트 190h 에 쓰는 POST 코드를 모은다. 지금은 POST 00h-06h·08h·09h 를
+지나 20h 에서 링 3 으로 넘어가는 적재에서 멈추는 것이 기대값이다.
 실패한 시험은 ROM 의 error 자리에서 HLT 하므로 테스트가 깨진다.
 
 ```sh
@@ -158,8 +158,14 @@ Tentacle 도 최소 사양이 286 이다. 실칩 검증 스위트만 `I8086` 으
 
 `dosboot --cpu 386` 과 `dosplay --cpu 386` 이면 기계가 `I80386` 으로 돈다. 32 비트 레지스터·FS·GS·
 0Fh 명령을 쓰는 게임이 돌고, 스냅숏도 386 상태를 담는다. CR0·CR2·CR3, GDTR·IDTR,
-DR·TR 과 LGDT·LIDT·LMSW·CLTS·MOV CRn 은 실모드에서 돈다. 보호 모드는 아직 없다:
-CR0.PE 를 켜는 쓰기는 `Unsupported` 로 멈춘다(RFC 0005).
+DR·TR 과 LGDT·LIDT·LMSW·CLTS·MOV CRn 은 실모드에서 돈다.
+
+CR0.PE 를 켜면 세그먼트 적재가 GDT·LDT 에서 base·limit·D·B 를 읽는다. CS.D 가 기본
+피연산자·주소 크기를, SS.B 가 스택이 SP 인지 ESP 인지를 정한다. 링 0 하나만 안다.
+결함이어야 할 적재(표 밖 셀렉터, 없는 기술자, 링을 넘는 적재)와 보호 모드의 INT·결함은
+`Unsupported` 로 멈춘다(RFC 0005 3c·4). CR0.PG 는 첫 1MB 가 항등 매핑일 때만 켜지고
+그때부터 선형 주소를 물리 주소로 쓰고 1MB 위 접근은 멈춘다. 표를 고쳐도 반영하지
+않는다(5 단계가 페이징).
 
 바이트 IDIV 는 286·386 모두 몫이 음수이고 |피젯수| >> 7 이 |젯수| + 80h
 이며 |피젯수| 의 아래 7 비트가 |젯수| 보다 작으면 넘쳐도 INT 0 이 아니다.

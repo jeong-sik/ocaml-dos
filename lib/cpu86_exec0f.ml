@@ -6,6 +6,7 @@
    CRn·DRn·TRn)은 [Cpu86_system] 이 한다. *)
 
 open Cpu86_state
+open Cpu86_segment
 open Cpu86_fault
 open Cpu86_decode
 open Cpu86_alu
@@ -197,7 +198,7 @@ let load_far_pointer t ctx w sreg =
   (match rm with
    | Mem (b, o) | Mem32 (b, o) ->
      let off = match w with Word -> read16 t b o | Dword -> read32 t b o in
-     let segv = read16 t b (o + unit_bytes w) in
+     let segv = read16 t b (second_offset rm o (unit_bytes w)) in
      set_reg w t regf off;
      set_seg t sreg segv
    | Reg _ -> fault vector_invalid_opcode);
@@ -247,6 +248,9 @@ let dispatch t ctx w =
   | 0xbc -> bit_scan t ctx w ~forward:true
   | 0xbd -> bit_scan t ctx w ~forward:false
   | 0x01 -> Cpu86_system.group7 t ctx w
+  | 0x00 -> Cpu86_protected.group6 t ctx w
+  | 0x02 -> Cpu86_protected.load_access_rights t ctx w
+  | 0x03 -> Cpu86_protected.load_segment_limit t ctx w
   | 0xb2 -> load_far_pointer t ctx w sreg_ss
   | 0xb4 -> load_far_pointer t ctx w sreg_fs
   | 0xb5 -> load_far_pointer t ctx w sreg_gs

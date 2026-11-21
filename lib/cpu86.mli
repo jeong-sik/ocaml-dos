@@ -121,7 +121,20 @@ val seg : t -> int -> int
 (** 세그먼트 레지스터 0..3 = ES CS SS DS, [I80386] 은 4·5 = FS GS 까지. 그
     밖의 번호는 [Invalid_argument]. *)
 
+val no_limit : int
+(** The limit of a segment register that holds a null selector: [-1], so no
+    offset is in range. *)
+
+val cr0_pe : int
+val cr0_pg : int
+
 val set_seg : t -> int -> int -> unit
+(** Loads a segment register. With CR0.PE off the base is the selector times 16
+    and the limit, D and B bits stay as they were. With PE on the selector picks
+    a GDT or LDT descriptor, and a load that protected mode answers with a fault
+    (null selector into CS or SS, a selector beyond its table, a system or
+    not-present or expand-down or wrong-type descriptor) raises [Unsupported]
+    until RFC 0005 3c and 4 deliver faults. *)
 
 val dump_ip : t -> int
 (** [I80386] 은 FFFF 의 마지막 바이트를 지난 뒤 10000h 를 돌려준다. EIP 가
@@ -188,10 +201,6 @@ val model : t -> model
     the memory, port and interrupt callbacks belong to whoever creates the
     CPU and are not part of it. *)
 
-val cr0_unsupported_bits : int
-(** The CR0 bits (PE, PG) that nothing here runs yet: a write that turns one on
-    stops with [Unsupported], and a saved state that has one on is refused. *)
-
 (** What an 80386 holds beyond the 286 registers. IOPL and NT (FLAGS bits
     12-14) travel in [saved_flags]. The control, debug and test registers and
     the descriptor-table registers are what a program last wrote; the core
@@ -209,6 +218,17 @@ type saved_386 = {
   saved_idtr_limit : int;
   saved_dr : int array;  (** DR0-DR7, 32 bits each *)
   saved_tr : int array;  (** TR6 and TR7, 32 bits each *)
+  saved_bases : int array;  (** the 6 segment bases, ES CS SS DS FS GS, 32 bits each *)
+  saved_limits : int array;
+      (** the 6 segment limits, -1 (a null selector: no offset is in range) to FFFFFFFFh *)
+  saved_code32 : bool;  (** CS.D *)
+  saved_stack32 : bool;  (** SS.B *)
+  saved_ldt_selector : int;
+  saved_ldt_base : int;
+  saved_ldt_limit : int;
+  saved_task_selector : int;
+  saved_task_base : int;
+  saved_task_limit : int;
 }
 
 type saved = {
@@ -227,5 +247,5 @@ val load_state : t -> saved -> unit
 (** Values are masked as the setters mask them. [Invalid_argument], with the
     CPU left as it was, unless there are 8 registers and 4 segments and
     [saved_386] is [Some] (with 8 upper halves, 8 debug registers and 2 test
-    registers) exactly for an [I80386], and no bit of [cr0_unsupported_bits] is
-    set in its CR0. *)
+    registers, 6 segment bases and 6 segment limits) exactly for an [I80386], and
+    CR0.PG is not on with CR0.PE off. *)
