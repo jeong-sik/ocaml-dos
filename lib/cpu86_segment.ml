@@ -169,9 +169,15 @@ let load_protected t n selector =
         else store t n selector d
 
 (* 세그먼트 레지스터를 싣는 모든 명령(MOV·POP·LDS 류·far JMP/CALL/RET·IRET)이 이것을
-   지난다. 8086-286 의 CR0 는 늘 0 이라 실모드 적재다. *)
+   지난다. 8086-286 의 CR0 는 늘 0 이라 실모드 적재다. 실모드 쪽은 [set_real_seg] 와 같은
+   두 줄을 바로 쓴다: 모듈 사이 호출은 인라인되지 않아서 한 번 더 부르면 삼국지3 5백만
+   스텝의 호스트 명령 수가 0.2% 가량 는다. *)
 let set_seg t n v =
-  if t.cr0 land cr0_pe = 0 then set_real_seg t n v else load_protected t n (v land 0xffff)
+  if t.cr0 land cr0_pe = 0 then begin
+    let selector = v land 0xffff in
+    t.segs.(n) <- selector;
+    t.bases.(n) <- selector lsl 4
+  end else load_protected t n (v land 0xffff)
 
 (* CS 의 limit 이 [selector] 를 싣고 난 뒤 갖게 될 값. 먼 점프·호출·복귀는 목표 오프셋을
    새 CS 의 limit 으로 따지는데, 그 검사가 스택 쓰기와 세그먼트 적재보다 앞서 선다.

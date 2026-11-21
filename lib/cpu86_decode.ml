@@ -286,28 +286,56 @@ let port_out32 t p v =
 
 (* SP 는 쓰기가 끝난 뒤에 내린다 — 넘치면 SP 도 그대로다. SS 의 B 비트가 꺼진
    스택(실모드와 16 비트 스택)은 SP 만 움직이고 ESP 의 위 절반은 그대로다. B 가
-   켜지면 ESP 가 움직인다. *)
+   켜지면 ESP 가 움직인다.
+
+   16 비트 스택이 거의 전부라 그 길은 [Cpu86_state.stack_pointer] 같은 헬퍼를 부르지 않고
+   레지스터를 바로 쓴다. dune 개발 빌드는 모듈 사이 호출을 인라인하지 않아서, 헬퍼 셋을
+   부르면 삼국지3 5백만 스텝의 호스트 명령 수가 286 에서 1% 가량 늘었다(번갈아 3회 평균). *)
 let push16 t v =
-  let sp = (stack_pointer t - 2) land stack_mask t in
-  write16 t sreg_ss sp v;
-  set_stack_pointer t sp
+  if t.stack32 then begin
+    let sp = (get32 t 4 - 2) land register32_mask in
+    write16 t sreg_ss sp v;
+    put32 t 4 sp
+  end else begin
+    let sp = (t.regs.(4) - 2) land 0xffff in
+    write16 t sreg_ss sp v;
+    t.regs.(4) <- sp
+  end
 
 let pop16 t =
-  let sp = stack_pointer t in
-  let v = read16 t sreg_ss sp in
-  set_stack_pointer t ((sp + 2) land stack_mask t);
-  v
+  if t.stack32 then begin
+    let sp = get32 t 4 in
+    let v = read16 t sreg_ss sp in
+    put32 t 4 ((sp + 2) land register32_mask);
+    v
+  end else begin
+    let v = read16 t sreg_ss t.regs.(4) in
+    t.regs.(4) <- (t.regs.(4) + 2) land 0xffff;
+    v
+  end
 
 let push32 t v =
-  let sp = (stack_pointer t - 4) land stack_mask t in
-  write32 t sreg_ss sp v;
-  set_stack_pointer t sp
+  if t.stack32 then begin
+    let sp = (get32 t 4 - 4) land register32_mask in
+    write32 t sreg_ss sp v;
+    put32 t 4 sp
+  end else begin
+    let sp = (t.regs.(4) - 4) land 0xffff in
+    write32 t sreg_ss sp v;
+    t.regs.(4) <- sp
+  end
 
 let pop32 t =
-  let sp = stack_pointer t in
-  let v = read32 t sreg_ss sp in
-  set_stack_pointer t ((sp + 4) land stack_mask t);
-  v
+  if t.stack32 then begin
+    let sp = get32 t 4 in
+    let v = read32 t sreg_ss sp in
+    put32 t 4 ((sp + 4) land register32_mask);
+    v
+  end else begin
+    let v = read32 t sreg_ss t.regs.(4) in
+    t.regs.(4) <- (t.regs.(4) + 4) land 0xffff;
+    v
+  end
 
 (* ---------- jcc 조건 ---------- *)
 
@@ -430,42 +458,50 @@ let with_segment addr s =
   | A16 | A16_seg _ -> A16_seg s
   | A32 | A32_seg _ -> A32_seg s
 
-(* 67h 는 코드 세그먼트의 기본 주소 크기를 뒤집는다: 16 비트 코드에서는 32 비트,
-   32 비트 코드(CS 의 D 비트)에서는 16 비트다. 같은 접두가 여럿이어도 한 번만
-   뒤집는다. [d32] 는 CS 의 D 비트다. *)
-let with_address_override ~d32 = function
-  | A16 | A32 -> if d32 then A16 else A32
-  | A16_seg s | A32_seg s -> if d32 then A16_seg s else A32_seg s
+let with_address32 = function
+  | A16 | A32 -> A32
+  | A16_seg s | A32_seg s -> A32_seg s
 
-(* 66h 도 같다: 접두가 없으면 D 비트가 켜진 코드의 명령이 32 비트 폭이고(66h 가
-   16 비트로 되돌린다), 꺼진 코드에서는 66h 가 32 비트로 올린다. *)
-let rec prefixes_after t ~d32 ~base_ip addr rep lock =
+(* CS 의 D 비트가 켜진 코드의 기본 크기는 32 비트다. 접두가 끝난 뒤에 [addr] 를 한 번
+   뒤집는다: 67h 를 봤으면 [with_address32] 가 A32 로 만들어 두었으니 16 비트 주소가 되고,
+   못 봤으면 A16 이니 32 비트 주소가 된다. 같은 접두가 여럿이어도 한 번만 뒤집힌다. *)
+let toggle_address = function
+  | A16 -> A32
+  | A32 -> A16
+  | A16_seg s -> A32_seg s
+  | A32_seg s -> A16_seg s
+
+(* 피연산자 크기: D 비트가 꺼진 코드는 66h 가 32 비트로 올리고, 켜진 코드는 접두가
+   없을 때 32 비트이며 66h 가 16 비트로 되돌린다. 주소 크기는 [toggle_address] 가 정한다. *)
+let rec prefixes_after t ~base_ip addr rep lock =
   let b = fetch8 t in
   match t.prefixes.(b) with
   | Not_prefix ->
     let ctx = { base_ip; opcode = b; addr; rep } in
     if lock then check_lock t ctx;
-    if d32 && operand_sized.(b) then { ctx with opcode = b lor operand32_form } else ctx
-  | Segment s -> prefixes_after t ~d32 ~base_ip (with_segment addr s) rep lock
-  | Lock -> prefixes_after t ~d32 ~base_ip addr rep true
-  | Rep z -> prefixes_after t ~d32 ~base_ip addr (Some z) lock
-  | Operand_size -> prefixes_after_66 t ~d32 ~base_ip addr rep lock
-  | Address_size -> prefixes_after t ~d32 ~base_ip (with_address_override ~d32 addr) rep lock
+    if t.code32 then begin
+      let ctx = { ctx with addr = toggle_address addr } in
+      if operand_sized.(b) then { ctx with opcode = b lor operand32_form } else ctx
+    end else ctx
+  | Segment s -> prefixes_after t ~base_ip (with_segment addr s) rep lock
+  | Lock -> prefixes_after t ~base_ip addr rep true
+  | Rep z -> prefixes_after t ~base_ip addr (Some z) lock
+  | Operand_size -> prefixes_after_66 t ~base_ip addr rep lock
+  | Address_size -> prefixes_after t ~base_ip (with_address32 addr) rep lock
 
-and prefixes_after_66 t ~d32 ~base_ip addr rep lock =
+and prefixes_after_66 t ~base_ip addr rep lock =
   let b = fetch8 t in
   match t.prefixes.(b) with
   | Not_prefix ->
     let ctx = { base_ip; opcode = b; addr; rep } in
     if lock then check_lock t ctx;
-    if (not d32) && operand_sized.(b) then { ctx with opcode = b lor operand32_form } else ctx
-  | Segment s -> prefixes_after_66 t ~d32 ~base_ip (with_segment addr s) rep lock
-  | Lock -> prefixes_after_66 t ~d32 ~base_ip addr rep true
-  | Rep z -> prefixes_after_66 t ~d32 ~base_ip addr (Some z) lock
-  | Operand_size -> prefixes_after_66 t ~d32 ~base_ip addr rep lock
-  | Address_size ->
-    prefixes_after_66 t ~d32 ~base_ip (with_address_override ~d32 addr) rep lock
+    if t.code32 then { ctx with addr = toggle_address addr }
+    else if operand_sized.(b) then { ctx with opcode = b lor operand32_form }
+    else ctx
+  | Segment s -> prefixes_after_66 t ~base_ip (with_segment addr s) rep lock
+  | Lock -> prefixes_after_66 t ~base_ip addr rep true
+  | Rep z -> prefixes_after_66 t ~base_ip addr (Some z) lock
+  | Operand_size -> prefixes_after_66 t ~base_ip addr rep lock
+  | Address_size -> prefixes_after_66 t ~base_ip (with_address32 addr) rep lock
 
-let decode_prefixes t ~base_ip =
-  if t.code32 then prefixes_after t ~d32:true ~base_ip A32 None false
-  else prefixes_after t ~d32:false ~base_ip A16 None false
+let decode_prefixes t ~base_ip = prefixes_after t ~base_ip A16 None false

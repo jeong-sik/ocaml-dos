@@ -24,7 +24,11 @@ let step t =
     let entry_tf = t.tf in
     (match t.model with
      | I80286 -> t.fetch_end <- (base_ip + t.fetch_limit) land 0xffff
-     | I80386 -> t.fetch_end <- min (base_ip + t.fetch_limit) (t.limits.(sreg_cs) + 1)
+     | I80386 ->
+       (* [min] 은 다형 비교를 부르는 함수라 정수는 직접 비교한다(삼국지3 5백만 스텝의 386
+          호스트 명령 수가 6% 가량 준다). *)
+       let by_length = base_ip + t.fetch_limit and by_limit = t.limits.(sreg_cs) + 1 in
+       t.fetch_end <- (if by_length <= by_limit then by_length else by_limit)
      | I8086 | I80186 -> ());
     let used_cycles =
       try begin
