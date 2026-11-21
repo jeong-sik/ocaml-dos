@@ -15,6 +15,7 @@
      48h data, DPL 3             50h conforming code
      58h execute-only code       60h read-only data
      68h call gate               70h 32-bit data, base 20000h, 64KB (B=1)
+     78h 4GB data, base 12345678h   80h 64KB code, DPL 3
      04h (LDT) data, base 20000h, 64KB *)
 
 let failed = ref 0
@@ -64,7 +65,9 @@ let gdt =
       desc ~base:0 ~limit:0xffff ~access:0x98 ~flags:none;
       desc ~base:0 ~limit:0xffff ~access:0x90 ~flags:none;
       desc ~base:0 ~limit:0xffff ~access:0x8c ~flags:none;
-      desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:big ]
+      desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:big;
+      desc ~base:0x12345678 ~limit:0xfffff ~access:0x92 ~flags:granular_big;
+      desc ~base:0 ~limit:0xffff ~access:0xfa ~flags:none ]
 
 let gdt_limit = String.length gdt - 1
 let ldt = desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:none
@@ -191,6 +194,18 @@ let test_segment_loads () =
   check "ESP after the push" (esp t) 0xfc;
   check_bool "SS.B follows the 32-bit data segment" (sys t).Cpu86.saved_stack32 true
 
+(* All four bytes of the base and the G bit reach the cache, and the RPL bits of
+   a null selector do not make it a descriptor. *)
+let test_descriptor_fields () =
+  let t, _ = make enter_flat (load_ds 0x78 ^ hlt) in
+  check_halted "load a descriptor with a high base" (run t);
+  check "DS base has all four bytes" (sys t).Cpu86.saved_bases.(ds) 0x12345678;
+  check "DS limit has G applied" (sys t).Cpu86.saved_limits.(ds) 0xffffffff;
+  let t, _ = make enter_flat (mov_ax_sel 3 ^ mov_sreg 3 ^ hlt) in
+  check_halted "null selector with RPL 3" (run t);
+  check "DS limit after a null selector with RPL 3" (sys t).Cpu86.saved_limits.(ds)
+    Cpu86.no_limit
+
 (* A null selector loads into DS, ES, FS and GS and any access through it is out
    of range. *)
 let test_null_selector () =
@@ -260,7 +275,7 @@ let test_stops () =
   in
   let sel_into reg sel = mov_ax_sel sel ^ mov_sreg reg in
   stops "null selector into SS" (sel_into ss 0) "null selector into SS";
-  stops "selector beyond the GDT" (sel_into ds 0x78) "beyond its table";
+  stops "selector beyond the GDT" (sel_into ds 0x88) "beyond its table";
   stops "LDT selector with no LDT" (sel_into ds 0x04) "beyond its table";
   stops "not present" (sel_into ds 0x38) "not present";
   stops "system descriptor into DS" (sel_into ds 0x28) "system descriptor";
@@ -272,6 +287,8 @@ let test_stops () =
   stops "RPL above DPL" (sel_into ds 0x13) "privilege level";
   stops "far jump to a data segment" ("\xea" ^ le32 0x120 ^ le16 0x10) "data segment";
   stops "far jump with RPL 3" ("\xea" ^ le32 0x120 ^ le16 0x0b) "privilege level";
+  stops "far jump to DPL 3 code" ("\xea" ^ le32 0x120 ^ le16 0x80) "privilege level";
+  stops "SS with DPL 3" (sel_into ss 0x48) "privilege level";
   (* a DPL 3 data segment is reachable with RPL 3 *)
   let t, _ = make enter_flat (sel_into ds 0x4b ^ hlt) in
   check_halted "DPL 3 data with RPL 3" (run t);
@@ -297,7 +314,14 @@ let test_fetch_limit () =
   let t, mem = make enter_flat ("\xea" ^ le32 0xffff ^ le16 0x18) in
   Bytes.set mem 0xffff '\x90';
   check_stopped "fetch past the CS limit" (run t) "fault 13 in protected mode";
-  check "EIP wound back to the NOP" (Cpu86.dump_ip t) 0x10000
+  check "EIP wound back to the NOP" (Cpu86.dump_ip t) 0x10000;
+  (* a far jump checks its offset against the limit of the code segment it loads:
+     from 16-bit code into flat code past 64KB *)
+  let t, mem = make enter_flat ("\xea" ^ le32 0x200 ^ le16 0x18) in
+  String.iteri (fun i c -> Bytes.set mem (0x200 + i) c) ("\x66\xea" ^ le32 0x20000 ^ le16 0x08);
+  Bytes.set mem 0x20000 '\xf4';
+  check_halted "far jump from 16-bit code to flat code past 64KB" (run t);
+  check "EIP after the HLT" (Cpu86.dump_ip t) 0x20001
 
 (* LLDT, LTR, SLDT and STR. LTR marks the TSS descriptor busy in the GDT. *)
 let test_ldt_and_task_register () =
@@ -359,9 +383,10 @@ let test_queries () =
   check_bool "VERR readable code" (zf (after (verr 0x08))) true;
   check_bool "VERR execute-only code" (zf (after (verr 0x58))) false;
   check_bool "VERR conforming code" (zf (after (verr 0x50))) true;
+  check_bool "VERR conforming code with RPL 3" (zf (after (verr 0x53))) true;
   check_bool "VERR system descriptor" (zf (after (verr 0x28))) false;
   check_bool "VERR null" (zf (after (verr 0))) false;
-  check_bool "VERR beyond the table" (zf (after (verr 0x78))) false;
+  check_bool "VERR beyond the table" (zf (after (verr 0x88))) false;
   check_bool "VERR RPL above DPL" (zf (after (verr 0x13))) false;
   check_bool "VERR DPL 3 data with RPL 3" (zf (after (verr 0x4b))) true;
   check_bool "VERW data" (zf (after (verw 0x10))) true;
@@ -375,9 +400,9 @@ let test_queries () =
   check "LAR call gate" (eax t) 0x00008c00;
   let t = after (lar 0x38) in
   check "LAR not present data still reads" (eax t) 0x00001200;
-  let t = after (lar 0x78) in
+  let t = after (lar 0x88) in
   check_bool "LAR beyond the table: ZF" (zf t) false;
-  check "LAR beyond the table leaves EAX" (eax t) 0xffff0078;
+  check "LAR beyond the table leaves EAX" (eax t) 0xffff0088;
   let t = after (lar 0x13) in
   check_bool "LAR RPL above DPL: ZF" (zf t) false;
   let t = after (mov_eax 0xffffffff ^ mov_ax_sel 0x10 ^ "\x66\x89\xc3" ^ "\x66\x0f\x02\xc3") in
@@ -416,9 +441,7 @@ let test_return_to_real_mode () =
   check "DS limit stays 4GB" x.Cpu86.saved_limits.(ds) 0xffffffff;
   check "CS base" x.Cpu86.saved_bases.(1) 0;
   check "CS limit stays 64KB" x.Cpu86.saved_limits.(1) 0xffff;
-  check_bool "CS.D off" x.Cpu86.saved_code32 false;
-  (* real mode with a 4GB DS reaches past 1MB wrap-free addresses: a 32-bit offset *)
-  ()
+  check_bool "CS.D off" x.Cpu86.saved_code32 false
 
 (* PG: the first megabyte must be one PDE and 256 PTEs mapping linear to physical. *)
 let test_paging () =
@@ -448,6 +471,9 @@ let test_paging () =
   stops "PTE maps another frame"
     (build ~pte:(fun i -> if i = 5 then 0x9003 else (i * 0x1000) lor 3) hlt)
     "PTE 5 maps 00009000, not the identity 00005000";
+  stops "last PTE maps another frame"
+    (build ~pte:(fun i -> if i = 255 then 0x1003 else (i * 0x1000) lor 3) hlt)
+    "PTE 255 maps 00001000, not the identity 000ff000";
   (* the check names the stop and leaves CR0 alone *)
   let t, _ = build ~pde:0 hlt in
   ignore (run t);
@@ -497,6 +523,7 @@ let test_state_round_trip () =
 let () =
   test_enter ();
   test_segment_loads ();
+  test_descriptor_fields ();
   test_null_selector ();
   test_code_sizes ();
   test_stack_width ();
