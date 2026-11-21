@@ -276,7 +276,7 @@ INT 11h 장비 워드의 코프로세서 비트도 0 이라 게스트가 소프�
   를 기다리는 지연 루프가 끝난다. 읽기-되돌림 명령(0x43, bit 7-6 = 11)
   은 채널 0·2 의 카운트와 상태 바이트(OUT, NULL COUNT, 쓴 그대로의
   제어 워드)를 잡는다
-- **Sound Blaster 2.0**(켤 때만, `--sound-blaster`): 220h 의 DSP 2.01 —
+- **Sound Blaster 2.0**(`dosplay` 는 기본으로 꽂고 `--no-sound-blaster` 로 뺀다, `dosboot` 은 `--sound-blaster` 로 켠다): 220h 의 DSP 2.01 —
   리셋 뒤 AAh, E1h 버전 2.01, 시간 상수(40h)에 맞춰 DMA 채널 1 에서
   블록을 한 바이트씩 가져가고 블록 끝·F2h·80h 에 IRQ 7 을 올린다.
   8비트 PCM(14h·1Ch·48h·90h·91h)과 ADPCM(74h~77h·16h·17h·7Dh·7Fh·1Fh)
@@ -596,9 +596,10 @@ dune build --root . --profile release
     남은 파일과 폴더를 지운다. DA1 에 답하지 않는 터미널이면 1초만
     기다린다.
   - 터미널 창을 닫거나(SIGHUP) SIGTERM 을 받아도 같은 정리를 거친다.
-- `--sound-blaster` 는 Sound Blaster 2.0(220h, IRQ 7, DMA 1)을 꽂는다.
-  게임 설정이 Sound Blaster 인데 카드가 없으면 게임이 DSP 를 기다리며
-  멈춘다(The Even More Incredible Machine 는 제목 화면 전에 멈춘다).
+- Sound Blaster 2.0(220h, IRQ 7, DMA 1)은 기본으로 꽂힌다. `--no-sound-blaster`
+  로 뺀다. 게임 설정이 Sound Blaster 인데 카드가 없으면 게임이 DSP 를 기다리며
+  멈춘다(The Even More Incredible Machine 는 제목 화면 전에 멈춘다). 카드를 꽂아
+  그림 색이 줄어든 게임은 229행 비교(#218)에서 없었다.
   `--state` 로 이어 할 때는 상태 파일에 든 기계를 쓰므로 이 옵션이 필요 없다.
 - `--cpu 286|386` 은 CPU 모델을 고른다(`dosboot --cpu` 와 같다). 기본은 286
   이다. 386 이 필요한 게임은 `--cpu 386` 없이 시작하면 첫 386 명령에서
