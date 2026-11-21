@@ -554,6 +554,11 @@ let test_paging () =
     "linear address 00100000 is above 1MB while CR0.PG is on";
   stops "PG: a table above 1MB" (build (flat_ds ^ mov_eax 0x400000 ^ "\x0f\x01\x10"))
     "linear address 00400000 is above 1MB while CR0.PG is on";
+  (* page tables are read at physical addresses: a directory above 1MB is not a linear access
+     (the test bus wraps 103000h to 3000h, where [build] put a valid directory) *)
+  let t, _ = build (mov_eax 0x103000 ^ "\x0f\x22\xd8" ^ hlt) in
+  check_halted "CR3 to a directory above 1MB reads it physically" (run t);
+  check "CR3 is the directory above 1MB" (sys t).Cpu86.saved_cr3 0x103000;
   (* the host bus is physical and is not guarded; clearing PG lifts the guard *)
   let t, _ = build (flat_ds ^ hlt) in
   ignore (run t);
