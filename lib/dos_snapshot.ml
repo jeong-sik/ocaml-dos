@@ -111,8 +111,8 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    186 or 286 machine has the same bytes as format 42; only the header's
    number differs.
    44: a 386 machine's CPU section, after GS, carries CR0, CR2, CR3, the GDTR
-   and IDTR (base, then limit), DR0-DR7 and TR6, TR7: 19 ints and two array
-   lengths, 152 bytes in all. The payload of an 8086, 186 or 286 machine has
+   and IDTR (base, then limit), DR0-DR7 and TR6, TR7: 17 ints and two array
+   lengths, 19 eight-byte words, 152 bytes in all. The payload of an 8086, 186 or 286 machine has
    the same bytes as format 43; only the header's number differs. *)
 let format_version = 44
 
