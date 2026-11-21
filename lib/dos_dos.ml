@@ -878,15 +878,22 @@ let load_overlay t image =
 let exec_load_and_run = 0x00
 let exec_load_overlay = 0x03
 
+(* DOS 의 콘솔 출력은 BIOS teletype 으로 간다. 텍스트 모드에서는 칸의
+   속성을 그대로 두고, 그래픽 모드에서는 이 색(밝은 회색)으로 그린다. *)
+let dos_output_color = 0x07
+
 (* ---------- COMMAND.COM /C ---------- *)
 
-(* COMSPEC 의 COMMAND.COM 은 "/C 명령줄" 로 불리면 명령줄의 프로그램을 돌리고
-   끝난다(Borland C 의 system() 이 이렇게 부른다). 디스크에 COMMAND.COM 이
-   없으면 호스트가 이 한 가지 일만 한다: 명령줄의 첫 낱말을 .COM·.EXE 파일로
-   찾아 자식으로 돌리고, 나머지 글을 자식의 꼬리로 준다. 내장 명령(DIR, CLS,
-   ECHO ...)·리디렉션·파이프·배치 파일은 하지 않는다. 그 줄은 AH=4Bh 가
-   오류 1(지원 안 함)이나 2(프로그램 없음)로 답한다. 자식의 종료 코드는
-   AH=4Dh 가 그대로 준다. *)
+(* COMSPEC 의 COMMAND.COM 은 "/C 명령줄" 로 불리면 명령줄을 돌리고 끝난다
+   (Borland C 의 system()·QuickBASIC 의 SHELL 이 이렇게 부른다). 디스크에
+   COMMAND.COM 이 없으면 호스트가 두 가지 일만 한다.
+   - 첫 낱말이 COPY 면 내장 COPY 를 한다(아래 「내장 COPY」). 실기도 내장
+     명령을 같은 이름의 파일보다 먼저 찾는다.
+   - 아니면 첫 낱말을 .COM·.EXE 파일로 찾아 자식으로 돌리고, 나머지 글을
+     자식의 꼬리로 준다.
+   COPY 말고 다른 내장 명령(DIR, CLS, ECHO ...)·리디렉션·파이프·배치 파일은
+   하지 않는다. 그 줄은 AH=4Bh 가 오류 1(지원 안 함)이나 2(프로그램 없음)로
+   답한다. 자식의 종료 코드는 AH=4Dh 가 그대로 준다(내장 COPY 는 0). *)
 
 (* 꼬리 글 "/C 프로그램 인자들" 을 (프로그램 낱말, 인자 글) 로 가른다. 인자
    글은 프로그램 낱말 바로 뒤부터라 앞의 공백이 남는다 — 자식 꼬리에 넘기는
@@ -910,13 +917,22 @@ let has_redirection line =
 
 type command_target = { program : Dos_path.t; image : Bytes.t; args : string }
 
-(* 프로그램 낱말을 파일로 찾는다. 확장자가 없으면 .COM 을 먼저, 없으면 .EXE 를
-   본다(COMMAND.COM 의 순서). .COM·.EXE 가 아닌 확장자와 .BAT 는 지원 밖이다. *)
+type command =
+  | Run_program of command_target
+  | Copy_files of string  (** COPY 낱말 다음의 글 *)
+
+let copy_command = "COPY"
+
+(* 첫 낱말이 COPY 면 내장 COPY 다. 아니면 프로그램 낱말을 파일로 찾는다.
+   확장자가 없으면 .COM 을 먼저, 없으면 .EXE 를 본다(COMMAND.COM 의 순서).
+   .COM·.EXE 가 아닌 확장자와 .BAT 는 지원 밖이다. *)
 let command_target t line =
   if has_redirection line then Error invalid_function
   else
     match split_command_line line with
     | None -> Error invalid_function
+    | Some (word, args) when String.uppercase_ascii word = copy_command ->
+      Ok (Copy_files args)
     | Some (word, args) ->
       let last =
         match String.rindex_opt word '\\' with
@@ -936,14 +952,258 @@ let command_target t line =
       let runnable p = ends_with ".COM" p || ends_with ".EXE" p in
       if String.contains last '.' then
         match find word with
-        | Some (p, image) when runnable p -> Ok { program = p; image; args }
+        | Some (p, image) when runnable p -> Ok (Run_program { program = p; image; args })
         | Some _ -> Error invalid_function
         | None -> Error file_not_found
       else
         match find (word ^ ".COM"), find (word ^ ".EXE") with
-        | Some (p, image), _ | None, Some (p, image) -> Ok { program = p; image; args }
+        | Some (p, image), _ | None, Some (p, image) ->
+          Ok (Run_program { program = p; image; args })
         | None, None ->
           if find (word ^ ".BAT") <> None then Error invalid_function else Error file_not_found
+
+(* ---------- 내장 COPY ---------- *)
+
+(* 근거는 MS-DOS 4.0 원문(github.com/microsoft/MS-DOS 의 v4.0/src/CMD/COMMAND)
+   COPY.ASM·COPYPR1.ASM·COPYPR2.ASM 과 메시지 표 v4.0/src/MESSAGES/USA-MS.MSG
+   다. 이 기계의 DOS 는 5.0 이라고 답하지만 5.0 COMMAND.COM 원문이 없어서 4.0 의
+   규칙이 5.0 에서도 같다고 본다.
+
+   하는 것:
+   - 인자 하나나 둘. 원본은 파일 이름이거나 `*`·`?` 가 든 이름이고 앞에 경로가
+     올 수 있다. 대상은 없음(현재 디렉터리), 디렉터리, 파일 이름, 와일드카드
+     이름이다.
+   - 대상의 `?` 자리에는 원본 이름의 같은 자리 글자가 들어간다. `*` 는 그 칸의
+     남은 자리를 모두 `?` 로 바꾼다. 대상의 확장자 칸이 비면 확장자가 없다
+     (COPYPR2.ASM BUILDNAME).
+   - 대상 파일이 이미 있으면 묻지 않고 덮어쓴다. 4.0 COPY 는 만들기 플래그로
+     열기만 한다(COPYPR1.ASM PROCDEST).
+   - 원본이 와일드카드면 복사하는 이름을 한 줄씩 보이고(COPY.ASM MELDO) 끝에
+     "%9d File(s) copied" 를 쓴다. 원본이 하나도 없으면 "File not found - 이름"
+     을 쓰고(COPY.ASM SRCNONEXIST) 같은 끝줄이 이어진다. 메시지 글은 USA-MS.MSG
+     에서 가져왔고 "File not found - " 의 " - 이름" 꼴은 기억이다(확인 필요).
+   - 원본이 대상과 같은 파일이면 "File cannot be copied onto itself" 를 쓰고
+     거기서 멈춘다(COPYPR1.ASM FLSHFIL). 그 앞에 복사한 것은 남는다.
+   - 빈 원본은 대상을 지우고 센 수에 넣지 않는다(COPY.ASM CLOSEDEST 는 쓴 것이
+     없는 대상을 DestDelete 로 지운다).
+   - 파일 하나가 디스크 빈 자리를 넘으면 그 대상을 지우고 "Insufficient disk
+     space" 를 쓰고 멈춘다(COPYPR1.ASM COPERR).
+
+   하지 않는 것 — AH=4Bh 가 오류 1 로 답하고 파일은 하나도 건드리지 않는다:
+   - `+` 이어붙이기, `/` 스위치, `,;=` 구분자, 인자 0개나 3개 이상.
+   - 디렉터리나 장치 이름(CON·NUL ...)이 원본이나 대상인 것. 디렉터리 원본은
+     실기가 `디렉터리\*.*` 로 읽는다.
+   - 앞 경로가 없는 디렉터리인 것, 만들 이름이 DOS 이름이 못 되는 것, 만들
+     이름이 디렉터리 이름과 겹치는 것. 실기가 쓰는 메시지를 확인하지 못했다.
+   - 와일드카드 원본에 와일드카드 없는 파일 대상. 실기는 원본을 ^Z 까지 이어
+     붙인다(COPYPR2.ASM BUILDDEST).
+   - 만들 대상이 원본 목록에 다시 들어올 수 있는 것. 실기는 다음 원본을 AH=12h
+     로 이어서 찾아(COPY.ASM SEARCHNEXT) 결과가 디렉터리 항목 순서에 달린다.
+   - 열려 있는 파일이 원본이거나 대상인 것. 닫기 전의 쓰기는 호스트 표에 없고,
+     실기에서 그 결과가 어떻게 되는지 확인하지 못했다.
+   - 표준 출력이나 표준 오류가 콘솔이 아닌 것. 메시지를 둘 곳이 없다. *)
+
+let ( let* ) = Result.bind
+
+let console_write t s =
+  String.iter (fun c -> teletype t (Char.code c) dos_output_color) s
+
+let copy_unsupported_chars = "+/,;="
+
+let copy_wild s = String.contains s '*' || String.contains s '?'
+
+let copy_device_stems =
+  [ "CON"; "PRN"; "AUX"; "NUL"; "COM1"; "COM2"; "COM3"; "COM4"; "LPT1"; "LPT2";
+    "LPT3"; "CLOCK$"; device_name Emm ]
+
+(* 마지막 낱말이 장치를 부르는지. DOS 는 첫 점 앞의 이름만 본다. *)
+let copy_names_device last =
+  let stem = match String.index_opt last '.' with Some i -> String.sub last 0 i | None -> last in
+  List.mem (String.uppercase_ascii stem) copy_device_stems
+
+type copy_operand =
+  | Operand_directory of Dos_path.t
+  | Operand_name of Dos_path.t * string  (** 디렉터리와 마지막 낱말(와일드카드 가능) *)
+
+(* `SAVE\` 는 SAVE 디렉터리다(COPYPR2.ASM BUILDPATH 가 CHDIR 로 알아본다).
+   루트 `\` 와 `C:\` 는 Dos_path 가 그대로 읽는다. *)
+let copy_trim_separator token =
+  let n = String.length token in
+  if n > 1 && token.[n - 1] = '\\' && token.[n - 2] <> ':' && token.[n - 2] <> '\\' then
+    String.sub token 0 (n - 1)
+  else token
+
+(* 낱말 하나가 무엇을 부르는지. 지원 밖이면 Error. *)
+let copy_operand t token =
+  if String.exists (String.contains copy_unsupported_chars) token then Error ()
+  else if copy_wild token then
+    match Dos_path.parse_pattern ~cwd:t.cwd token with
+    | Ok (dir, pattern) when dir_exists t dir && not (copy_names_device pattern) ->
+      Ok (Operand_name (dir, pattern))
+    | Ok _ | Error _ -> Error ()
+  else
+    let trimmed = copy_trim_separator token in
+    match Dos_path.parse ~cwd:t.cwd trimmed with
+    | Error _ -> Error ()
+    | Ok p when dir_exists t p -> Ok (Operand_directory p)
+    | Ok _ when trimmed <> token -> Error ()  (* 끝의 `\` 는 디렉터리만 뜻한다 *)
+    | Ok p ->
+      (match Dos_path.parent p, Dos_path.base p with
+       | Some dir, Some last when dir_exists t dir && not (copy_names_device last) ->
+         Ok (Operand_name (dir, last))
+       | Some _, Some _ | Some _, None | None, _ -> Error ())
+
+type copy_dest =
+  | To_file of Dos_path.t * string  (** 디렉터리와 이름. 와일드카드가 없다 *)
+  | To_pattern of Dos_path.t * string  (** 디렉터리와 11칸(8+3) 틀. `?` 는 원본 글자 *)
+
+(* 이름 8칸 + 확장자 3칸 *)
+let copy_base_len = 8
+let copy_ext_len = 3
+let copy_all_wild = String.make (copy_base_len + copy_ext_len) '?'
+
+let copy_dest t = function
+  | None -> Ok (To_pattern (t.cwd, copy_all_wild))
+  | Some token ->
+    let* operand = copy_operand t token in
+    (match operand with
+     | Operand_directory dir -> Ok (To_pattern (dir, copy_all_wild))
+     | Operand_name (dir, last) when copy_wild last ->
+       let base, ext = to_8_3 last in
+       Ok (To_pattern (dir, expand_stars base ^ expand_stars ext))
+     | Operand_name (dir, last) -> Ok (To_file (dir, last)))
+
+(* BUILDNAME: 틀의 `?` 칸에는 원본 글자를, 공백 칸에는 아무것도 쓰지 않는다.
+   확장자 칸이 모두 비면 이름 끝에 점만 남는데, 그 점은 Dos_path 가 뗀다. *)
+let copy_target_name pattern name =
+  let base, ext = to_8_3 name in
+  let fill src off len =
+    String.concat ""
+      (List.init len (fun i ->
+           match pattern.[off + i] with
+           | '?' -> if src.[i] = ' ' then "" else String.make 1 src.[i]
+           | ' ' -> ""
+           | c -> String.make 1 c))
+  in
+  fill base 0 copy_base_len ^ "." ^ fill ext copy_base_len copy_ext_len
+
+type copy_step = {
+  shown : string option;  (** 화면에 보일 원본 이름. 원본이 와일드카드일 때만 있다 *)
+  data : Bytes.t;  (** 계획을 세울 때 읽은 원본 내용 *)
+  from_key : string;
+  to_key : string;
+}
+
+type copy_job = {
+  no_source : string option;  (** 원본이 하나도 없을 때 "File not found" 에 쓸 이름 *)
+  steps : copy_step list;
+}
+
+let copy_to_console t =
+  List.for_all
+    (fun h -> match Hashtbl.find_opt t.handles h with Some { target = Device Con; _ } -> true | _ -> false)
+    [ 1; 2 ]
+
+(* 화면에 보이는 원본 이름은 입력한 경로를 그대로 쓴다(COPY.ASM SRCBUF). *)
+let copy_shown_prefix token =
+  let token = String.uppercase_ascii token in
+  match String.rindex_opt token '\\', String.rindex_opt token ':' with
+  | None, None -> ""
+  | Some i, None | None, Some i -> String.sub token 0 (i + 1)
+  | Some i, Some j -> String.sub token 0 (max i j + 1)
+
+(* 지원 밖이면 Error. 파일은 건드리지 않는다. *)
+let plan_copy t args =
+  let tokens =
+    List.filter (( <> ) "")
+      (String.split_on_char ' ' (String.map (fun c -> if c = '\t' then ' ' else c) args))
+  in
+  let* source, dest_token =
+    match tokens with
+    | [ source ] -> Ok (source, None)
+    | [ source; dest ] -> Ok (source, Some dest)
+    | [] | _ :: _ :: _ :: _ -> Error ()
+  in
+  let* () = if copy_to_console t then Ok () else Error () in
+  let* src_dir, src_pattern =
+    let* operand = copy_operand t source in
+    match operand with
+    | Operand_directory _ -> Error ()
+    | Operand_name (dir, last) -> Ok (dir, last)
+  in
+  let* dest = copy_dest t dest_token in
+  let ambiguous = copy_wild src_pattern in
+  let* () = match dest with To_file _ when ambiguous -> Error () | To_file _ | To_pattern _ -> Ok () in
+  let prefix = copy_shown_prefix source in
+  let found =
+    List.sort compare
+      (List.filter_map
+         (fun (name, hit) ->
+           match hit with
+           | File_hit key when matches_pattern ~pattern:src_pattern ~name ->
+             Option.map (fun data -> (name, key, data)) (Hashtbl.find_opt t.host_files key)
+           | File_hit _ | Dir_hit _ -> None)
+         (entries_of t src_dir))
+  in
+  let* () =
+    if List.exists (fun (_, key, _) -> Hashtbl.mem t.open_files key) found then Error () else Ok ()
+  in
+  let rec steps = function
+    | [] -> Ok []
+    | (name, from_key, data) :: rest ->
+      let* target =
+        Result.map_error ignore
+          (match dest with
+           | To_file (dir, last) -> Dos_path.parse ~cwd:dir last
+           | To_pattern (dir, pattern) -> Dos_path.parse ~cwd:dir (copy_target_name pattern name))
+      in
+      let to_key = Dos_path.key target in
+      let step = { shown = (if ambiguous then Some (prefix ^ name) else None); data; from_key; to_key } in
+      if dir_exists t target || Hashtbl.mem t.open_files to_key then Error ()
+      else if to_key = from_key then Ok [ step ]
+      else
+        let reenters =
+          Dos_path.parent target = Some src_dir
+          && (match Dos_path.base target with
+              | Some made -> matches_pattern ~pattern:src_pattern ~name:made
+              | None -> false)
+        in
+        if reenters then Error ()
+        else
+          let* more = steps rest in
+          Ok (step :: more)
+  in
+  let* steps = steps found in
+  Ok { no_source = (if found = [] then Some (String.uppercase_ascii source) else None); steps }
+
+let copy_count_width = 9
+
+let run_copy t job =
+  let say = console_write t in
+  let count = ref 0 in
+  let rec go = function
+    | [] -> ()
+    | step :: rest ->
+      Option.iter (fun name -> say (name ^ "\r\n")) step.shown;
+      let size = Bytes.length step.data in
+      if step.from_key = step.to_key then say "File cannot be copied onto itself\r\n"
+      else if size = 0 then begin
+        Hashtbl.remove t.host_files step.to_key;
+        go rest
+      end
+      else if clusters size > free_clusters then begin
+        Hashtbl.remove t.host_files step.to_key;
+        say "Insufficient disk space\r\n"
+      end
+      else begin
+        Hashtbl.replace t.host_files step.to_key (Bytes.copy step.data);
+        incr count;
+        go rest
+      end
+  in
+  Option.iter (fun name -> say ("File not found - " ^ name ^ "\r\n")) job.no_source;
+  go job.steps;
+  say (Printf.sprintf "%*d File(s) copied\r\n" copy_count_width !count)
 
 (* EPB(ES:BX)의 명령줄 꼬리를 글로 읽는다. 꼬리 포인터가 0:0 이면 None. *)
 let epb_tail t =
@@ -1061,7 +1321,15 @@ let exec_program t ~return_to =
        | Ok line ->
          match command_target t line with
          | Error code -> fail t code; Completed
-         | Ok target ->
+         | Ok (Copy_files args) ->
+           (match plan_copy t args with
+            | Error () -> fail t invalid_function; Completed
+            | Ok job ->
+              run_copy t job;
+              t.last_child_code <- 0;
+              ok t;
+              Completed)
+         | Ok (Run_program target) ->
            exec_image t ~return_to ~image:(Bytes.to_string target.image)
              ~name:(Printf.sprintf "%c:\\%s" boot_drive_letter (Dos_path.key target.program))
              ~tail:(Some target.args))
@@ -1552,10 +1820,6 @@ let ext_read t =
     | None -> None
 
 type line_result = Line_complete of string | Line_waiting of line_input
-
-(* DOS 의 콘솔 출력은 BIOS teletype 으로 간다. 텍스트 모드에서는 칸의
-   속성을 그대로 두고, 그래픽 모드에서는 이 색(밝은 회색)으로 그린다. *)
-let dos_output_color = 0x07
 
 let echo_line_character t c =
   if c = 0x09 then begin
