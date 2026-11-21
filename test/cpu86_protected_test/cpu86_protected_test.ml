@@ -342,6 +342,8 @@ let test_stops () =
   faults "code segment into SS" (sel_into ss 0x08) 13 0x08;
   faults "read-only data into SS" (sel_into ss 0x60) 13 0x60;
   stops "RPL above DPL" (sel_into ds 0x13) "privilege level";
+  stops "RPL above DPL on a not present segment: the privilege check comes first"
+    (sel_into ds 0x3b) "privilege level";
   faults "far jump to a data segment" ("\xea" ^ le32 0x120 ^ le16 0x10) 13 0x10;
   faults "far jump to a not present data segment: the type comes before presence"
     ("\xea" ^ le32 0x120 ^ le16 0x38) 13 0x38;
