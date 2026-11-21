@@ -245,8 +245,12 @@ type t = {
   undo_segs : int array;  (** 그때의 세그먼트 레지스터 *)
   undo_bases : int array;  (** 그때의 세그먼트 베이스 *)
   undo_hi : int array;  (** 그때의 범용 레지스터 위 절반(386) *)
-  read : int -> int;
-  write : int -> int -> unit;
+  mutable read : int -> int;
+  mutable write : int -> int -> unit;
+      (** CPU 가 메모리를 읽고 쓰는 길. CR0.PG 가 켜져 있는 동안은 [set_paging_guard] 가 감싼 것 *)
+  raw_read : int -> int;
+  raw_write : int -> int -> unit;
+      (** 기계가 건넨 그대로의 버스. 호스트 서비스와 표 읽기는 선형이 아니라 물리 주소다 *)
   port_in : int -> int;
   port_out : int -> int -> unit;
 }
@@ -288,7 +292,7 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     undo_segs = Array.make classic_segments 0;
     undo_bases = Array.make classic_segments 0;
     undo_hi = Array.make (upper_halves model) 0;
-    read; write; port_in; port_out;
+    read; write; raw_read = read; raw_write = write; port_in; port_out;
   }
 
 let halted t = t.halted
@@ -364,8 +368,29 @@ let set_real_seg t n v =
   t.bases.(n) <- selector lsl 4
 
 let dump_ip t = t.ip
-let bus_read t a = t.read a
-let bus_write t a v = t.write a v
+let bus_read t a = t.raw_read a
+let bus_write t a v = t.raw_write a v
+
+(* CR0.PG 동안의 1MB 한계([Cpu86_system.check_identity_map] 의 WORKAROUND 와 한 쌍). 선형
+   주소를 물리 주소로 쓰는 동안 1MB 위 접근은 멈춘다. 기계의 버스는 위쪽 주소 비트를
+   버려서(16MB 보드는 24 비트) E0000000h 같은 별칭이 아래 주소와 우연히 같아져 거짓으로
+   통과하기 때문이다. *)
+let paging_linear_end = 0x100000
+
+let linear_stop t a =
+  raise (Unsupported (Printf.sprintf
+    "linear address %08x is above 1MB while CR0.PG is on (page tables, RFC 0005 5) @%04x:%04x"
+    a t.segs.(sreg_cs) t.ip))
+
+(* 버스를 감싸는 것은 PG 가 켜질 때뿐이라 PG 가 꺼진 기계의 메모리 접근 경로는 그대로다. *)
+let set_paging_guard t on =
+  if on then begin
+    t.read <- (fun a -> if a >= paging_linear_end then linear_stop t a else t.raw_read a);
+    t.write <- (fun a v -> if a >= paging_linear_end then linear_stop t a else t.raw_write a v)
+  end else begin
+    t.read <- t.raw_read;
+    t.write <- t.raw_write
+  end
 let set_ip t v = t.ip <- v land 0xffff
 
 (* FLAGS 워드의 bit1 은 항상 1 이다. bits12-15 는 8086·186 에서 읽으면
@@ -501,7 +526,8 @@ let save_state t =
         fetch_end = _; fetch_ip_mask = _; prefixes = _ (* derived from the model *);
         undo_regs = _; undo_segs = _; undo_bases = _; undo_hi = _
         (* scratch for the step in progress; a snapshot falls between steps *);
-        int_hook = _; read = _; write = _; port_in = _; port_out = _
+        int_hook = _; read = _; write = _; raw_read = _; raw_write = _; port_in = _;
+        port_out = _
         (* closures: the machine that owns this CPU wires them *) } = t
   in
   let saved_386 =
@@ -565,6 +591,7 @@ let load_state t s =
      t.task.sys_base <- x.saved_task_base land register32_mask;
      t.task.sys_limit <- max no_limit (min x.saved_task_limit register32_mask);
      t.cr0 <- x.saved_cr0 land cr0_defined;
+     set_paging_guard t (t.cr0 land cr0_pg <> 0);
      t.cr2 <- x.saved_cr2 land register32_mask;
      t.cr3 <- x.saved_cr3 land register32_mask;
      t.gdtr.table_base <- x.saved_gdtr_base land register32_mask;

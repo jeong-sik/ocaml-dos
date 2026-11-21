@@ -43,7 +43,7 @@ let load_descriptor_table t seg off table w =
 
 (* 물리 주소의 더블워드. 표 메모리를 읽는다. *)
 let read_physical32 t addr =
-  let byte i = t.read ((addr + i) land t.addr_mask) in
+  let byte i = t.raw_read ((addr + i) land t.addr_mask) in
   let b0 = byte 0 in
   let b1 = byte 1 in
   let b2 = byte 2 in
@@ -60,8 +60,9 @@ let first_megabyte_pages = 256
 
 (* WORKAROUND: test386 POST 8 이 PG 를 켜기 전에 첫 1MB 를 선형=물리로 매핑해 두고
    (PDE 하나, PTE 256 개) 그 매핑으로 POST 9 이후를 돈다. 페이징이 5 단계라 그 모양만
-   확인하고 이후 선형 주소를 그대로 물리 주소로 쓴다. 게스트가 표 메모리를 고쳐도
-   반영하지 않는다. 근본 해결: 5단계 페이징 *)
+   확인하고 이후 선형 주소를 그대로 물리 주소로 쓴다(1MB 위 접근은 멈춘다:
+   [Cpu86_state.set_paging_guard]). 게스트가 표 메모리를 고쳐도 반영하지 않는다.
+   근본 해결: 5단계 페이징 *)
 let check_identity_map t ctx ~cr3 =
   let stop what =
     unsupported t ctx (Printf.sprintf "CR0.PG on: %s (page tables, RFC 0005 5)" what)
@@ -83,11 +84,14 @@ let check_identity_map t ctx ~cr3 =
    끄면 실모드로 돌아간다: 세그먼트 캐시는 그대로고 이후 적재는 base 만 쓴다. *)
 let write_cr0 t ctx v =
   let v = v land cr0_defined in
-  if v land cr0_pg <> 0 then begin
+  let paging = v land cr0_pg <> 0 in
+  if paging then begin
     if v land cr0_pe = 0 then fault vector_general_protection;
     if t.cr0 land cr0_pg = 0 then check_identity_map t ctx ~cr3:t.cr3
   end;
-  t.cr0 <- v
+  let paging_was_on = t.cr0 land cr0_pg <> 0 in
+  t.cr0 <- v;
+  if paging <> paging_was_on then set_paging_guard t paging
 
 (* 0F 01 의 /0 SGDT, /1 SIDT, /2 LGDT, /3 LIDT, /4 SMSW, /6 LMSW. 메모리 피연산자만
    받는 넷의 레지스터 형태는 INT 6 이다(386 PRM "Interrupt 6 if the operand is a
