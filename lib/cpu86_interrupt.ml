@@ -117,11 +117,12 @@ let frame_bytes size ~error_code =
   let word = match size with Gate16 -> 2 | Gate32 -> 4 in
   match error_code with None -> 3 * word | Some _ -> 4 * word
 
-(* 쓰기 전에 스택이 프레임을 받는지: 아니면 #SS(0). 쓴 것이 없어야 결함이 명령을 되돌릴 수
-   있다. *)
+(* 쓰기 전에 스택이 프레임을 받는지: 0 아래로 내려가면 #SS(0). 쓴 것이 없어야 결함이 명령을
+   되돌릴 수 있다. push 는 0 아래로 내려가면 4GB 위로 감아 한계를 넘지 않아서 이 검사가 따로
+   필요하다. 한계는 push 가 쓸 때 본다. 첫 push 가 가장 높은 바이트를 쓰니 한계를 넘는
+   스택은 아무것도 쓰기 전에 걸린다. *)
 let require_stack_room t bytes =
-  let sp = stack_pointer t in
-  if bytes > sp || sp - 1 > t.limits.(sreg_ss) then fault (Stack_fault 0)
+  if bytes > stack_pointer t then fault (Stack_fault 0)
 
 let push t size v =
   match size with Gate16 -> push16 t (v land 0xffff) | Gate32 -> push32 t v

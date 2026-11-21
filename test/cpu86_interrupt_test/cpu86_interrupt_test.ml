@@ -14,6 +14,7 @@
      28h conforming code, DPL 3     30h non-conforming code, DPL 3
      38h code, not present          40h data, not present
      48h 32-bit code, 512 bytes     50h LDT descriptor (a system type)
+     58h 32-bit data, 32KB (B=1)
      78h and above are beyond the GDT *)
 
 let failed = ref 0
@@ -57,11 +58,12 @@ let gdt =
       desc ~base:0 ~limit:0xfffff ~access:0x1a ~flags:granular_big;
       desc ~base:0 ~limit:0xfffff ~access:0x12 ~flags:granular_big;
       desc ~base:0 ~limit:0x1ff ~access:0x9a ~flags:big;
-      desc ~base:0 ~limit:0xff ~access:0x82 ~flags:0 ]
+      desc ~base:0 ~limit:0xff ~access:0x82 ~flags:0;
+      desc ~base:0 ~limit:0x7fff ~access:0x92 ~flags:big ]
 
 let sel_code32 = 0x08 and sel_data = 0x10 and sel_conforming3 = 0x28
 let sel_code3 = 0x30 and sel_code_absent = 0x38 and sel_data_absent = 0x40
-let sel_code_small = 0x48 and sel_system = 0x50
+let sel_code_small = 0x48 and sel_system = 0x50 and sel_stack_small = 0x58
 let sel_beyond = 0x78
 
 (* An IDT gate. Access 8Eh is a 386 interrupt gate, 8Fh a 386 trap gate, 86h and 87h the
@@ -250,6 +252,21 @@ let test_gate_widths () =
   let t, _ = make (int_n 0x46) in
   check_halted "INT through a 32-bit gate" (run t);
   check "ESP after three dwords" (esp t) (stack_top - 12);
+  (* a 32-bit gate offset has both words *)
+  let t, mem =
+    make ~gates:[ (0x46, gate ~selector:sel_code32 ~offset:0x12345 ~access:interrupt_gate32 ()) ]
+      (int_n 0x46)
+  in
+  Bytes.set mem 0x12345 '\xf4';
+  check_halted "a 32-bit gate with a high offset word" (run t);
+  check "the handler at 12345h ran" (Cpu86.dump_ip t) 0x12346;
+  let t, mem =
+    make ~gates:[ (0x46, gate ~selector:sel_code32 ~offset:0x12345 ~access:trap_gate32 ()) ]
+      (int_n 0x46)
+  in
+  Bytes.set mem 0x12345 '\xf4';
+  check_halted "a 32-bit trap gate with a high offset word" (run t);
+  check "the trap handler at 12345h ran" (Cpu86.dump_ip t) 0x12346;
   (* the RPL of the gate's selector is dropped: CPL stays 0 *)
   let t, mem =
     make ~gates:[ (0x47, gate_to ~selector:(sel_code32 lor 3) ~access:interrupt_gate32 0x47) ]
@@ -311,7 +328,8 @@ let test_idt_errors () =
        broken name (gate_to ~access 0x40) ~vector:gp ~code:idt_code)
     [ ("a data descriptor in the IDT", 0x92); ("an LDT descriptor in the IDT", 0x82);
       ("a TSS in the IDT", 0x89); ("a call gate in the IDT", 0x8c);
-      ("the type comes before presence", 0x0c) ];
+      ("the type comes before presence", 0x0c);
+      ("a code descriptor whose type bits look like a gate", 0x9e) ];
   broken "a gate that is not present" (absent 0x40) ~vector:np ~code:idt_code;
   broken "a null handler selector" (gate_to ~selector:0 ~access:interrupt_gate32 0x40)
     ~vector:gp ~code:0;
@@ -328,6 +346,17 @@ let test_idt_errors () =
     (gate_to ~selector:sel_code3 ~access:interrupt_gate32 0x40) ~vector:gp ~code:sel_code3;
   broken "a handler EIP beyond its code segment limit"
     (gate_to ~selector:sel_code_small ~access:interrupt_gate32 0x40) ~vector:gp ~code:0;
+  (* the last byte of the limit is a valid handler EIP, the next one is not *)
+  let t, mem =
+    make ~gates:[ (0x40, gate ~selector:sel_code_small ~offset:0x1ff ~access:interrupt_gate32 ()) ]
+      int40
+  in
+  Bytes.set mem 0x1ff '\xf4';
+  check_halted "a handler EIP at the limit" (run t);
+  check "the handler at the limit ran" (Cpu86.dump_ip t) 0x200;
+  faulted "a handler EIP one past the limit"
+    ~gates:[ (0x40, gate ~selector:sel_code_small ~offset:0x200 ~access:interrupt_gate32 ()) ]
+    int40 ~vector:gp ~code:0 ~return_ip:at_int;
   (* a conforming code segment is taken whatever its DPL (PRM: "conforming OR DPL = CPL").
      확인 필요: 현대 Intel SDM 이 DPL 이 CPL 보다 큰 conforming 을 막는지 읽지 못했다. *)
   let t, _ =
@@ -394,6 +423,16 @@ let test_double_fault () =
     ~vector:df ~code:0 ~return_ip:divide_at;
   faulted "#BR, then #NP, whose gate is not present either" ~gates:[ (5, absent 5); (np, absent np) ]
     out_of_bounds ~vector:df ~code:0 ~return_ip:bound_at;
+  faulted "#GP into a gate that is not present" ~gates:[ (gp, absent gp) ]
+    (mov_ax_sel sel_beyond ^ mov_ds_ax) ~vector:df ~code:0 ~return_ip:(body_at + 4);
+  faulted "#NP into a gate that is not present" ~gates:[ (np, absent np) ]
+    (mov_ax_sel sel_data_absent ^ mov_ds_ax) ~vector:df ~code:0 ~return_ip:(body_at + 4);
+  faulted "#SS into a gate that is not present" ~gates:[ (ss, absent ss) ]
+    (mov_ax_sel sel_data_absent ^ mov_ss_ax) ~vector:df ~code:0 ~return_ip:(body_at + 4);
+  (* the trap is benign: a fault in its delivery is handled on its own *)
+  faulted "a single-step trap into a gate that is not present" ~gates:[ (1, absent 1) ]
+    (sti ^ pushfd ^ or_stack_with flag_tf ^ popfd ^ nop ^ nop) ~vector:np ~code:((1 * 8) + 2 + 1)
+    ~return_ip:(body_at + 11);
   let t, _ = make ~gates:[ (0, absent 0); (df, absent df) ] divide_by_zero in
   check_stopped "a fault delivering the #DF" (run t) "shutdown";
   let t, _ =
@@ -421,7 +460,27 @@ let test_stack_room () =
   check "ESP 10: return IP is the INT" (word mem (esp t + 2)) (body_at + 5);
   (* no room for the #SS frame either, nor for the #DF one *)
   let t, _ = make (mov_esp 4 ^ int_n 0x40) in
-  check_stopped "ESP 4" (run t) "shutdown"
+  check_stopped "ESP 4" (run t) "shutdown";
+  (* an error code takes room too: a 16-bit gate needs 8 bytes for #SS, so ESP 7 has none *)
+  let t, _ =
+    make ~gates:[ (ss, gate_to ~access:interrupt_gate16 ss) ] (mov_esp 7 ^ int_n 0x40)
+  in
+  check_stopped "ESP 7" (run t) "shutdown";
+  check "ESP 7: a delivery that does not fit writes nothing" (esp t) 7;
+  (* a 32-bit gate needs 16 bytes for a #GP: ESP 14 takes an INT but not a fault with a code *)
+  let t, _ = make (mov_esp 14 ^ int_n 0x40) in
+  check_halted "ESP 14" (run t);
+  let t, _ = make (mov_esp 14 ^ mov_ax_sel sel_beyond ^ mov_ds_ax) in
+  check_stopped "ESP 14 and a fault with a code" (run t) "shutdown";
+  check "ESP 14: a delivery that does not fit writes nothing" (esp t) 14;
+  (* the stack limit counts too: ESP 9000h is above a 32KB stack segment, and the last
+     byte of the limit is the highest one a push may write *)
+  let t, _ = make (mov_ax_sel sel_stack_small ^ mov_ss_ax ^ int_n 0x40) in
+  check_stopped "ESP above the SS limit" (run t) "shutdown";
+  let t, _ = make (mov_ax_sel sel_stack_small ^ mov_ss_ax ^ mov_esp 0x8000 ^ int_n 0x40) in
+  check_halted "ESP just above the SS limit" (run t);
+  check "ESP just above the SS limit: delivered" (vector_run t) 0x40;
+  check "ESP just above the SS limit: three dwords" (esp t) (0x8000 - 12)
 
 let test_task_gate () =
   let t, _ = make ~gates:[ (0x42, gate ~selector:0x30 ~offset:0 ~access:task_gate ()) ] (int_n 0x42) in
@@ -482,6 +541,7 @@ let test_iret_refusals () =
   check_stopped "IRET with NT set" (run t) "NT";
   let t, _ = make (push_imm (flag_vm lor 2) ^ "\x6a\x08" ^ push_imm 0x2000 ^ iretd) in
   check_stopped "IRETD with VM in the popped EFLAGS" (run t) "virtual-8086";
+  check "the refused IRETD left its frame on the stack" (esp t) (stack_top - 12);
   (* real mode is not touched: NT set before the IRETD, and VM in the image, change nothing *)
   let real =
     "\xb8\x02\x40\x50\x9d"                         (* mov ax,4002h; push ax; popf *)
