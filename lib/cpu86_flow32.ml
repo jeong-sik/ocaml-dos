@@ -3,6 +3,7 @@
    16 비트라 SP 만 움직인다. 데이터 명령과 [dispatch] 는 [Cpu86_exec32] 에 있다. *)
 
 open Cpu86_state
+open Cpu86_segment
 open Cpu86_fault
 open Cpu86_decode
 open Cpu86_alu
@@ -11,38 +12,34 @@ open Cpu86_alu
    이고 EIP 와 스택은 바뀌지 않는다. SingleStepTests/80386 66C3 에서 FFFFh 위
    EIP 를 꺼낸 128 건이 모두 그렇다. 점프는 같은 규칙으로 둔다 — 66E9 의 rel32 는
    ±64K 안이라 그런 점프가 데이터에 없다. *)
-let check_target target =
+let check_target_in ~limit target =
   let target = target land dword_mask in
-  if target > 0xffff then fault vector_segment_overrun;
+  if target > limit then fault vector_segment_overrun;
   target
 
-let jump_rel t d = t.ip <- check_target (t.ip + d)
+let check_target t target = check_target_in ~limit:t.limits.(sreg_cs) target
 
-(* [atomic] 은 아래 16 비트만 되돌린다. ENTER 의 디스플레이 복사는 EBP 를 4 씩
-   줄이며 읽어 위 절반까지 바꾸는데, 그 읽기가 넘쳐 결함이 나면 EBP 전체가
-   명령 앞 값이다(SingleStepTests/80386 66C8 의 결함 128 건). 다른 32 비트 스택
-   명령은 결함 전에 위 절반을 건드리지 않아 [atomic] 으로 된다. *)
-let atomic32 t f =
-  let hi = Array.copy t.regs_hi in
-  atomic t (fun () ->
-      try f () with Fault _ as e -> Array.blit hi 0 t.regs_hi 0 (Array.length hi); raise e)
+let jump_rel t d = t.ip <- check_target t (t.ip + d)
 
 (* 세그먼트 레지스터의 32 비트 PUSH·POP 은 SP 를 4 움직이고 워드 하나만
    오간다. 위 워드는 쓰지도 읽지도 않아 SP=FFFEh 의 POP 도 결함이 아니다
    (SingleStepTests/80386 6606·6607: 쓴 바이트가 둘, SP=FFFE 의 POP 36 건). *)
 let push_sreg t sreg =
-  let sp = (t.regs.(4) - 4) land 0xffff in
+  let sp = (stack_pointer t - 4) land stack_mask t in
   write16 t sreg_ss sp (seg t sreg);
-  t.regs.(4) <- sp
+  set_stack_pointer t sp
 
+(* SP 는 세그먼트를 싣기 전에 올린다: POP SS 가 B 비트가 다른 스택 세그먼트를 싣더라도 올림은
+   명령 앞의 스택 폭으로 한다(test386 POST 9: 16 비트 스택에서 POP SS 로 32 비트 스택 기술자를
+   싣고도 ESP 의 위 절반이 그대로다). *)
 let pop_sreg t sreg =
-  let v = read16 t sreg_ss t.regs.(4) in
-  set_seg t sreg v;
-  t.regs.(4) <- (t.regs.(4) + 4) land 0xffff
+  let v = read16 t sreg_ss (stack_pointer t) in
+  drop_stack t 4;
+  set_seg t sreg v
 
 let far_call t off sg =
   atomic t (fun () ->
-      let target = check_target off in
+      let target = check_target_in ~limit:(code_limit_after t sg) off in
       push32 t (seg t sreg_cs);
       push32 t t.ip;
       set_seg t sreg_cs sg;
@@ -50,16 +47,16 @@ let far_call t off sg =
       13)
 
 let far_jump t off sg =
-  let target = check_target off in
+  let target = check_target_in ~limit:(code_limit_after t sg) off in
   set_seg t sreg_cs sg;
   t.ip <- target
 
 let enter32 t =
   let size = fetch16 t in
   let nesting = fetch8 t land 0x1f in
-  atomic32 t (fun () ->
+  atomic t (fun () ->
       push32 t (get32 t 5);
-      let frame = t.regs.(4) in
+      let frame = stack_pointer t in
       if nesting > 0 then begin
         for _ = 1 to nesting - 1 do
           put32 t 5 ((get32 t 5) - 4);
@@ -68,7 +65,7 @@ let enter32 t =
         push32 t frame
       end;
       put32 t 5 frame;
-      set_reg16 t 4 ((t.regs.(4) - size) land 0xffff);
+      set_stack_pointer t ((stack_pointer t - size) land stack_mask t);
       19)
 
 (* 16 비트 스택의 POPAD 는 ESP 자리를 버리지 않는다: SP 는 32 만큼 오르고 ESP
@@ -80,7 +77,7 @@ let popad t =
       put32 t 6 (pop32 t);
       put32 t 5 (pop32 t);
       let esp_slot = pop32 t in
-      t.regs_hi.(4) <- esp_slot lsr 16;
+      if not t.stack32 then t.regs_hi.(4) <- esp_slot lsr 16;
       put32 t 3 (pop32 t);
       put32 t 2 (pop32 t);
       put32 t 1 (pop32 t);
@@ -93,13 +90,13 @@ let popad t =
    보다 작은 8 건). *)
 let pushad_slots = 8
 let pushad t =
-  let sp = t.regs.(4) in
+  let sp = stack_pointer t in
   let esp = get32 t 4 in
   let value = function 4 -> esp | n -> get32 t n in
   for n = pushad_slots - 1 downto 0 do
-    write32 t sreg_ss ((sp - (4 * (n + 1))) land 0xffff) (value n)
+    write32 t sreg_ss ((sp - (4 * (n + 1))) land stack_mask t) (value n)
   done;
-  t.regs.(4) <- (sp - (4 * pushad_slots)) land 0xffff;
+  set_stack_pointer t ((sp - (4 * pushad_slots)) land stack_mask t);
   36
 
 (* 카운터는 주소 크기를 따른다: 67h 면 ECX, 아니면 CX. *)
@@ -119,24 +116,26 @@ let loop32 t ctx =
 
 let ret_near t n =
   atomic t (fun () ->
-      t.ip <- check_target (pop32 t);
-      t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+      t.ip <- check_target t (pop32 t);
+      drop_stack t n;
       10)
 
 let ret_far t n =
   atomic t (fun () ->
-      let target = check_target (pop32 t) in
+      let off = pop32 t in
       let sg = pop32 t land 0xffff in
+      let target = check_target_in ~limit:(code_limit_after t sg) off in
       set_seg t sreg_cs sg;
       t.ip <- target;
-      t.regs.(4) <- (t.regs.(4) + n) land 0xffff;
+      drop_stack t n;
       18)
 
 let iretd t =
   atomic t (fun () ->
-      let target = check_target (pop32 t) in
+      let off = pop32 t in
       let sg = pop32 t land 0xffff in
       let fl = pop32 t in
+      let target = check_target_in ~limit:(code_limit_after t sg) off in
       set_seg t sreg_cs sg;
       t.ip <- target;
       set_flags t (fl land 0xffff);

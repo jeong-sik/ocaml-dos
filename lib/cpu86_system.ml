@@ -1,7 +1,7 @@
 (* 386 의 시스템 명령: 기술자 표 레지스터(LGDT·LIDT·SGDT·SIDT), 기계 상태 워드
-   (LMSW·SMSW), CLTS, 제어·디버그·시험 레지스터로의 MOV. 실모드에서 도는 것만
-   있다. CR0.PE 를 켜는 쓰기는 보호 모드(RFC 0005 3b)라 [Unsupported] 로 멈춘다 —
-   CR0 에는 아무것도 쓰지 않고 IP 는 그 명령 앞으로 돌아간다. *)
+   (LMSW·SMSW), CLTS, 제어·디버그·시험 레지스터로의 MOV. CR0.PE 를 켜는 쓰기는
+   보호 모드로 들어가고, 끄는 쓰기는 실모드로 돌아간다. CR0.PG 를 켜는 쓰기는 첫
+   1MB 가 항등 매핑인지 확인한다([check_identity_map]). *)
 
 open Cpu86_state
 open Cpu86_fault
@@ -41,20 +41,60 @@ let load_descriptor_table t seg off table w =
      | Word -> base land descriptor_table_base_mask_16bit_operand
      | Dword -> base)
 
-(* CR0 에 [v] 를 쓴다. 정의된 비트만 남기고, 아직 없는 기능을 켜는 쓰기는 쓰기
-   전에 멈춘다. *)
+(* 물리 주소의 더블워드. 표 메모리를 읽는다. *)
+let read_physical32 t addr =
+  let byte i = t.read ((addr + i) land t.addr_mask) in
+  let b0 = byte 0 in
+  let b1 = byte 1 in
+  let b2 = byte 2 in
+  let b3 = byte 3 in
+  b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24)
+
+let page_frame_mask = 0xfffff000
+let page_bytes = 0x1000
+let page_entry_bytes = 4
+let page_entry_present = 0x1
+
+(* 첫 1MB 의 페이지 수: PDE 하나가 가리키는 표의 앞 256 칸. *)
+let first_megabyte_pages = 256
+
+(* WORKAROUND: test386 POST 8 이 PG 를 켜기 전에 첫 1MB 를 선형=물리로 매핑해 두고
+   (PDE 하나, PTE 256 개) 그 매핑으로 POST 9 이후를 돈다. 페이징이 5 단계라 그 모양만
+   확인하고 이후 선형 주소를 그대로 물리 주소로 쓴다. 게스트가 표 메모리를 고쳐도
+   반영하지 않는다. 근본 해결: 5단계 페이징 *)
+let check_identity_map t ctx ~cr3 =
+  let stop what =
+    unsupported t ctx (Printf.sprintf "CR0.PG on: %s (page tables, RFC 0005 5)" what)
+  in
+  let pde = read_physical32 t (cr3 land page_frame_mask) in
+  if pde land page_entry_present = 0 then
+    stop (Printf.sprintf "PDE 0 of CR3=%08x is not present" cr3);
+  let table = pde land page_frame_mask in
+  for i = 0 to first_megabyte_pages - 1 do
+    let pte = read_physical32 t (table + (i * page_entry_bytes)) in
+    if pte land page_entry_present = 0 then stop (Printf.sprintf "PTE %d is not present" i);
+    if pte land page_frame_mask <> i * page_bytes then
+      stop (Printf.sprintf "PTE %d maps %08x, not the identity %08x" i
+              (pte land page_frame_mask) (i * page_bytes))
+  done
+
+(* CR0 에 [v] 를 쓴다. 정의된 비트만 남긴다. PG 는 PE 가 켜져 있어야 하고(아니면 #GP),
+   PG 를 새로 켜는 쓰기는 CR3 의 표를 읽어 보고 항등이 아니면 쓰기 전에 멈춘다. PE 를
+   끄면 실모드로 돌아간다: 세그먼트 캐시는 그대로고 이후 적재는 base 만 쓴다. *)
 let write_cr0 t ctx v =
   let v = v land cr0_defined in
-  if v land cr0_pe <> 0 then
-    unsupported t ctx "CR0.PE on (protected mode, RFC 0005 3b)";
-  if v land cr0_pg <> 0 then unsupported t ctx "CR0.PG on (paging, RFC 0005 5)";
+  if v land cr0_pg <> 0 then begin
+    if v land cr0_pe = 0 then fault vector_general_protection;
+    if t.cr0 land cr0_pg = 0 then check_identity_map t ctx ~cr3:t.cr3
+  end;
   t.cr0 <- v
 
 (* 0F 01 의 /0 SGDT, /1 SIDT, /2 LGDT, /3 LIDT, /4 SMSW, /6 LMSW. 메모리 피연산자만
    받는 넷의 레지스터 형태는 INT 6 이다(386 PRM "Interrupt 6 if the operand is a
    register"). SMSW 는 32 비트 레지스터에 CR0 전체를 쓰고(test386 의 `smsw eax`
    와 `mov ebx, cr0` 가 같아야 한다), 메모리와 16 비트 레지스터에는 아래 워드만
-   쓴다. LMSW 는 CR0 의 아래 네 비트(PE·MP·EM·TS)만 바꾼다. /5·/7 은 없다
+   쓴다. LMSW 는 CR0 의 아래 네 비트(PE·MP·EM·TS)만 바꾸고 PE 는 켜기만 한다
+   (386 PRM: LMSW 는 PE 를 켤 수 있고 끌 수 없다). /5·/7 은 없다
    (INVLPG 는 486). clock 수는 386 PRM 표에서 기억한 값이다(확인 필요: 원문은
    못 읽었다). *)
 let group7 t ctx w =
@@ -78,7 +118,8 @@ let group7 t ctx w =
   | 4, (Mem _ | Mem32 _), _ -> op_write t 16 rm (t.cr0 land 0xffff); 3
   | 6, _, _ ->
     let v = op_read t 16 rm in
-    write_cr0 t ctx ((t.cr0 land lnot msw_loadable) lor (v land msw_loadable));
+    write_cr0 t ctx
+      (((t.cr0 land lnot msw_loadable) lor (v land msw_loadable)) lor (t.cr0 land cr0_pe));
     (match rm with Reg _ -> 10 | Mem _ | Mem32 _ -> 13)
   | _ ->
     let form = match w with Word -> "386" | Dword -> "386, 66h" in
@@ -135,7 +176,10 @@ let move_to_special t ctx op2 =
     (match n with
      | 0 -> write_cr0 t ctx v; 10
      | 2 -> t.cr2 <- v; 4
-     | 3 -> t.cr3 <- v; 4
+     | 3 ->
+       if t.cr0 land cr0_pg <> 0 then check_identity_map t ctx ~cr3:v;
+       t.cr3 <- v;
+       4
      | _ -> fault vector_invalid_opcode)
   | 0x23 ->
     let slot = debug_register_slot t ctx n in

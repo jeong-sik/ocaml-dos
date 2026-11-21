@@ -13,5 +13,7 @@
 
 include Cpu86_state
 
+let set_seg = Cpu86_segment.set_seg
+
 let idle = Cpu86_exec.idle
 let step = Cpu86_exec.step

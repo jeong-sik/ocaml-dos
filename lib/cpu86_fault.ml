@@ -19,6 +19,7 @@ let vector_invalid_opcode = 6
 let vector_device_not_available = 7
 let vector_stack_fault = 12
 let vector_segment_overrun = 13
+let vector_general_protection = vector_segment_overrun
 
 let fault vector = raise (Fault vector)
 
@@ -58,26 +59,43 @@ let atomic t f =
   | I8086 | I80186 -> f ()
   | I80286 | I80386 ->
     Array.blit t.regs 0 t.undo_regs 0 8;
+    Array.blit t.regs_hi 0 t.undo_hi 0 (Array.length t.regs_hi);
     Array.blit t.segs 0 t.undo_segs 0 classic_segments;
     Array.blit t.bases 0 t.undo_bases 0 classic_segments;
+    Array.blit t.limits 0 t.undo_limits 0 classic_segments;
+    t.undo_code32 <- t.code32;
+    t.undo_stack32 <- t.stack32;
     (try f () with
      | Fault _ as e ->
        Array.blit t.undo_regs 0 t.regs 0 8;
+       Array.blit t.undo_hi 0 t.regs_hi 0 (Array.length t.regs_hi);
        Array.blit t.undo_segs 0 t.segs 0 classic_segments;
        Array.blit t.undo_bases 0 t.bases 0 classic_segments;
+       Array.blit t.undo_limits 0 t.limits 0 classic_segments;
+       t.code32 <- t.undo_code32;
+       t.stack32 <- t.undo_stack32;
        raise e)
 
 (* 386 은 결함 난 POPA·POP r/m 의 SP 를 명령 앞 값으로 되돌린다. POPA 가
    이미 꺼낸 DI·SI·BP 는 그대로 둔다(SingleStepTests/80386 61 8F). 286 은
    POP r/m 의 SP 를 올려 둔 채 두고 POPA 는 [atomic] 으로 모두 되돌린다. *)
 let restore_sp_on_fault t f =
-  let sp = t.regs.(4) in
-  try f () with Fault _ as e -> t.regs.(4) <- sp; raise e
+  let sp = stack_pointer t in
+  try f () with Fault _ as e -> set_stack_pointer t sp; raise e
+
+(* 보호 모드의 INT·결함은 IDT 의 게이트로 간다. 그 전달은 3c(RFC 0005)라, 그때까지
+   호스트가 IVT 로 받는 것은 실모드뿐이다. 보호 모드에서는 틀린 표로 보내지 않고
+   멈춘다. *)
+let protected_mode_delivery = "delivery through the IDT (RFC 0005 3c)"
 
 let do_int t ctx n =
-  match t.int_hook with
-  | Some f -> f n
-  | None -> unsupported t ctx (Printf.sprintf "int %02x (no hook)" n)
+  if t.cr0 land cr0_pe <> 0 then
+    unsupported t ctx (Printf.sprintf "int %02x in protected mode needs %s" n
+                         protected_mode_delivery)
+  else
+    match t.int_hook with
+    | Some f -> f n
+    | None -> unsupported t ctx (Printf.sprintf "int %02x (no hook)" n)
 
 (* 8086·186 의 나눗셈 오류는 다음 명령으로 돌아가는 트랩이고, 286 부터는
    나눗셈 자신(접두 바이트 포함)으로 돌아가는 결함이다. *)
