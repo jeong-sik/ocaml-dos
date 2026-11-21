@@ -299,6 +299,8 @@ let test_mount_names () =
   check "another drive is refused" (refused "D:\\X");
   check "a directory's name is refused" (refused "DATA");
   check "the root is refused" (refused "\\");
+  check "a file's name cannot also be a directory above a file"
+    (refused "DATA\\A.DAT\\X.DAT" && refused "DATA\\A.DAT\\SUB\\X.DAT");
   check "a long name is cut as DOS cuts it"
     (Dos_machine.mount_file m "LongFileName.Text" "l" = Ok ()
      && Dos_machine.read_mounted m "LONGFILE.TEX" = Some "l");

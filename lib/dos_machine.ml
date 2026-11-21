@@ -227,12 +227,23 @@ let rec add_parents t p =
       add_parents t dir
     end
 
+(* The mounted file that a directory above [p] would share its name with. *)
+let rec file_above t p =
+  match Dos_path.parent p with
+  | None -> None
+  | Some dir ->
+    if dir = Dos_path.root then None
+    else if Hashtbl.mem t.host_files (Dos_path.key dir) then Some dir
+    else file_above t dir
+
 let mount_file t name data =
   match Dos_path.parse ~cwd:Dos_path.root name with
   | Error e -> Error (Printf.sprintf "%S: %s" name (path_error e))
   | Ok p when p = Dos_path.root -> Error (Printf.sprintf "%S: the root is not a file" name)
   | Ok p when Hashtbl.mem t.dirs (Dos_path.key p) ->
     Error (Printf.sprintf "%S: a directory has that name" name)
+  | Ok p when file_above t p <> None ->
+    Error (Printf.sprintf "%S: a file has the name of a directory above it" name)
   | Ok p ->
     add_parents t p;
     Hashtbl.replace t.host_files (Dos_path.key p) (Bytes.of_string data);
