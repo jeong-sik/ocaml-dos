@@ -5,9 +5,11 @@ open Cpu86_fault
 
 (* ---------- 명령 페치와 피연산자 ---------- *)
 
+(* 명령 바이트마다 지나는 자리라 [physical] 을 부르지 않고 식으로 쓴다. 호출을
+   남기면 삼국지3 3천만 스텝의 호스트 명령 수가 3% 가까이 는다. *)
 let fetch8 t =
   if t.ip = t.fetch_end then fault vector_segment_overrun;
-  let phys = physical t ~seg:t.segs.(1) ~off:t.ip in
+  let phys = (t.bases.(sreg_cs) + t.ip) land t.addr_mask in
   t.ip <- (t.ip + 1) land t.fetch_ip_mask;
   t.read phys
 
@@ -134,15 +136,15 @@ let decode_pop_target t ~addr ~bytes =
 
 (* 세그먼트 베이스 + 오프셋 → 물리 주소. 오프셋은 16비트에서 감긴다. *)
 let at_base t base off = (base + (off land 0xffff)) land t.addr_mask
-let at t sreg off = at_base t (t.segs.(sreg) lsl 4) off
+let at t sreg off = at_base t t.bases.(sreg) off
 
 (* 286 실모드에서 오프셋 FFFF 의 워드는 세그먼트 끝을 넘는다. 8086 처럼
    오프셋 0 으로 감지 않고 INT 13 이며, 바이트는 하나도 오가지 않는다
    (SingleStepTests/80286: 워드 피연산자 파일마다 30-50 건). 두 바이트
-   메모리 접근은 모두 이 둘을 지난다. *)
-let overruns t off =
+   메모리 접근은 모두 이 둘을 지난다. 끝은 [sreg] 의 한계([t.limits])다. *)
+let overruns t sreg off =
   match t.model with
-  | I80286 | I80386 -> off land 0xffff = 0xffff
+  | I80286 | I80386 -> (off land 0xffff) + 1 > t.limits.(sreg)
   | I8086 | I80186 -> false
 
 (* 세그먼트 끝을 넘은 접근의 결함. 386 은 SS 면 INT 12(#SS), 다른
@@ -153,7 +155,7 @@ let overrun_vector t sreg =
   | I80386 -> if sreg = sreg_ss then vector_stack_fault else vector_segment_overrun
   | I8086 | I80186 | I80286 -> vector_segment_overrun
 
-let check_word t sreg off = if overruns t off then fault (overrun_vector t sreg)
+let check_word t sreg off = if overruns t sreg off then fault (overrun_vector t sreg)
 
 (* 낮은 바이트부터 읽는다. OCaml 은 [lor] 의 오른쪽을 먼저 계산해서(ocamlopt
    5.5.2 실측) 한 식으로 쓰면 o+1 을 먼저 읽는다. 286 은 홀수 워드를 o, o+1
@@ -162,7 +164,7 @@ let check_word t sreg off = if overruns t off then fault (overrun_vector t sreg)
    읽은 바이트를 들고 있다. *)
 let read16 t s o =
   check_word t s o;
-  let base = t.segs.(s) lsl 4 in
+  let base = t.bases.(s) in
   let lo = t.read (at_base t base o) in
   let hi = t.read (at_base t base (o + 1)) in
   lo lor (hi lsl 8)
@@ -170,20 +172,18 @@ let read16 t s o =
 (* 386 의 IP 는 10000h 가 될 수 있어([fetch_ip_mask]) 윗바이트도 자른다. *)
 let write16 t s o v =
   check_word t s o;
-  let base = t.segs.(s) lsl 4 in
+  let base = t.bases.(s) in
   t.write (at_base t base o) (v land 0xff);
   t.write (at_base t base (o + 1)) ((v lsr 8) land 0xff)
 
-(* 더블워드(386, 66h). 오프셋 FFFDh 부터는 네 바이트가 세그먼트 끝을
-   넘는다 — 바이트 하나 오가기 전에 [overrun_vector] 결함이다. *)
-let dword_last_offset = 0xfffc
-
+(* 더블워드(386, 66h). 실모드에서는 오프셋 FFFDh 부터 네 바이트가 세그먼트
+   끝을 넘는다 — 바이트 하나 오가기 전에 [overrun_vector] 결함이다. *)
 let check_dword t sreg off =
-  if off land 0xffff > dword_last_offset then fault (overrun_vector t sreg)
+  if (off land 0xffff) + 3 > t.limits.(sreg) then fault (overrun_vector t sreg)
 
 let read32 t s o =
   check_dword t s o;
-  let base = t.segs.(s) lsl 4 in
+  let base = t.bases.(s) in
   let b i = t.read (at_base t base (o + i)) in
   let b0 = b 0 in
   let b1 = b 1 in
@@ -193,17 +193,15 @@ let read32 t s o =
 
 let write32 t s o v =
   check_dword t s o;
-  let base = t.segs.(s) lsl 4 in
+  let base = t.bases.(s) in
   for i = 0 to 3 do
     t.write (at_base t base (o + i)) ((v lsr (8 * i)) land 0xff)
   done
 
-(* [Mem32] 의 [size] 바이트가 실모드 한계 FFFFh 안에 드는지. 넘으면 바이트
-   하나 오가기 전에 결함이다. 16 비트 오프셋과 달리 감기지 않는다. *)
-let segment_limit = 0xffff
-
+(* [Mem32] 의 [size] 바이트가 [sreg] 의 한계([t.limits]) 안에 드는지. 넘으면
+   바이트 하나 오가기 전에 결함이다. 16 비트 오프셋과 달리 감기지 않는다. *)
 let within t sreg off size =
-  if off + size - 1 > segment_limit then fault (overrun_vector t sreg)
+  if off + size - 1 > t.limits.(sreg) then fault (overrun_vector t sreg)
 
 (* 16 비트 far 포인터 m16:16 이 차지하는 바이트(LES·LDS·LSS·LFS·LGS, FF /3·/5). *)
 let far_pointer16_bytes = 4

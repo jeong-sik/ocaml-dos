@@ -247,6 +247,34 @@ let test_faults () =
   let _, got = fault_of Cpu86.I80186 bound above in
   check_taken "186 bound" got (Some (5, 4))
 
+(* IRET with SP=FFFB pops IP and CS, then faults on the flags word at FFFF.
+   The CS it loaded goes back, and so does the base behind it: the base is
+   what the next fetch adds to IP. *)
+let test_fault_restores_base () =
+  List.iter
+    (fun (label, model) ->
+      let t, mem = cpu_mem model "\xcf" in
+      Bytes.set mem 0x1FFFD '\x00';
+      Bytes.set mem 0x1FFFE '\x20';  (* the CS it pops: 2000h *)
+      Cpu86.set_reg16 t 4 0xFFFB;
+      Cpu86.set_int_hook t ignore;
+      ignore (Cpu86.step t);
+      check (label ^ " IRET fault gives CS back") (Cpu86.seg t 1) 0;
+      check (label ^ " IRET fault gives the CS base back") (Cpu86.physical t ~sreg:1 ~off:0) 0)
+    [ ("286", Cpu86.I80286); ("386", Cpu86.I80386) ]
+
+(* The bus address of a segment register and an offset: base plus offset,
+   cut to the address lines of the model. *)
+let test_physical () =
+  let at model sreg selector off =
+    let t = cpu model "" in
+    Cpu86.set_seg t sreg selector;
+    Cpu86.physical t ~sreg ~off
+  in
+  check "8086 FFFF:0010 wraps at 1MB" (at Cpu86.I8086 3 0xFFFF 0x10) 0;
+  check "286 FFFF:0010 reaches the HMA" (at Cpu86.I80286 3 0xFFFF 0x10) 0x100000;
+  check "386 GS:5" (at Cpu86.I80386 5 0x1234 5) 0x12345
+
 (* What a 386 does in real mode that a 286 does not, each next to the 286
    result it replaces (SingleStepTests/80386 v1_ex_real_mode). *)
 let test_386 () =
@@ -1122,6 +1150,8 @@ let () =
   test_386 ();
   test_bus_order ();
   test_faults ();
+  test_fault_restores_base ();
+  test_physical ();
   test_bcd ();
   test_divide_fault ();
   test_flags ();

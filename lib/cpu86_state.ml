@@ -78,6 +78,13 @@ let max_length = function I8086 | I80186 -> max_int | I80286 -> 10 | I80386 -> 1
 (* 세그먼트 레지스터 수: ES CS SS DS, 386 은 FS GS 까지. *)
 let segment_count = function I8086 | I80186 | I80286 -> 4 | I80386 -> 6
 
+(* ES CS SS DS: 모든 모델에 있는 세그먼트. *)
+let classic_segments = segment_count I8086
+
+(* 실모드 세그먼트의 한계: 마지막으로 닿을 수 있는 오프셋. 세그먼트가 64KB 라
+   FFFFh 다. [t.limits] 의 모든 칸이 이 값으로 시작한다. *)
+let real_mode_limit = 0xffff
+
 (* 세그먼트 레지스터 번호: [segs] 의 칸이고 modrm reg 필드(8C·8E)의 값이다. *)
 let sreg_es = 0
 let sreg_cs = 1
@@ -142,6 +149,12 @@ type t = {
       (** 386 의 EAX…EDI 위 16 비트. 16 비트 쓰기는 [regs] 만 바꾸니 위
           절반이 저절로 남는다. 다른 모델은 빈 배열이다 *)
   mutable segs : int array;  (** ES CS SS DS, 386 은 FS GS 까지 *)
+  bases : int array;
+      (** [segs] 칸마다 세그먼트 베이스. 주소를 세는 곳은 셀렉터×16 대신 이
+          칸을 읽는다. [set_seg] 가 셀렉터×16 으로 쓴다 *)
+  limits : int array;
+      (** [segs] 칸마다 마지막으로 닿을 수 있는 오프셋. 실모드는 늘
+          [real_mode_limit] 다 *)
   mutable ip : int;
   mutable cf : bool;
   mutable pf : bool;
@@ -164,13 +177,15 @@ type t = {
   prefixes : prefix array;  (** [prefix_table model] *)
   undo_regs : int array;  (** [atomic] 이 결함 때 되돌릴 범용 레지스터 *)
   undo_segs : int array;  (** 그때의 세그먼트 레지스터 *)
+  undo_bases : int array;  (** 그때의 세그먼트 베이스 *)
   read : int -> int;
   write : int -> int -> unit;
   port_in : int -> int;
   port_out : int -> int -> unit;
 }
 
-let physical t ~seg ~off = ((seg lsl 4) + off) land t.addr_mask
+(* 세그먼트 레지스터 [sreg] 의 베이스에 [off] 를 더한 버스 주소. *)
+let physical t ~sreg ~off = (t.bases.(sreg) + off) land t.addr_mask
 
 let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
   {
@@ -179,6 +194,8 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     regs = Array.make 8 0;
     regs_hi = Array.make (upper_halves model) 0;
     segs = Array.make (segment_count model) 0;
+    bases = Array.make (segment_count model) 0;
+    limits = Array.make (segment_count model) real_mode_limit;
     ip = 0;
     cf = false; pf = false; af = false; zf = false; sf = false;
     tf = false; intf = true; df = false; of_ = false;
@@ -191,7 +208,8 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     fetch_ip_mask = fetch_ip_mask model;
     prefixes = prefix_table model;
     undo_regs = Array.make 8 0;
-    undo_segs = Array.make 4 0;
+    undo_segs = Array.make classic_segments 0;
+    undo_bases = Array.make classic_segments 0;
     read; write; port_in; port_out;
   }
 
@@ -238,7 +256,15 @@ let set_reg8 t n v =
      else (t.regs.(i) land 0x00ff) lor (b lsl 8))
 
 let seg t n = t.segs.(n)
-let set_seg t n v = t.segs.(n) <- v land 0xffff
+
+(* 세그먼트 레지스터를 쓰는 곳은 여기와 [Cpu86_fault.atomic] 의 되돌림 둘뿐이다.
+   실모드라 베이스는 셀렉터×16 이다. 한계는 쓰지 않는다: 이 단계에서는 늘
+   [real_mode_limit] 다. *)
+let set_seg t n v =
+  let selector = v land 0xffff in
+  t.segs.(n) <- selector;
+  t.bases.(n) <- selector lsl 4
+
 let dump_ip t = t.ip
 let bus_read t a = t.read a
 let bus_write t a v = t.write a v
@@ -343,22 +369,21 @@ type saved = {
 
 let model t = t.model
 
-(* ES CS SS DS: the segments every model has. *)
-let classic_segments = segment_count I8086
-
 (* The full pattern is the point: a field added to [t] fails the build here
    until a snapshot either carries it or says why it does not. *)
 let save_state t =
   let { model (* fixed by whoever creates the CPU; picks what [saved_386] holds *);
         addr_mask = _ (* derived from the model *);
         regs; segs; ip; regs_hi;
+        bases = _ (* follows [segs]: [load_state] writes it through [set_seg] *);
+        limits = _ (* real mode: always [real_mode_limit] *);
         iopl_nt = _ (* in the flags word, [flags t] *);
         cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
         of_ = _ (* the nine flags travel as one word, [flags t] *);
         halted; cycles;
         fetch_limit = _ (* derived from the model *);
         fetch_end = _; fetch_ip_mask = _; prefixes = _ (* derived from the model *);
-        undo_regs = _; undo_segs = _
+        undo_regs = _; undo_segs = _; undo_bases = _
         (* scratch for the step in progress; a snapshot falls between steps *);
         int_hook = _; read = _; write = _; port_in = _; port_out = _
         (* closures: the machine that owns this CPU wires them *) } = t
