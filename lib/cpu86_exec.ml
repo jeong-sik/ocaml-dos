@@ -15,6 +15,14 @@ let idle t =
   t.cycles <- t.cycles + 2;
   2
 
+(* INT n·INT 3·INTO: 보호 모드는 IDT 의 게이트로, 실모드는 호스트로 보낸다. *)
+let software_int t ctx n =
+  if t.cr0 land cr0_pe <> 0 then Cpu86_interrupt.software t ~vector:n
+  else begin
+    do_int t ctx n;
+    25
+  end
+
 let step t =
   if t.halted then idle t
   else begin
@@ -437,13 +445,13 @@ let step t =
         op_write t width rm v;
         4
       (* --- int / iret --- *)
-      | 0xcc -> do_int t ctx 3; 25
+      | 0xcc -> software_int t ctx 3
       | 0xcd ->
         let n = fetch8 t in
-        do_int t ctx n;
-        25
-      | 0xce -> if t.of_ then do_int t ctx 4 else (); 4
+        software_int t ctx n
+      | 0xce -> if t.of_ then software_int t ctx 4 else 4
       | 0xcf ->
+        refuse_iret_task_return t ctx;
         atomic t (fun () ->
             t.ip <- pop16 t;
             set_seg t 1 (pop16 t);
@@ -650,32 +658,26 @@ let step t =
         else unsupported t ctx (Printf.sprintf "opcode %02x" opcode)
       end
       with Fault f ->
-        let vector = vector_of_fault f in
         t.ip <- base_ip;
         if t.cr0 land cr0_pe <> 0 then begin
-          let code =
-            match error_code_of_fault f with
-            | Some c -> Printf.sprintf ", error code %04x" c
-            | None -> ""
-          in
-          raise (Unsupported (Printf.sprintf "fault %d in protected mode needs %s%s @%04x:%04x"
-                                vector protected_mode_delivery code (seg t 1) base_ip))
-        end;
-        (match t.int_hook with
-         | Some f -> f vector
-         | None ->
-           raise (Unsupported (Printf.sprintf "fault %d (no hook) @%04x:%04x"
-                                 vector (seg t 1) base_ip)));
-        fault_cycles
+          Cpu86_interrupt.deliver_fault t f ~return_ip:base_ip;
+          Cpu86_interrupt.protected_delivery_cycles
+        end else begin
+          let vector = vector_of_fault f in
+          (match t.int_hook with
+           | Some f -> f vector
+           | None ->
+             raise (Unsupported (Printf.sprintf "fault %d (no hook) @%04x:%04x"
+                                   vector (seg t 1) base_ip)));
+          fault_cycles
+        end
     in
     t.cycles <- t.cycles + used_cycles;
     (* 단일 스텝 트랩: TF 가 켜진 채 명령이 끝나면 INT 1. 훅이 IVT 로
        전달하며 TF 를 지우므로 핸들러 안에서 재귀하지 않는다. *)
     if entry_tf && t.tf then begin
-      if t.cr0 land cr0_pe <> 0 then
-        raise (Unsupported (Printf.sprintf "single-step trap in protected mode needs %s @%04x:%04x"
-                              protected_mode_delivery (seg t 1) t.ip));
-      (match t.int_hook with Some f -> f 1 | None -> ())
+      if t.cr0 land cr0_pe <> 0 then Cpu86_interrupt.deliver_trap t ~return_ip:t.ip
+      else (match t.int_hook with Some f -> f 1 | None -> ())
     end;
     used_cycles
   end
