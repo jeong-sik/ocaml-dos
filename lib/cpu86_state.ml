@@ -244,10 +244,7 @@ type t = {
   undo_regs : int array;  (** [atomic] 이 결함 때 되돌릴 범용 레지스터 *)
   undo_segs : int array;  (** 그때의 세그먼트 레지스터 *)
   undo_bases : int array;  (** 그때의 세그먼트 베이스 *)
-  undo_limits : int array;  (** 그때의 세그먼트 limit *)
   undo_hi : int array;  (** 그때의 범용 레지스터 위 절반(386) *)
-  mutable undo_code32 : bool;  (** 그때의 CS.D *)
-  mutable undo_stack32 : bool;  (** 그때의 SS.B *)
   read : int -> int;
   write : int -> int -> unit;
   port_in : int -> int;
@@ -290,10 +287,7 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     undo_regs = Array.make 8 0;
     undo_segs = Array.make classic_segments 0;
     undo_bases = Array.make classic_segments 0;
-    undo_limits = Array.make classic_segments 0;
     undo_hi = Array.make (upper_halves model) 0;
-    undo_code32 = false;
-    undo_stack32 = false;
     read; write; port_in; port_out;
   }
 
@@ -505,8 +499,7 @@ let save_state t =
         halted; cycles;
         fetch_limit = _ (* derived from the model *);
         fetch_end = _; fetch_ip_mask = _; prefixes = _ (* derived from the model *);
-        undo_regs = _; undo_segs = _; undo_bases = _; undo_limits = _; undo_hi = _;
-        undo_code32 = _; undo_stack32 = _
+        undo_regs = _; undo_segs = _; undo_bases = _; undo_hi = _
         (* scratch for the step in progress; a snapshot falls between steps *);
         int_hook = _; read = _; write = _; port_in = _; port_out = _
         (* closures: the machine that owns this CPU wires them *) } = t
