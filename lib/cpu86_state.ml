@@ -62,6 +62,10 @@ let cr0_ts = 0x00000008
 let cr0_et = 0x00000010
 let cr0_pg = 0x80000000
 let cr0_defined = cr0_pe lor cr0_mp lor cr0_em lor cr0_ts lor cr0_et lor cr0_pg
+
+(* CR0 의 비트 가운데 아직 돌릴 코어가 없는 것: 보호 모드(RFC 0005 3b)와 페이징(5
+   단계). 쓰기와 [load_state] 가 이 비트가 켜진 값을 거절한다. 단계마다 하나씩 뺀다. *)
+let cr0_unsupported_bits = cr0_pe lor cr0_pg
 let cr0_reset = 0
 
 (* 386 의 32 비트 시스템 레지스터(CR2·CR3·DR·TR, 기술자 표 기준)가 담는 폭. *)
@@ -464,10 +468,8 @@ let load_state t s =
      if Array.length x.saved_dr <> debug_register_count
         || Array.length x.saved_tr <> test_register_count then
        invalid_arg "Cpu86.load_state: 8 debug registers and 2 test registers";
-     (* 보호 모드는 RFC 0005 3b 에서 들어온다. 그 전에는 PE 가 켜진 상태를 돌릴
-        코어가 없어 거절한다. 3b 가 이 검사를 지운다. *)
-     if x.saved_cr0 land cr0_pe <> 0 then
-       invalid_arg "Cpu86.load_state: CR0.PE is on, protected mode is not supported yet"
+     if x.saved_cr0 land cr0_unsupported_bits <> 0 then
+       invalid_arg "Cpu86.load_state: CR0.PE or CR0.PG is on, not supported yet"
    | I80386, None -> invalid_arg "Cpu86.load_state: an 80386 needs its upper halves, FS and GS"
    | (I8086 | I80186 | I80286), Some _ ->
      invalid_arg "Cpu86.load_state: 80386 state for an older model"

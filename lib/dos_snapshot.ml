@@ -680,6 +680,8 @@ let read_payload r =
       let saved_fs = get "fs" reg in
       let saved_gs = get "gs" reg in
       let saved_cr0 = get "cr0" dword in
+      if saved_cr0 land Cpu86.cr0_unsupported_bits <> 0 then
+        C.fail "CR0 has PE or PG on: protected mode and paging are not supported";
       let saved_cr2 = get "cr2" dword in
       let saved_cr3 = get "cr3" dword in
       let saved_gdtr_base = get "gdtr base" dword in

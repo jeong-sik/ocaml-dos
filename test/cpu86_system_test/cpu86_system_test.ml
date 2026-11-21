@@ -258,6 +258,9 @@ let test_state () =
     check (name ^ ": nothing changed") (Bool.to_int (Cpu86.save_state t3 = before)) 1
   in
   refused "load_state with PE" { x with Cpu86.saved_cr0 = x.Cpu86.saved_cr0 lor 1 };
+  refused "load_state with PG"
+    { x with Cpu86.saved_cr0 = x.Cpu86.saved_cr0 lor 0x80000000 };
+  check "the unsupported CR0 bits are PE and PG" Cpu86.cr0_unsupported_bits 0x80000001;
   refused "load_state with 7 debug registers" { x with Cpu86.saved_dr = Array.make 7 0 };
   refused "load_state with 3 test registers" { x with Cpu86.saved_tr = Array.make 3 0 }
 

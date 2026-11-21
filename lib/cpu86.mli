@@ -188,6 +188,10 @@ val model : t -> model
     the memory, port and interrupt callbacks belong to whoever creates the
     CPU and are not part of it. *)
 
+val cr0_unsupported_bits : int
+(** The CR0 bits (PE, PG) that nothing here runs yet: a write that turns one on
+    stops with [Unsupported], and a saved state that has one on is refused. *)
+
 (** What an 80386 holds beyond the 286 registers. IOPL and NT (FLAGS bits
     12-14) travel in [saved_flags]. The control, debug and test registers and
     the descriptor-table registers are what a program last wrote; the core
@@ -223,5 +227,5 @@ val load_state : t -> saved -> unit
 (** Values are masked as the setters mask them. [Invalid_argument], with the
     CPU left as it was, unless there are 8 registers and 4 segments and
     [saved_386] is [Some] (with 8 upper halves, 8 debug registers and 2 test
-    registers) exactly for an [I80386], and its CR0.PE is off: protected mode
-    is not supported yet. *)
+    registers) exactly for an [I80386], and no bit of [cr0_unsupported_bits] is
+    set in its CR0. *)

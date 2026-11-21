@@ -132,6 +132,46 @@ let () =
     check "386: IDTR comes back"
       (x.Cpu86.saved_idtr_base = 0x345678 && x.Cpu86.saved_idtr_limit = 0x1234)
 
+(* A snapshot whose CR0 has PE or PG on is refused as corrupt, not restored
+   into a machine that cannot run it and not raised from [Cpu86.load_state].
+   The CR0 word is found by the three values the program above left in CR0,
+   CR2 and CR3, then rewritten, and the payload checksum is recomputed. *)
+let () =
+  let boot () =
+    let t = Dos_machine.create ~model:Cpu86.I80386 () in
+    Dos_machine.load_com t sys386_com;
+    t
+  in
+  let a = boot () in
+  run a 200;
+  let saved = save_exn a in
+  let be64 v = String.init 8 (fun i -> Char.chr ((v lsr (8 * (7 - i))) land 0xFF)) in
+  let key = be64 0xC ^ be64 0x12345678 ^ be64 0x89ABCDEF in
+  let rec find i =
+    if i + String.length key > String.length saved then None
+    else if String.sub saved i (String.length key) = key then Some i
+    else find (i + 1)
+  in
+  match find 0 with
+  | None -> check "the CR0, CR2 and CR3 words are in the snapshot" false
+  | Some at ->
+    let header_len = core_at + 32 + 16 in
+    let with_cr0 cr0 =
+      let b = Bytes.of_string saved in
+      Bytes.blit_string (be64 cr0) 0 b at 8;
+      let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
+      Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
+      Bytes.to_string b
+    in
+    let corrupt cr0 =
+      match Dos_snapshot.restore (with_cr0 cr0) with
+      | Error (Dos_snapshot.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    check "CR0 = 0Ch restores" (match Dos_snapshot.restore (with_cr0 0xC) with Ok _ -> true | Error _ -> false);
+    check "CR0 with PE is corrupt" (corrupt 0xD);
+    check "CR0 with PG is corrupt" (corrupt 0x8000000C)
+
 (* The CPU refuses a saved state of the other kind before writing anything. *)
 let () =
   let cpu model =
