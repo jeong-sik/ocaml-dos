@@ -291,7 +291,8 @@ with an LTR instruction, not a task switch").
     `Unsupported` 로 멈춘다.
   - 3b: CR0.PE 진입, GDT·LDT 에서 읽는 세그먼트 적재, 32 비트 기본 크기, LLDT·LTR·
     LAR·LSL·VERR·VERW·ARPL. test386 POST 0x08 을 넘는지는 여기서 확인한다.
-  - 3c: 오류 코드가 실린 `Fault` 와 IDT 게이트 전달.
+  - 3c: 오류 코드가 실린 `Fault` 와 IDT 게이트 전달. PR 둘로 나눈다. 3c-1 은 `Fault` 를
+    오류 코드가 구성자에 박힌 합타입으로 바꾼다(동작은 같다). 3c-2 가 IDT 전달을 넣는다.
 - 구현한 값(3a, 2026-11-21, main `0821ce03` 위):
   - 386 상태에 CR0·CR2·CR3, GDTR·IDTR(기준 32 비트, 한계 16 비트), DR0-DR7, TR6·TR7 을
     더했다. 다른 모델은 리셋 값 그대로다. 286 의 SGDT·SIDT 도 같은 칸을 읽는다.
@@ -345,7 +346,9 @@ with an LTR instruction, not a task switch").
     게임은 A20 까지 가지 못했다: 여덟은 스텁이 `C:\dos4gw.exe` 를 EXEC 하지 못한다는 글을
     찍고 종료 코드 1 로 끝나고, 둘(TerraFire, AstroFire)은 INT 21h AH=52h AL=0Ah 에서
     `Unsupported` 로 멈추고, 하나(RAVEN.EXE)는 DOS 용이 아닌 실행 파일이다. 앞의 두 원인은
-    조사하지 않았다: 7 단계 전에 볼 것.
+    조사하지 않았다: 7 단계 전에 볼 것. 확인 필요: 여덟 스텁의 EXEC 실패는 CPU 가 아니라
+    호스트 쪽 EXEC(`C:\dos4gw.exe` 경로)의 문제로 보인다. TerraFire·AstroFire 의 AH=52h 는
+    RFC 0004 2 단계 항목이다.
   - 하지 않은 것: LLDT·SLDT·LTR·STR·LAR·LSL·VERR·VERW·ARPL(보호 모드의 명령, 3b), 보호 모드
     진입, 오류 코드, IDT 게이트(3c), 디버그 중단점, 페이징.
 

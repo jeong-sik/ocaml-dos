@@ -8,7 +8,7 @@ open Cpu86_fault
 (* 명령 바이트마다 지나는 자리라 [physical] 을 부르지 않고 식으로 쓴다. 호출을
    남기면 삼국지3 3천만 스텝의 호스트 명령 수가 3% 가까이 는다. *)
 let fetch8 t =
-  if t.ip = t.fetch_end then fault vector_segment_overrun;
+  if t.ip = t.fetch_end then fault (General_protection 0);
   let phys = (t.bases.(sreg_cs) + t.ip) land t.addr_mask in
   t.ip <- (t.ip + 1) land t.fetch_ip_mask;
   t.read phys
@@ -35,7 +35,7 @@ type operand =
                          SS 접근과 다른 접근을 다른 결함으로 받아서다. *)
   | Mem32 of int * int (** 67h 의 32 비트 오프셋. 16 비트에서 감기지 않고,
                            실모드 한계 FFFFh 를 넘는 바이트가 있으면 접근이
-                           [overrun_vector] 결함이다([within]). *)
+                           [overrun_fault] 결함이다([within]). *)
 
 let sx8 d = if d >= 0x80 then d - 0x100 else d
 
@@ -151,13 +151,15 @@ let overruns t sreg off =
 
 (* 세그먼트 끝을 넘은 접근의 결함. 386 은 SS 면 INT 12(#SS), 다른
    세그먼트면 INT 13(#GP)이다(SingleStepTests/80386: SP=FFFF 의 POP·LEAVE 는
-   12, SI=FFFF 의 LODSW 는 13). 286 은 모두 INT 13 이다. *)
-let overrun_vector t sreg =
+   12, SI=FFFF 의 LODSW 는 13). 286 은 모두 INT 13 이다. 오류 코드는 0 이다(386 PRM 9.8.12
+   #SS 의 limit 위반, 9.8.13 #GP 의 "Exceeding segment limit when using CS, DS, ES, FS, or
+   GS": 기술자를 적재하다 난 결함이 아니라 코드가 0). *)
+let overrun_fault t sreg =
   match t.model with
-  | I80386 -> if sreg = sreg_ss then vector_stack_fault else vector_segment_overrun
-  | I8086 | I80186 | I80286 -> vector_segment_overrun
+  | I80386 -> if sreg = sreg_ss then Stack_fault 0 else General_protection 0
+  | I8086 | I80186 | I80286 -> General_protection 0
 
-let check_word t sreg off = if overruns t sreg off then fault (overrun_vector t sreg)
+let check_word t sreg off = if overruns t sreg off then fault (overrun_fault t sreg)
 
 (* 낮은 바이트부터 읽는다. OCaml 은 [lor] 의 오른쪽을 먼저 계산해서(ocamlopt
    5.5.2 실측) 한 식으로 쓰면 o+1 을 먼저 읽는다. 286 은 홀수 워드를 o, o+1
@@ -179,9 +181,9 @@ let write16 t s o v =
   t.write (at_base t base (o + 1)) ((v lsr 8) land 0xff)
 
 (* 더블워드(386, 66h). 실모드에서는 오프셋 FFFDh 부터 네 바이트가 세그먼트
-   끝을 넘는다 — 바이트 하나 오가기 전에 [overrun_vector] 결함이다. *)
+   끝을 넘는다 — 바이트 하나 오가기 전에 [overrun_fault] 결함이다. *)
 let check_dword t sreg off =
-  if (off land t.offset_mask) + 3 > t.limits.(sreg) then fault (overrun_vector t sreg)
+  if (off land t.offset_mask) + 3 > t.limits.(sreg) then fault (overrun_fault t sreg)
 
 let read32 t s o =
   check_dword t s o;
@@ -203,7 +205,7 @@ let write32 t s o v =
 (* [Mem32] 의 [size] 바이트가 [sreg] 의 한계([t.limits]) 안에 드는지. 넘으면
    바이트 하나 오가기 전에 결함이다. 16 비트 오프셋과 달리 감기지 않는다. *)
 let within t sreg off size =
-  if off + size - 1 > t.limits.(sreg) then fault (overrun_vector t sreg)
+  if off + size - 1 > t.limits.(sreg) then fault (overrun_fault t sreg)
 
 (* [Mem] 피연산자의 둘째 접근(far 포인터의 셀렉터, BOUND 의 상한)이 닿는 오프셋. 16 비트
    주소는 64KB 에서 감긴다(SingleStepTests/80386: `0F B4 07` 의 BX=FFFEh 는 셀렉터를
@@ -406,17 +408,17 @@ let check_lock t ctx =
       let op2 = fetch8 t in
       let modrm = fetch8 t in
       t.ip <- after_opcode;
-      if not (lockable_0f op2 modrm) then fault vector_invalid_opcode
+      if not (lockable_0f op2 modrm) then fault Invalid_opcode
     end else
       match lock_regs ctx.opcode with
-      | None -> fault vector_invalid_opcode
+      | None -> fault Invalid_opcode
       | Some regs ->
         let after_opcode = t.ip in
         let modrm = fetch8 t in
         t.ip <- after_opcode;
         let register_operand = modrm lsr 6 = 3 in
         if register_operand || regs land (1 lsl ((modrm lsr 3) land 7)) = 0 then
-          fault vector_invalid_opcode
+          fault Invalid_opcode
 
 (* SingleStepTests/80386 80386.csv 의 66 열이 1 인 한 바이트 opcode 155 개: 66h 가
    폭을 32 비트로 바꾸는 명령이다. 표 밖의 opcode(바이트 명령, 0Fh 등)는 66h 가

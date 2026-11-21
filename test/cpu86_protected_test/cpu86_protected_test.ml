@@ -345,6 +345,58 @@ let test_stops () =
   stops "single-step trap in protected mode"
     (mov_eax 0x100 ^ "\x50\x9d\x90") "single-step trap in protected mode"
 
+(* Each fault the core raises stops with its vector, and #SS and #GP with their error
+   code (RFC 0005 3c: the code is what the IDT delivery pushes). The other four vectors
+   carry none: the message has no "error code". *)
+let test_fault_codes () =
+  let stop_message ?(prepare = fun _ -> ()) name code =
+    let t, mem = make enter_flat code in
+    prepare mem;
+    match run t with
+    | Stopped m -> m
+    | Halted -> incr failed; Printf.eprintf "FAIL %s: ran to HLT\n%!" name; ""
+  in
+  let expect name m vector error =
+    let head =
+      Printf.sprintf "fault %d in protected mode needs delivery through the IDT (RFC 0005 3c)" vector
+    in
+    let ok =
+      match error with
+      | Some c -> contains m (Printf.sprintf "%s, error code %04x" head c)
+      | None -> contains m head && not (contains m "error code")
+    in
+    if not ok then begin
+      incr failed;
+      Printf.eprintf "FAIL %s: stopped with %S, want fault %d%s\n%!" name m vector
+        (match error with Some c -> Printf.sprintf " with error code %04x" c | None -> " without an error code")
+    end
+  in
+  let flat code = load_ds 0x10 ^ code in
+  let name = "divide error" in
+  expect name (stop_message name (flat (mov_eax 0 ^ "\xf7\xf0"))) 0 None;
+  let name = "BOUND out of range" in
+  let bounds mem = String.iteri (fun i c -> Bytes.set mem (0x300 + i) c) (le32 0 ^ le32 10) in
+  expect name (stop_message ~prepare:bounds name (flat (mov_eax 20 ^ "\x62\x05" ^ le32 0x300))) 5 None;
+  let name = "MOV to a sixth segment register" in
+  expect name (stop_message name (flat "\x8e\xf0")) 6 None;
+  let name = "ESC with CR0.EM" in
+  expect name
+    (stop_message name (flat ("\x0f\x20\xc0" ^ "\x0c\x04" ^ "\x0f\x22\xc0" ^ "\xd8\xc0"))) 7 None;
+  let name = "word pop at the end of a 64KB stack" in
+  expect name (stop_message name (load_ss 0x20 ^ "\x66\xbc\xff\xff" ^ "\x66\x58")) 12 (Some 0);
+  (* a string load through SS or DS at the end of a 64KB segment: 16-bit addresses in 32-bit code *)
+  let name = "string load through SS at the end of its segment" in
+  expect name (stop_message name (load_ss 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x36\x66\xad")) 12 (Some 0);
+  let name = "string load through DS at the end of its segment" in
+  expect name (stop_message name (load_ds 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x66\xad")) 13 (Some 0);
+  let name = "access through a null DS" in
+  expect name
+    (stop_message name (mov_ax_sel 0 ^ mov_sreg 3 ^ "\xa1\x00\x00\x00\x00")) 13 (Some 0);
+  let name = "fetch past the CS limit" in
+  let at_limit mem = Bytes.set mem 0xffff '\x90' in
+  expect name
+    (stop_message ~prepare:at_limit name ("\xea" ^ le32 0xffff ^ le16 0x18)) 13 (Some 0)
+
 (* CS limit bounds instruction fetch, and EIP goes past 64KB in a 4GB code
    segment. *)
 let test_fetch_limit () =
@@ -623,6 +675,7 @@ let () =
   test_code_sizes ();
   test_stack_width ();
   test_stops ();
+  test_fault_codes ();
   test_fetch_limit ();
   test_ldt_and_task_register ();
   test_queries ();

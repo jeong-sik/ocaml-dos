@@ -14,7 +14,7 @@ open Cpu86_alu
    ±64K 안이라 그런 점프가 데이터에 없다. *)
 let check_target_in ~limit target =
   let target = target land dword_mask in
-  if target > limit then fault vector_segment_overrun;
+  if target > limit then fault (General_protection 0);
   target
 
 let check_target t target = check_target_in ~limit:t.limits.(sreg_cs) target

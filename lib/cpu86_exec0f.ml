@@ -103,7 +103,7 @@ let bit_by_register t ctx w op =
 let bit_by_immediate t ctx w =
   let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
   match bit_op_of_group regf with
-  | None -> fault vector_invalid_opcode
+  | None -> fault Invalid_opcode
   | Some op ->
     let number = fetch8 t in
     apply_bit_op t w op rm (number land index_mask w);
@@ -201,7 +201,7 @@ let load_far_pointer t ctx w sreg =
      let segv = read16 t b (second_offset rm o (unit_bytes w)) in
      set_reg w t regf off;
      set_seg t sreg segv
-   | Reg _ -> fault vector_invalid_opcode);
+   | Reg _ -> fault Invalid_opcode);
   7
 
 (* MOVZX·MOVSX: B6·BE 는 바이트를, B7·BF 는 워드를 넓힌다. 16 비트 피연산자의
