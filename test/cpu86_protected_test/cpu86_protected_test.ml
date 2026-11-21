@@ -276,6 +276,24 @@ let test_stack_width () =
   in
   leave_test "LEAVE 32-bit" "\xc9" 4;
   leave_test "LEAVE 16-bit" "\x66\xc9" 2;
+  (* PUSHAD, POPAD, ENTER and RET imm16 on the 32-bit flat stack past 64KB *)
+  let t, mem = make enter_flat (load_ss 0x10 ^ mov_esp 0x30000 ^ mov_eax 0x11223344 ^ "\x60" ^ hlt) in
+  check_halted "PUSHAD on a 32-bit stack" (run t);
+  check "ESP after PUSHAD" (esp t) 0x2ffe0;
+  check "EAX is the first slot" (Char.code (Bytes.get mem 0x2fffc)) 0x44;
+  let t, _ = make enter_flat (load_ss 0x10 ^ mov_esp 0x30000 ^ "\x60\x61" ^ hlt) in
+  check_halted "PUSHAD then POPAD on a 32-bit stack" (run t);
+  check "ESP after POPAD" (esp t) 0x30000;
+  let t, mem = make enter_flat (load_ss 0x10 ^ mov_esp 0x30000 ^ "\xbd" ^ le32 0x77778888 ^ "\xc8\x08\x00\x00" ^ hlt) in
+  check_halted "ENTER on a 32-bit stack" (run t);
+  check "ESP after ENTER" (esp t) 0x2fff4;
+  check "EBP is the frame" (Cpu86.reg32 t 5) 0x2fffc;
+  check "the old EBP is saved" (Char.code (Bytes.get mem 0x2fffc)) 0x88;
+  let t, mem = make enter_flat (load_ss 0x10 ^ mov_esp 0x30000 ^ "\xc2\x08\x00") in
+  Bytes.set mem 0x200 '\xf4';
+  String.iteri (fun i c -> Bytes.set mem (0x30000 + i) c) (le32 0x200);
+  check_halted "RET imm16 on a 32-bit stack" (run t);
+  check "ESP after RET 8" (esp t) 0x3000c;
   (* on a 16-bit stack the same push wraps SP, not ESP *)
   let t, mem = make enter_flat (load_ss 0x20 ^ mov_esp 0x30000 ^ mov_eax 0x11223344 ^ "\x50" ^ hlt) in
   check_halted "push on a 16-bit stack" (run t);

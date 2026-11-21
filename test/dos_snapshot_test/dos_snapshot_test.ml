@@ -243,7 +243,9 @@ let () =
     check "protected mode: the LDT comes back"
       (x.Cpu86.saved_ldt_selector = 0x18 && x.Cpu86.saved_ldt_limit = 0x1F);
     check "protected mode: the segment bases come back"
-      (x.Cpu86.saved_bases.(1) = seg * 16 && x.Cpu86.saved_bases.(3) = seg * 16)
+      (x.Cpu86.saved_bases.(1) = seg * 16 && x.Cpu86.saved_bases.(3) = seg * 16);
+    check "protected mode: the segment limits come back"
+      (x.Cpu86.saved_limits.(1) = 0xFFFF && x.Cpu86.saved_limits.(3) = 0xFFFF)
 
 (* The CPU refuses a saved state of the other kind before writing anything. *)
 let () =
