@@ -1,9 +1,10 @@
 (* The 80386's system registers in real mode (RFC 0005 stage 3a): LGDT and
    LIDT, SMSW and LMSW, CLTS, MOV to and from CR0, CR2, CR3, DR0-DR7 and
    TR6, TR7, and what CR0.EM and TS do to ESC and WAIT. Writes that would turn
-   on protected mode, paging or a breakpoint stop the core with Unsupported
-   and change nothing. Code at 0000:0000, stack at 1000:0100, DS = 1000h after
-   [set_ds]. *)
+   on paging over tables that are not the first-megabyte identity map, or a
+   breakpoint, stop the core with Unsupported and change nothing. Code at
+   0000:0000, stack at 1000:0100, DS = 1000h after [set_ds]. Entering
+   protected mode is in cpu86_protected_test. *)
 
 let failed = ref 0
 
@@ -123,24 +124,25 @@ let test_table_faults () =
   check "LGDT at FFFC kept the limit" (sys t).Cpu86.saved_gdtr_limit 0;
   check "LGDT at FFFC kept the base" (sys t).Cpu86.saved_gdtr_base 0
 
-(* MOV to CR0 keeps the defined bits only. PE and PG stop the core before
+(* MOV to CR0 keeps the defined bits only. PG without PE is #GP, and PG over
+   tables that are not the first-megabyte identity map stops the core before
    anything is written. *)
 let test_cr0 () =
   let t = cpu (mov_eax 0x7ffffffe ^ "\x0f\x22\xc0" ^ "\x0f\x20\xc0") in
   run t 3;
   check "CR0 keeps MP EM TS ET" (eax t) 0x1e;
   let t = cpu (mov_eax 0x00000001 ^ "\x0f\x22\xc0") in
-  run t 1;
-  check_stopped "MOV CR0 with PE" (stopped_at t) (Some 6);
-  check "MOV CR0 with PE left CR0" (sys t).Cpu86.saved_cr0 0;
+  run t 2;
+  check "MOV CR0 with PE turns protected mode on" (sys t).Cpu86.saved_cr0 1;
   let t = cpu (mov_eax 0x80000000 ^ "\x0f\x22\xc0") in
   run t 1;
-  check_stopped "MOV CR0 with PG" (stopped_at t) (Some 6);
-  check "MOV CR0 with PG left CR0" (sys t).Cpu86.saved_cr0 0;
-  (* mov eax,-1 ; mov cr0,eax stops at PE, even with the other bits set *)
+  check_taken "MOV CR0 with PG and no PE" (taken_in t 1) (Some (13, 6));
+  check "MOV CR0 with PG and no PE left CR0" (sys t).Cpu86.saved_cr0 0;
+  (* mov eax,-1 ; mov cr0,eax: PG over CR3 = 0, whose first PDE is not present *)
   let t = cpu (mov_eax 0xffffffff ^ "\x0f\x22\xc0") in
   run t 1;
-  check_stopped "MOV CR0 with every bit" (stopped_at t) (Some 6)
+  check_stopped "MOV CR0 with every bit" (stopped_at t) (Some 6);
+  check "MOV CR0 with every bit left CR0" (sys t).Cpu86.saved_cr0 0
 
 (* SMSW reads CR0, 32 bits into a 32-bit register, 16 bits otherwise; LMSW
    writes PE MP EM TS from a word. CLTS clears TS. *)
@@ -163,9 +165,12 @@ let test_msw () =
   run t 4;
   check "SMSW with 66h writes the whole register" (ebx t) 0xc;
   let t = cpu "\xb8\x01\x00\x0f\x01\xf0" in
-  run t 1;
-  check_stopped "LMSW with PE" (stopped_at t) (Some 3);
-  check "LMSW with PE left CR0" (sys t).Cpu86.saved_cr0 0;
+  run t 2;
+  check "LMSW with PE turns protected mode on" (sys t).Cpu86.saved_cr0 1;
+  (* LMSW can set PE and cannot clear it *)
+  let t = cpu "\xb8\x01\x00\x0f\x01\xf0\xb8\x00\x00\x0f\x01\xf0" in
+  run t 4;
+  check "LMSW cannot clear PE" (sys t).Cpu86.saved_cr0 1;
   let t = cpu "\xb8\x08\x00\x0f\x01\xf0\x0f\x06\x0f\x20\xc0" in
   run t 3;
   check "CLTS cleared TS" (sys t).Cpu86.saved_cr0 0;
@@ -232,7 +237,8 @@ let test_coprocessor_traps () =
   check_taken "WAIT with MP only" (taken_in (cpu (lmsw 2 ^ wait)) 3) None
 
 (* A saved 386 carries the system registers and gives them back; a state with
-   CR0.PE or the wrong register counts is refused and changes nothing. *)
+   CR0.PG with PE off or the wrong register counts is refused and changes
+   nothing. *)
 let test_state () =
   let program =
     set_ds ^ "\x0f\x01\x16\x00\x02" ^ mov_eax 0x12345678 ^ "\x0f\x22\xd0" ^ "\x0f\x23\xc0"
@@ -257,10 +263,10 @@ let test_state () =
      | exception Invalid_argument _ -> ());
     check (name ^ ": nothing changed") (Bool.to_int (Cpu86.save_state t3 = before)) 1
   in
-  refused "load_state with PE" { x with Cpu86.saved_cr0 = x.Cpu86.saved_cr0 lor 1 };
-  refused "load_state with PG"
+  refused "load_state with PG and no PE"
     { x with Cpu86.saved_cr0 = x.Cpu86.saved_cr0 lor 0x80000000 };
-  check "the unsupported CR0 bits are PE and PG" Cpu86.cr0_unsupported_bits 0x80000001;
+  refused "load_state with 5 segment bases" { x with Cpu86.saved_bases = Array.make 5 0 };
+  refused "load_state with 7 segment limits" { x with Cpu86.saved_limits = Array.make 7 0 };
   refused "load_state with 7 debug registers" { x with Cpu86.saved_dr = Array.make 7 0 };
   refused "load_state with 3 test registers" { x with Cpu86.saved_tr = Array.make 3 0 }
 
