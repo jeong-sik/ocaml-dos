@@ -268,6 +268,74 @@ let () =
     "MZ relocation table runs past the file";
   raises "no MZ signature: named error" "\xb8\x07\x4c\xcd\x21" "not an MZ image";
 
+  (* exe_payload_bytes 는 load_exe 가 받는 이미지에만 Ok 를 내고, 받지 않는
+     이미지에는 load_exe 가 내는 그 글을 낸다. 헤더 필드를 흔든 이미지와
+     서명만 MZ 인 잡음 이미지를 같은 씨앗으로 많이 돌려 둘을 나란히 본다.
+     Ok 의 수는 헤더에서 따로 센 값과 같아야 한다. *)
+  let random = Random.State.make [| 20261121 |] in
+  let pick options = List.nth options (Random.State.int random (List.length options)) in
+  let u16 image offset =
+    Char.code image.[offset] lor (Char.code image.[offset + 1] lsl 8) in
+  let accepted = ref 0 and refused_count = ref 0 in
+  for _ = 1 to 3000 do
+    let size = pick [ 2; 20; 27; 28; 29; 31; 32; 33; 64; 200; 513; 1000; 4096 ] in
+    let image =
+      let noise = Bytes.init size (fun _ -> Char.chr (Random.State.int random 256)) in
+      let put offset v =
+        if offset + 2 <= size then begin
+          Bytes.set noise offset (Char.chr (v land 0xff));
+          Bytes.set noise (offset + 1) (Char.chr ((v lsr 8) land 0xff))
+        end in
+      if size >= 2 then Bytes.blit_string (pick [ "MZ"; "ZM"; "XX" ]) 0 noise 0 2;
+      if Random.State.int random 4 > 0 then begin
+        put 0x04 (pick [ 0; 1; 2; 3; 4; 8; 0xFFFF ]);
+        put 0x06 (pick [ 0; 1; 2; 5; 100 ]);
+        put 0x08 (pick [ 0; 1; 2; 3; 4; 0x20; 0xFFFF ]);
+        put 0x18 (pick [ 0; 0x1C; 0x28; 60; 61; 0x100; 0xFFFF ])
+      end;
+      Bytes.to_string noise in
+    let loaded =
+      try Dos_machine.load_exe (Dos_machine.create ()) image; Ok ()
+      with Invalid_argument message -> Error message in
+    (match loaded, Dos_machine.exe_payload_bytes image with
+     | Ok (), Ok payload ->
+       incr accepted;
+       let module_end = u16 image 0x04 * 512 and header = u16 image 0x08 * 16 in
+       check "exe_payload_bytes: the header's module, cut at the file end"
+         payload (max 0 (min module_end (String.length image) - header))
+     | Error want, Error got ->
+       incr refused_count;
+       if got <> want then begin
+         incr failed;
+         Printf.eprintf "FAIL exe_payload_bytes message: got %S want %S\n%!" got want
+       end
+     | Ok (), Error got ->
+       incr failed;
+       Printf.eprintf "FAIL exe_payload_bytes refuses what load_exe takes (%S)\n%!" got
+     | Error want, Ok _ ->
+       incr failed;
+       Printf.eprintf "FAIL exe_payload_bytes takes what load_exe refuses (%S)\n%!" want)
+  done;
+  checkb "the sample holds both outcomes" (!accepted > 0 && !refused_count > 0) true;
+
+  (* 메모리 끝을 넘는 적재 모듈은 막히지 않는다. 20비트로 돌아 그 바이트가
+     0 번지(IVT)에 닿는다. 이미지는 PSP 0x1000 + 0x10 문단, 곧 0x10100 에
+     놓이므로 모듈의 0xEFF00 번째 바이트가 0 번지다. 막는 일은 부르는 쪽
+     몫이라 exe_payload_bytes 는 수만 알려 준다. *)
+  let image_start = (root_psp + 0x10) * 16 in
+  let wrap_at = 0x100000 - image_start in
+  let past_the_end =
+    make_exe ~image:(String.make wrap_at '\x00' ^ "\xAB") ~ip:0 ~cs:0 ~ss:0 ~sp:0xFFFE [] in
+  let wrapped = Dos_machine.create () in
+  (match Dos_machine.exe_payload_bytes past_the_end with
+   | Ok payload -> checkb "a module past the end of memory is reported as is" (payload > wrap_at) true
+   | Error message ->
+     incr failed;
+     Printf.eprintf "FAIL a module past the end of memory was refused: %s\n%!" message);
+  Dos_machine.load_exe wrapped past_the_end;
+  check "a module past the end of memory wraps onto address 0"
+    (Dos_machine.mem_read wrapped 0) 0xAB;
+
   if !failed = 0 then print_endline "dos M2b: all passed"
   else begin
     Printf.eprintf "dos M2b: %d failures\n%!" !failed;

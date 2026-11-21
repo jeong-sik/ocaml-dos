@@ -49,6 +49,14 @@ val load_exe : ?name:string -> ?tail:string -> Dos_state.t -> string -> unit
     [name]·[tail] 은 [load_com] 과 같다. EXEC 자식은 AH=4Bh 가 같은 규칙으로
     싣고, 환경을 따로 받는다. *)
 
+val exe_payload_bytes : string -> (int, string) result
+(** [load_exe] 가 이 이미지를 받는지, 싣기 전에 묻는다. 받으면 [Ok n] 이고
+    [n] 은 메모리에 들어가는 바이트 수다 — 헤더의 페이지 수가 끝을 정하고
+    파일이 먼저 끝나면 파일 끝까지, 거기서 헤더를 빼고 0 아래로는 내려가지
+    않는다. 아니면 [Error 글]
+    이고 글은 [load_exe] 가 [Invalid_argument] 로 내는 것과 같다. 아무것도
+    바꾸지 않는다. *)
+
 val int27 : Dos_state.t -> unit
 (** INT 27h — 옛 방식 상주 종료. DX 오프셋까지 자기 블록을 남긴다. *)
 

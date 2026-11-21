@@ -46,6 +46,13 @@ val load_exe : ?name:string -> ?tail:string -> t -> string -> unit
     를 헤더값 + 로드 세그먼트로 잡는다. DS/ES 는 PSP 세그먼트다.
     MZ 서명이 아니면 [Invalid_argument]. [name]·[tail] 은 [load_com] 과 같다. *)
 
+val exe_payload_bytes : string -> (int, string) result
+(** [load_exe] 가 이 이미지를 받는지, 싣기 전에 묻는다. 받으면 [Ok n] 이고
+    [n] 은 메모리에 들어가는 바이트 수다({!Dos_dos.exe_payload_bytes}).
+    아니면 [Error 글] 이고 글은 [load_exe] 가 [Invalid_argument] 로 내는 것과
+    같다. 1MB 주소 공간을 넘는 [n] 은 [load_exe] 가 막지 않는다 — 20비트로
+    돌아 낮은 주소(IVT)를 덮어쓴다. 막는 일은 부르는 쪽 몫이다. *)
+
 val mount_file : t -> string -> string -> (unit, string) result
 (** 게스트가 INT 21h 로 열 수 있는 파일. 이름은 루트에서 시작하는 DOS
     경로다 — [DATA\X.DAT] 나 [DATA/X.DAT] 처럼 쓰고, DOS 가 읽듯

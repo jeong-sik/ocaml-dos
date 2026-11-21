@@ -207,6 +207,8 @@ let load_exe ?name ?tail t image =
   set_input_continuations t [];
   t.console_pending <- ""
 
+let exe_payload_bytes = Dos_dos.exe_payload_bytes
+
 (* ---------- 파일 마운트 ---------- *)
 
 let path_error = function
