@@ -89,7 +89,7 @@ let pre_block ~code ~data =
    글(None 이면 꼬리 포인터 0:0)이다. [pre] 가 있으면 EXEC 앞에 그 덩어리를
    돌린다. 이미지는 0x100 바이트 — 코드 뒤에 결과 칸, 이름, EPB, 꼬리가
    온다. *)
-let parent ?(name = "C:\\COMMAND.COM") ?pre ~tail () =
+let parent ?(name = "C:\\COMMAND.COM") ?pre ?(post = "") ~tail () =
   let main =
     "\xb4\x4a\xbb\x20\x00\xcd\x21"           (* mov ah,4Ah; mov bx,0020h; int 21h *)
     ^ "\xb8\x00\x4b"                         (* mov ax,4B00h *)
@@ -101,6 +101,7 @@ let parent ?(name = "C:\\COMMAND.COM") ?pre ~tail () =
     ^ "\xa3" ^ w16s r_cf                     (* mov [R_CF],ax *)
     ^ "\xb4\x4d\xcd\x21"                     (* mov ah,4Dh; int 21h *)
     ^ "\xa3" ^ w16s r_code                   (* mov [R_CODE],ax *)
+    ^ post
     ^ "\xb8\x00\x4c\xcd\x21"                 (* mov ax,4C00h; int 21h *)
   in
   let code =
@@ -123,10 +124,10 @@ let parent ?(name = "C:\\COMMAND.COM") ?pre ~tail () =
 let word m a = Dos_machine.mem_read m a lor (Dos_machine.mem_read m (a + 1) lsl 8)
 let bytes_at m a n = String.init n (fun i -> Char.chr (Dos_machine.mem_read m (a + i)))
 
-let run ?name ?(files = []) ?pre tail =
+let run ?name ?(files = []) ?pre ?post tail =
   let m = Dos_machine.create () in
   List.iter (fun (n, d) -> mount m n d) files;
-  Dos_machine.load_com m (parent ?name ?pre ~tail ());
+  Dos_machine.load_com m (parent ?name ?pre ?post ~tail ());
   Dos_machine.run m ~max_steps:200_000;
   check "machine exits" (if Dos_machine.exited m then 1 else 0) 1;
   m
@@ -481,6 +482,80 @@ let () =
   check "after a child: EXEC CF" (word m (parent_psp + r_cf)) 0;
   check "after a child: 4Dh" (word m (parent_psp + r_code)) 0;
   check_table "after a child" m [ a_sr1; ("B.SR1", "aaa"); ("CHILD.COM", child_com) ]
+
+(* ---------- 표준 출력 `> 파일` ----------
+
+   줄 끝의 `> 파일` 은 자식의 핸들 1 을 그 파일로 바꾼다. 파일은 비워서
+   만들고, 자식이 끝나면 닫혀 마운트 표로 돌아오며, 부모의 핸들 1 은 EXEC 가
+   돌아온 뒤 콘솔이다. AH=02h·09h 도 핸들 1 로 간다. *)
+
+(* 자식 COM: AH=09h 로 "HI", 핸들 1 에 "AB", 핸들 2 에 "E" 를 쓰고 37h 로 끝난다.
+   100 mov ah,9; mov dx,HI; int 21h
+   107 mov ah,40h; mov bx,1; mov cx,2; mov dx,AB; int 21h
+   114 mov ah,40h; mov bx,2; mov cx,1; mov dx,E; int 21h
+   121 mov ax,4C37h; int 21h
+   126 "HI$"  129 "AB"  12B "E" *)
+let writer_com =
+  "\xb4\x09\xba" ^ w16s 0x126 ^ "\xcd\x21"
+  ^ "\xb4\x40\xbb\x01\x00\xb9\x02\x00\xba" ^ w16s 0x129 ^ "\xcd\x21"
+  ^ "\xb4\x40\xbb\x02\x00\xb9\x01\x00\xba" ^ w16s 0x12B ^ "\xcd\x21"
+  ^ "\xb8\x37\x4c\xcd\x21"
+  ^ "HI$" ^ "AB" ^ "E"
+
+(* EXEC 뒤 부모가 AH=02h 로 P 를 쓴다 — 핸들 1 이 콘솔로 돌아왔다면 화면에 보인다 *)
+let post_p = "\xb2\x50\xb4\x02\xcd\x21"
+
+let () =
+  let files = [ ("WRITER.COM", writer_com) ] in
+  (* 13) 자식의 AH=09h 와 핸들 1 쓰기는 파일로, 핸들 2 는 콘솔로 간다. 부모의
+     P 는 콘솔로 간다. 종료 코드는 자식의 것이다. *)
+  let m = run ~files ~post:post_p (Some "/C WRITER > R.TXT") in
+  check "redirect: EXEC CF" (word m (parent_psp + r_cf)) 0;
+  check "redirect: 4Dh" (word m (parent_psp + r_code)) 0x37;
+  check_table "redirect: file" m [ ("R.TXT", "HIAB"); ("WRITER.COM", writer_com) ];
+  check_lines "redirect: screen" m [ "EP" ];
+  (* 14) 있는 파일은 비우고 쓴다. `>` 앞뒤 공백은 있어도 없어도 같다. 파일 이름은
+     8.3 으로 읽는다. *)
+  let m =
+    run ~files:(("R.TXT", "OLDOLDOLDOLD") :: files) (Some "/C WRITER>r.txt")
+  in
+  check_table "truncate, no blanks" m [ ("R.TXT", "HIAB"); ("WRITER.COM", writer_com) ];
+  let m = run ~files (Some "/C WRITER   >   LONGNAME.TXT") in
+  check_table "long name" m [ ("LONGNAME.TXT", "HIAB"); ("WRITER.COM", writer_com) ]
+
+let () =
+  (* 15) `>` 앞의 공백은 꼬리에서 뗀다. 쓰지 않는 자식이어도 파일은 빈 채로
+     생긴다. *)
+  let m = run ~files:[ ("CHILD.COM", child_com) ] (Some "/C CHILD ARG1 > OUT.TXT") in
+  expect_child "tail before the redirect" m ~code:0x37 ~tail:" ARG1" ~env_name:"C:\\CHILD.COM";
+  check_table "empty file" m [ ("CHILD.COM", child_com); ("OUT.TXT", "") ];
+  (* 16) 폴더 안의 파일, 그리고 자식이 폴더에서 돈다 *)
+  let m =
+    run ~files:[ ("DATA\\WRITER.COM", writer_com) ] (Some "/C DATA\\WRITER > DATA\\R.TXT")
+  in
+  check_table "in a folder" m [ ("DATA\\R.TXT", "HIAB"); ("DATA\\WRITER.COM", writer_com) ]
+
+let () =
+  (* 17) 지원 밖과 실패: 폴더가 없으면 3, 폴더 이름이면 5, 장치·`>>`·`<`·`|`·
+     파일 낱말이 없거나 둘이거나 COPY 줄은 1. 자식은 돌지 않고 파일은 안
+     생긴다. *)
+  let files = [ ("CHILD.COM", child_com); ("SUB\\X.DAT", "x") ] in
+  List.iter
+    (fun (what, tail, code) ->
+      let m = run ~files (Some tail) in
+      expect_error what m code;
+      check_table what m (List.sort compare files))
+    [ ("no such folder", "/C CHILD > NOPE\\R.TXT", 3);
+      ("a folder name", "/C CHILD > SUB", 5);
+      ("device NUL", "/C CHILD > NUL", invalid_function);
+      ("device CON with an extension", "/C CHILD > CON.TXT", invalid_function);
+      ("append", "/C CHILD >> R.TXT", invalid_function);
+      ("append without a blank", "/C CHILD >>R.TXT", invalid_function);
+      ("input and output", "/C CHILD < IN > R.TXT", invalid_function);
+      ("pipe and output", "/C CHILD | MORE > R.TXT", invalid_function);
+      ("no file word", "/C CHILD >", invalid_function);
+      ("two file words", "/C CHILD > R.TXT EXTRA", invalid_function);
+      ("COPY with output", "/C COPY A B > R.TXT", invalid_function) ]
 
 let () =
   if !failed = 0 then print_endline "dos command com: all passed"
