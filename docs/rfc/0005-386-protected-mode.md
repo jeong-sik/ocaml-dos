@@ -1,6 +1,6 @@
 # RFC 0005: 80386 보호 모드와 DOS 익스텐더
 
-- 상태: 제안
+- 상태: 채택(2026-11-21 사용자 결정), 1 단계 진행
 - 날짜: 2026-11-14
 - 범위: `lib/cpu86*.ml`, `lib/dos_machine.ml` 의 메모리와 A20, 새 시험 러너
   `test/cpu86_test386.ml`
@@ -108,9 +108,11 @@ with an LTR instruction, not a task switch").
 
 ## 지금 코드
 
-- 물리 주소는 `seg lsl 4 + off` 로 바로 센다. `Cpu86_state.physical` 과
-  `Cpu86_decode` 의 `at`·`read16`·`write16`·`read32`·`write32`, 명령 가져오기,
-  스택 한 곳이다.
+- 물리 주소는 세그먼트 레지스터의 base 에 오프셋을 더해 센다. 읽는 곳은
+  `Cpu86_decode` 의 `at`·`read16`·`write16`·`read32`·`write32`·`fetch8` 과
+  `Cpu86_state.physical`(8086·186 의 PUSH SP 와 test386 러너가 부른다)이다.
+  base 는 실모드라 셀렉터×16 이고 `set_seg` 가 쓴다. 기계의 호스트 서비스
+  (`dos_*.ml`)는 게스트 버퍼 주소를 아직 셀렉터×16 으로 센다.
 - 결함은 벡터 번호만 싣는다(`exception Fault of int`). 오류 코드를 담을 자리가
   없다.
 - 인터럽트는 `int_hook` 으로 호스트(기계의 BIOS·DOS)가 받는다.
@@ -149,10 +151,13 @@ with an LTR instruction, not a task switch").
 
 ### 1 단계: 디스크립터 캐시
 
-- 세그먼트 레지스터마다 셀렉터, base, limit, 속성을 둔다. 모든 메모리 접근이
-  `seg lsl 4` 대신 base 를 쓴다.
-- 실모드의 세그먼트 적재는 base 를 셀렉터×16 으로 바꾼다. limit·속성을 실모드
-  적재가 어떻게 다루는지는 Intel 설명서와 test386 으로 정한다.
+- 세그먼트 레지스터마다 셀렉터, base, limit 을 둔다. 모든 메모리 접근이
+  `seg lsl 4` 대신 base 를 쓴다. 속성(형식·DPL·존재)은 읽는 쪽이 3·4 단계라 그때
+  둔다.
+- 실모드의 세그먼트 적재는 base 를 셀렉터×16 으로 바꾼다. limit 은 적재가 쓰지
+  않는다. 만들 때 FFFFh 이고 이 단계에서 아무도 바꾸지 않는다. 실모드 적재가
+  limit 을 FFFFh 로 되돌리는지는 limit 을 쓰는 3 단계에서 Intel 설명서와
+  test386 으로 정한다.
 - 67h 의 FFFFh 한계 검사(RFC 0001)가 캐시의 limit 을 읽게 바꾼다.
 - 확인: 모든 실모드 스위트가 같다. 메모리 접근마다 걸리는 자리라 명령 수를
   번갈아 세 번 잰다.
@@ -173,6 +178,43 @@ with an LTR instruction, not a task switch").
     base 24.386G(+0.21%), base·limit 24.443G(+0.44%)다. 부하 평균 530 에서
     쟀고 흔들림은 0.14% 안이다.
   - 속성(형식·DPL·존재) 검사는 보호 모드에서만 돈다. 실모드 비용에는 들지 않는다.
+- 구현한 값(2026-11-21, main `5aec339b` 위):
+  - `Cpu86_state` 에 `bases`·`limits` 배열을 두었다. 칸 수는 `segs` 와 같고,
+    `set_seg` 가 셀렉터와 base 를 같이 쓴다. 세그먼트 레지스터를 쓰는 곳은 `set_seg` 와
+    `Cpu86_fault.atomic` 의 되돌림 둘이다. `atomic` 은 셀렉터를 뜨는 앞 네 칸(ES CS
+    SS DS)의 base 도 같이 뜨고 되돌린다.
+  - base 를 읽는 곳은 `at`·`read16`·`write16`·`read32`·`write32`·`fetch8`·`physical`
+    이다. `physical` 은 셀렉터 값 대신 세그먼트 레지스터 번호를 받는다. limit 을
+    읽는 곳은 `overruns`·`check_dword`·`within` 이고, 문자열의 `crosses` 는
+    `overruns` 로 간다. 상수 `segment_limit`·`dword_last_offset` 은 없앴다.
+  - `fetch8` 은 `physical` 을 부르지 않고 합을 식으로 쓴다. 호출을 남기면 아래 표의
+    +0.8% 이고, 풀어 쓰면 main 보다 줄어든다(표의 최종).
+  - 명령 가져오기의 끝(`segment_end`)은 아직 CS 의 limit 이 아니라 상수다. CS 에
+    limit 이 들어오는 3 단계에서 읽게 한다.
+  - 결과는 main 과 같다.
+    - SST 386 실모드 941 파일 1,758,700 건: fail 4(baseline), undef 127,247.
+    - SST 286 326 파일 1,478,000 건: pass 1,438,263, undef 39,735, fail 2(baseline).
+      받은 폴더의 `metadata.json` 은 시험이 아니다.
+    - SST 8086 323 파일 646,000 건: pass 599,993, undef 41,180, fail 4,827(baseline).
+    - `dune build @runtest` 의 출력.
+    - test386: POST 열 `00 01 02 03 04 05 06 08`, 793,772 스텝 뒤 f000:2662 의
+      `Unsupported`.
+    - 삼국지3 3천만 스텝 화면(286·386)의 PPM 과 출력, 삼국지3 시나리오의 저장 파일
+      MD5, ZZT, 게임 스모크 18 개.
+  - 호스트 명령 수(`/usr/bin/time -l` 의 retired instructions): 삼국지3 `KOEI.COM` 에서
+    3천만 스텝, 번갈아 세 번, dune 기본(dev) 빌드의 `dosboot`, 부하 평균 100-135 기계.
+    한 빌드 안의 흔들림은 0.1% 안이다. 기준 커밋이 시제품과 달라 절대값은 시제품과
+    비교하지 않는다.
+
+    | 모델 | main | `physical` 호출을 남긴 판 | 최종 |
+    |---|---|---|---|
+    | 286 | 36.047G | 36.335G(+0.80%) | 35.196G(-2.36%) |
+    | 386 | 39.351G | 39.656G(+0.78%) | 38.509G(-2.14%) |
+
+  - 한계 검사가 limit 칸을 읽는지는 칸의 초기값을 FFFEh 로 바꿔 확인했다.
+    `cpu86_286_test` 의 세 검사가 깨진다. limit 을 바꾸는 코드가 아직 없어서 공개
+    API 로는 limit 이 FFFFh 가 아닌 경우를 시험할 수 없다. 3 단계에서 세그먼트 적재가
+    limit 을 쓰면 그 시험이 생긴다.
 
 ### 2 단계: 1MB 위 메모리와 A20
 
