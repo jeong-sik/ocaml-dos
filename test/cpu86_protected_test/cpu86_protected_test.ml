@@ -1,9 +1,11 @@
 (* The 80386 in protected mode (RFC 0005 stage 3b): CR0.PE on and off, segment
    loads from the GDT and the LDT, the default operand, address and stack size
    from CS.D and SS.B, LLDT, LTR, SLDT, STR, VERR, VERW, LAR, LSL, ARPL, and the
-   first-megabyte identity check CR0.PG makes. Loads protected mode answers with
-   a fault, and every INT and fault in protected mode, stop the core with
-   Unsupported until RFC 0005 3c and 4.
+   first-megabyte identity check CR0.PG makes. A fault goes through an IDT whose
+   gates lead to handlers that HLT (RFC 0005 3c-2b): the handler that halted says
+   which vector, and the frame on the stack holds the error code. Loads that cross
+   a privilege level, expand-down segments and gates stop the core with
+   Unsupported until RFC 0005 4.
 
    Memory is 1MB. Code starts at 0000:0000 in real mode; the GDT is at 0800h, the
    LDT at 0A00h, the code of the protected part at 0100h. Selectors:
@@ -42,6 +44,10 @@ let desc ~base ~limit ~access ~flags =
 
 let gdt_base = 0x800
 let ldt_base = 0xa00
+let idt_base = 0x6000
+let idt_entries = 0x30
+let handler_base = 0x7000
+let handler_stride = 0x10
 let gdtr_image = 0x7f0
 let code32_at = 0x100
 let tss_base = 0x5000
@@ -78,6 +84,10 @@ let ldt =
 
 let mem_size = 0x100000
 
+(* A 32-bit interrupt gate to flat code. *)
+let gate offset =
+  le16 (offset land 0xffff) ^ le16 0x08 ^ "\000\x8e" ^ le16 (offset lsr 16)
+
 let make code_real code_prot =
   let mem = Bytes.make mem_size '\000' in
   let put a s = String.iteri (fun i c -> Bytes.set mem (a + i) c) s in
@@ -86,12 +96,22 @@ let make code_real code_prot =
   put gdt_base gdt;
   put ldt_base ldt;
   put gdtr_image (le16 gdt_limit ^ le32 gdt_base);
+  for v = 0 to idt_entries - 1 do
+    put (idt_base + (v * 8)) (gate (handler_base + (v * handler_stride)));
+    put (handler_base + (v * handler_stride)) "\xf4"
+  done;
   let read a = Char.code (Bytes.get mem (a land (mem_size - 1))) in
   let write a v = Bytes.set mem (a land (mem_size - 1)) (Char.chr (v land 0xff)) in
   let t =
     Cpu86.create ~model:Cpu86.I80386 ~read ~write ~port_in:(fun _ -> 0xff)
       ~port_out:(fun _ _ -> ()) ()
   in
+  (* the tests enter protected mode their own ways, so IDTR is set through the saved state *)
+  let saved = Cpu86.save_state t in
+  let with_idt x =
+    { x with Cpu86.saved_idtr_base = idt_base; saved_idtr_limit = (idt_entries * 8) - 1 }
+  in
+  Cpu86.load_state t { saved with Cpu86.saved_386 = Option.map with_idt saved.Cpu86.saved_386 };
   Cpu86.set_seg t 1 0;
   Cpu86.set_ip t 0;
   Cpu86.set_seg t 2 0x1000;
@@ -158,6 +178,41 @@ let load_ss sel = mov_ax_sel sel ^ mov_sreg 2
 
 let es = 0 and ss = 2 and ds = 3 and fs = 4
 
+let dword mem a = Int32.to_int (Bytes.get_int32_le mem a) land 0xffffffff
+
+(* Which handler ran: a halted core stands one byte past its HLT. -1 is none. *)
+let vector_run t =
+  let ip = Cpu86.dump_ip t - 1 in
+  if ip >= handler_base && (ip - handler_base) mod handler_stride = 0 then
+    (ip - handler_base) / handler_stride
+  else -1
+
+(* The [i]th dword of the frame on top of the stack, read through SS. *)
+let frame_dword mem t i =
+  let x = sys t in
+  let sp = if x.Cpu86.saved_stack32 then esp t else Cpu86.reg16 t 4 in
+  dword mem (x.Cpu86.saved_bases.(ss) + sp + (4 * i))
+
+(* A fault goes through the IDT to a handler that halts. The vector of that handler says
+   which fault. A fault with an error code has it on top of EIP, CS and EFLAGS, one
+   without has EIP, CS and EFLAGS. [cs] is the code segment the fault happened in. *)
+let check_fault ?(cs = 0x08) name (t, mem) outcome vector error =
+  match outcome with
+  | Stopped m ->
+    incr failed;
+    Printf.eprintf "FAIL %s: stopped with %S, want fault %d\n%!" name m vector
+  | Halted ->
+    check (name ^ ": vector of the handler that ran") (vector_run t) vector;
+    (match error with
+     | Some c ->
+       check (name ^ ": error code") (frame_dword mem t 0) c;
+       check (name ^ ": pushed CS after the error code") (frame_dword mem t 2) cs
+     | None -> check (name ^ ": no error code, CS follows EIP") (frame_dword mem t 1) cs)
+
+let faulted ?cs name code vector error =
+  let ((t, _) as tm) = make enter_flat code in
+  check_fault ?cs name tm (run t) vector error
+
 (* CR0.PE on: the part of the CPU a program sees. *)
 let test_enter () =
   let t, _ = make enter_flat (mov_eax 0x12345678 ^ "\x66\xb8\x34\x12" ^ hlt) in
@@ -213,8 +268,8 @@ let test_descriptor_fields () =
 (* A null selector loads into DS, ES, FS and GS and any access through it is out
    of range. *)
 let test_null_selector () =
-  let t, _ = make enter_flat (mov_ax_sel 0 ^ mov_sreg 3 ^ "\xa1\x00\x00\x00\x00" ^ hlt) in
-  check_stopped "access through a null DS" (run t) "fault 13 in protected mode";
+  let t, mem = make enter_flat (mov_ax_sel 0 ^ mov_sreg 3 ^ "\xa1\x00\x00\x00\x00" ^ hlt) in
+  check_fault "access through a null DS" (t, mem) (run t) 13 (Some 0);
   check "DS limit is no_limit" (sys t).Cpu86.saved_limits.(ds) Cpu86.no_limit;
   check "DS base" (sys t).Cpu86.saved_bases.(ds) 0
 
@@ -310,22 +365,17 @@ let test_stack_width () =
   check "SS selector" (Cpu86.seg t ss) 0x70;
   check_bool "SS.B on" (sys t).Cpu86.saved_stack32 true
 
-(* Loads protected mode answers with a fault stop the core, and the stop names
-   what was wrong. The cache of the register being loaded stays as it was. *)
+(* A load protected mode answers with a fault is delivered as #GP, #NP or #SS with the
+   selector in the error code, and the cache of the register being loaded stays as it
+   was. What the core does not model yet stops with a message that names it. *)
 let test_stops () =
   let stops name body part =
     let t, _ = make enter_flat (body ^ hlt) in
     check_stopped name (run t) part
   in
   let sel_into reg sel = mov_ax_sel sel ^ mov_sreg reg in
-  (* a fault the core raises stops with its vector and the selector in the error code
-     (386 PRM 9.7: the upper 14 bits of the selector); what is not a fault but a feature
-     RFC 0005 4 adds stops with a message that names it *)
-  let faults name body vector code =
-    stops name body
-      (Printf.sprintf "fault %d in protected mode needs delivery through the IDT (RFC 0005 3c), error code %04x"
-         vector code)
-  in
+  (* the error code is the upper 14 bits of the selector (386 PRM 9.7) *)
+  let faults name body vector code = faulted name (body ^ hlt) vector (Some code) in
   let load_ldt = mov_ax_sel 0x28 ^ "\x0f\x00\xd0" in
   faults "null selector into SS" (sel_into ss 0) 13 0;
   faults "selector beyond the GDT" (sel_into ds 0x90) 13 0x90;
@@ -357,68 +407,46 @@ let test_stops () =
   (* a DPL 3 data segment is reachable with RPL 3 *)
   let t, _ = make enter_flat (sel_into ds 0x4b ^ hlt) in
   check_halted "DPL 3 data with RPL 3" (run t);
-  (* a stopped load leaves the register as it was *)
+  (* a faulting load leaves the register as it was *)
   let t, _ = make enter_flat (sel_into ds 0x10 ^ sel_into ds 0x38 ^ hlt) in
   ignore (run t);
   check "DS keeps its selector after a stopped load" (Cpu86.seg t ds) 0x10;
   check "DS keeps its limit after a stopped load" (sys t).Cpu86.saved_limits.(ds) 0xffffffff;
-  (* INT and faults go through the IDT, which is RFC 0005 3c *)
-  stops "INT in protected mode" "\xcd\x21" "int 21 in protected mode";
-  stops "divide error in protected mode" (mov_eax 0 ^ "\xf7\xf0") "fault 0 in protected mode";
-  stops "single-step trap in protected mode"
-    (mov_eax 0x100 ^ "\x50\x9d\x90") "single-step trap in protected mode"
+  (* INT and faults go through the IDT *)
+  let t, mem = make enter_flat "\xcd\x21" in
+  check_halted "INT in protected mode" (run t);
+  check "INT 21h reaches its handler" (vector_run t) 0x21;
+  check "INT pushes no error code, CS follows EIP" (frame_dword mem t 1) 0x08;
+  faulted "divide error in protected mode" (mov_eax 0 ^ "\xf7\xf0") 0 None;
+  (* push eax; popfd sets TF; the NOP after it traps *)
+  let t, _ = make enter_flat (mov_eax 0x100 ^ "\x50\x9d\x90\x90") in
+  check_halted "single-step trap in protected mode" (run t);
+  check "the trap is vector 1" (vector_run t) 1
 
-(* Each fault the core raises stops with its vector, and #SS and #GP with their error
-   code (RFC 0005 3c: the code is what the IDT delivery pushes). The other four vectors
-   carry none: the message has no "error code". *)
+(* Each fault the core raises is delivered to its vector, and #SS and #GP with their
+   error code. The other four vectors carry none. *)
 let test_fault_codes () =
-  let stop_message ?(prepare = fun _ -> ()) name code =
-    let t, mem = make enter_flat code in
-    prepare mem;
-    match run t with
-    | Stopped m -> m
-    | Halted -> incr failed; Printf.eprintf "FAIL %s: ran to HLT\n%!" name; ""
-  in
-  let expect name m vector error =
-    let head =
-      Printf.sprintf "fault %d in protected mode needs delivery through the IDT (RFC 0005 3c)" vector
-    in
-    let ok =
-      match error with
-      | Some c -> contains m (Printf.sprintf "%s, error code %04x" head c)
-      | None -> contains m head && not (contains m "error code")
-    in
-    if not ok then begin
-      incr failed;
-      Printf.eprintf "FAIL %s: stopped with %S, want fault %d%s\n%!" name m vector
-        (match error with Some c -> Printf.sprintf " with error code %04x" c | None -> " without an error code")
-    end
-  in
   let flat code = load_ds 0x10 ^ code in
-  let name = "divide error" in
-  expect name (stop_message name (flat (mov_eax 0 ^ "\xf7\xf0"))) 0 None;
-  let name = "BOUND out of range" in
+  faulted "divide error" (flat (mov_eax 0 ^ "\xf7\xf0")) 0 None;
   let bounds mem = String.iteri (fun i c -> Bytes.set mem (0x300 + i) c) (le32 0 ^ le32 10) in
-  expect name (stop_message ~prepare:bounds name (flat (mov_eax 20 ^ "\x62\x05" ^ le32 0x300))) 5 None;
-  let name = "MOV to a sixth segment register" in
-  expect name (stop_message name (flat "\x8e\xf0")) 6 None;
-  let name = "ESC with CR0.EM" in
-  expect name
-    (stop_message name (flat ("\x0f\x20\xc0" ^ "\x0c\x04" ^ "\x0f\x22\xc0" ^ "\xd8\xc0"))) 7 None;
-  let name = "word pop at the end of a 64KB stack" in
-  expect name (stop_message name (load_ss 0x20 ^ "\x66\xbc\xff\xff" ^ "\x66\x58")) 12 (Some 0);
+  let t, mem = make enter_flat (flat (mov_eax 20 ^ "\x62\x05" ^ le32 0x300)) in
+  bounds mem;
+  check_fault "BOUND out of range" (t, mem) (run t) 5 None;
+  faulted "MOV to a sixth segment register" (flat "\x8e\xf0") 6 None;
+  faulted "ESC with CR0.EM"
+    (flat ("\x0f\x20\xc0" ^ "\x0c\x04" ^ "\x0f\x22\xc0" ^ "\xd8\xc0")) 7 None;
+  faulted "word pop at the end of a 64KB stack" (load_ss 0x20 ^ "\x66\xbc\xff\xff" ^ "\x66\x58")
+    12 (Some 0);
   (* a string load through SS or DS at the end of a 64KB segment: 16-bit addresses in 32-bit code *)
-  let name = "string load through SS at the end of its segment" in
-  expect name (stop_message name (load_ss 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x36\x66\xad")) 12 (Some 0);
-  let name = "string load through DS at the end of its segment" in
-  expect name (stop_message name (load_ds 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x66\xad")) 13 (Some 0);
-  let name = "access through a null DS" in
-  expect name
-    (stop_message name (mov_ax_sel 0 ^ mov_sreg 3 ^ "\xa1\x00\x00\x00\x00")) 13 (Some 0);
-  let name = "fetch past the CS limit" in
-  let at_limit mem = Bytes.set mem 0xffff '\x90' in
-  expect name
-    (stop_message ~prepare:at_limit name ("\xea" ^ le32 0xffff ^ le16 0x18)) 13 (Some 0)
+  faulted "string load through SS at the end of its segment"
+    (load_ss 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x36\x66\xad") 12 (Some 0);
+  faulted "string load through DS at the end of its segment"
+    (load_ds 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x66\xad") 13 (Some 0);
+  faulted "access through a null DS" (mov_ax_sel 0 ^ mov_sreg 3 ^ "\xa1\x00\x00\x00\x00") 13
+    (Some 0);
+  let t, mem = make enter_flat ("\xea" ^ le32 0xffff ^ le16 0x18) in
+  Bytes.set mem 0xffff '\x90';
+  check_fault ~cs:0x18 "fetch past the CS limit" (t, mem) (run t) 13 (Some 0)
 
 (* CS limit bounds instruction fetch, and EIP goes past 64KB in a 4GB code
    segment. *)
@@ -430,13 +458,13 @@ let test_fetch_limit () =
   (* 64KB code segment: a NOP at FFFFh is the last byte, the next fetch is #GP *)
   let t, mem = make enter_flat ("\xea" ^ le32 0xffff ^ le16 0x18) in
   Bytes.set mem 0xffff '\x90';
-  check_stopped "fetch past the CS limit" (run t) "fault 13 in protected mode";
-  check "EIP wound back to the NOP" (Cpu86.dump_ip t) 0x10000;
+  check_fault ~cs:0x18 "fetch past the CS limit" (t, mem) (run t) 13 (Some 0);
+  check "the pushed EIP is the fetch that failed" (frame_dword mem t 1) 0x10000;
   (* 512-byte 32-bit code segment: the fetch after the last byte stops, well below 64KB *)
   let t, mem = make enter_flat ("\xea" ^ le32 0x1ff ^ le16 0x88) in
   Bytes.set mem 0x1ff '\x90';
-  check_stopped "fetch past a 512-byte CS limit" (run t) "fault 13 in protected mode";
-  check "EIP wound back to the next instruction" (Cpu86.dump_ip t) 0x200;
+  check_fault ~cs:0x88 "fetch past a 512-byte CS limit" (t, mem) (run t) 13 (Some 0);
+  check "the pushed EIP is the fetch that failed" (frame_dword mem t 1) 0x200;
   (* a far jump checks its offset against the limit of the code segment it loads:
      from 16-bit code into flat code past 64KB *)
   let t, mem = make enter_flat ("\xea" ^ le32 0x200 ^ le16 0x18) in
@@ -663,8 +691,8 @@ let test_paging () =
   ignore (Cpu86.step t);
   ignore (Cpu86.step t);
   check "PG without PE is INT 13" (match !taken with Some (13, 6) -> 1 | _ -> 0) 1;
-  let t, _ = build (mov_eax 0xfffffffe ^ "\x0f\x22\xc0") in
-  check_stopped "PE off with PG on" (run t) "fault 13 in protected mode"
+  let t, mem = build (mov_eax 0xfffffffe ^ "\x0f\x22\xc0") in
+  check_fault "PE off with PG on" (t, mem) (run t) 13 (Some 0)
 
 (* A saved 386 in protected mode gives back every cache and its EIP. *)
 let test_state_round_trip () =
