@@ -188,12 +188,27 @@ val model : t -> model
     the memory, port and interrupt callbacks belong to whoever creates the
     CPU and are not part of it. *)
 
+val cr0_unsupported_bits : int
+(** The CR0 bits (PE, PG) that nothing here runs yet: a write that turns one on
+    stops with [Unsupported], and a saved state that has one on is refused. *)
+
 (** What an 80386 holds beyond the 286 registers. IOPL and NT (FLAGS bits
-    12-14) travel in [saved_flags]. *)
+    12-14) travel in [saved_flags]. The control, debug and test registers and
+    the descriptor-table registers are what a program last wrote; the core
+    sets no breakpoint from the debug registers and does not page with CR3. *)
 type saved_386 = {
   saved_regs_hi : int array;  (** 8 × upper 16 bits, AX CX DX BX SP BP SI DI *)
   saved_fs : int;
   saved_gs : int;
+  saved_cr0 : int;  (** 32 bits; only the defined bits (PE MP EM TS ET PG) *)
+  saved_cr2 : int;
+  saved_cr3 : int;
+  saved_gdtr_base : int;  (** 32 bits *)
+  saved_gdtr_limit : int;  (** 16 bits *)
+  saved_idtr_base : int;
+  saved_idtr_limit : int;
+  saved_dr : int array;  (** DR0-DR7, 32 bits each *)
+  saved_tr : int array;  (** TR6 and TR7, 32 bits each *)
 }
 
 type saved = {
@@ -211,4 +226,6 @@ val save_state : t -> saved
 val load_state : t -> saved -> unit
 (** Values are masked as the setters mask them. [Invalid_argument], with the
     CPU left as it was, unless there are 8 registers and 4 segments and
-    [saved_386] is [Some] (with 8 upper halves) exactly for an [I80386]. *)
+    [saved_386] is [Some] (with 8 upper halves, 8 debug registers and 2 test
+    registers) exactly for an [I80386], and no bit of [cr0_unsupported_bits] is
+    set in its CR0. *)

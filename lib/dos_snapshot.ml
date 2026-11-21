@@ -109,8 +109,12 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    the A20 gate (one bool) right after the keyboard controller, and its XMS
    blocks write no bytes (they are views of the RAM). The payload of an 8086,
    186 or 286 machine has the same bytes as format 42; only the header's
-   number differs. *)
-let format_version = 43
+   number differs.
+   44: a 386 machine's CPU section, after GS, carries CR0, CR2, CR3, the GDTR
+   and IDTR (base, then limit), DR0-DR7 and TR6, TR7: 17 ints and two array
+   lengths, 19 eight-byte words, 152 bytes in all. The payload of an 8086, 186 or 286 machine has
+   the same bytes as format 43; only the header's number differs. *)
+let format_version = 44
 
 let digest_hex_len = 32
 let checksum_len = 16
@@ -140,6 +144,7 @@ let save_error_to_string (Unsaveable message) = "machine cannot be saved: " ^ me
    so [save] refuses exactly the values [restore] would. *)
 
 let reg = C.word
+let dword = C.range 0 0xffffffff
 let handle_number = C.range 0 (max_handles - 1)
 let ems_handle_key = C.range Dos_ems.os_handle Dos_ems.max_handle
 let cursor_flag = C.range min_int 0
@@ -418,10 +423,21 @@ let write_payload w t =
   C.put_bool w saved_halted;
   put "cycles" C.count saved_cycles;
   (match saved_386 with
-   | Some { Cpu86.saved_regs_hi; saved_fs; saved_gs } ->
+   | Some { Cpu86.saved_regs_hi; saved_fs; saved_gs; saved_cr0; saved_cr2; saved_cr3;
+            saved_gdtr_base; saved_gdtr_limit; saved_idtr_base; saved_idtr_limit;
+            saved_dr; saved_tr } ->
      C.put_int_array w ~what:"upper halves" reg saved_regs_hi;
      put "fs" reg saved_fs;
-     put "gs" reg saved_gs
+     put "gs" reg saved_gs;
+     put "cr0" dword saved_cr0;
+     put "cr2" dword saved_cr2;
+     put "cr3" dword saved_cr3;
+     put "gdtr base" dword saved_gdtr_base;
+     put "gdtr limit" reg saved_gdtr_limit;
+     put "idtr base" dword saved_idtr_base;
+     put "idtr limit" reg saved_idtr_limit;
+     C.put_int_array w ~what:"debug registers" dword saved_dr;
+     C.put_int_array w ~what:"test registers" dword saved_tr
    | None -> ());
   C.put_bytes w mem;
   Dos_video.write_state w video;
@@ -663,7 +679,20 @@ let read_payload r =
       let saved_regs_hi = get_int_array r ~what:"upper halves" ~len:8 reg in
       let saved_fs = get "fs" reg in
       let saved_gs = get "gs" reg in
-      Some { Cpu86.saved_regs_hi; saved_fs; saved_gs }
+      let saved_cr0 = get "cr0" dword in
+      if saved_cr0 land Cpu86.cr0_unsupported_bits <> 0 then
+        C.fail "CR0 has PE or PG on: protected mode and paging are not supported";
+      let saved_cr2 = get "cr2" dword in
+      let saved_cr3 = get "cr3" dword in
+      let saved_gdtr_base = get "gdtr base" dword in
+      let saved_gdtr_limit = get "gdtr limit" reg in
+      let saved_idtr_base = get "idtr base" dword in
+      let saved_idtr_limit = get "idtr limit" reg in
+      let saved_dr = get_int_array r ~what:"debug registers" ~len:8 dword in
+      let saved_tr = get_int_array r ~what:"test registers" ~len:2 dword in
+      Some { Cpu86.saved_regs_hi; saved_fs; saved_gs; saved_cr0; saved_cr2; saved_cr3;
+             saved_gdtr_base; saved_gdtr_limit; saved_idtr_base; saved_idtr_limit;
+             saved_dr; saved_tr }
     | Cpu86.I8086 | Cpu86.I80186 | Cpu86.I80286 -> None
   in
   Cpu86.load_state t.cpu

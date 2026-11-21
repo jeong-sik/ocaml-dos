@@ -2,15 +2,15 @@
    66h 가 없으면 [Cpu86_exec] 가 [Word] 로, 있으면 [Cpu86_exec32] 가 [Dword] 로
    부른다. 주소 크기(67h)는 [ctx.addr] 로 modrm 이 따른다. RFC 0001 3 단계의
    명령이다: Jcc rel16·rel32, SETcc, MOVZX·MOVSX, FS·GS 의 PUSH·POP, BT 계열,
-   SHLD·SHRD, IMUL r,r/m, BSF·BSR, LSS·LFS·LGS, CLTS, 그리고 실모드에서 읽기만
-   하는 SGDT·SIDT·SMSW. *)
+   SHLD·SHRD, IMUL r,r/m, BSF·BSR, LSS·LFS·LGS. 시스템 명령(0F 01, CLTS, MOV
+   CRn·DRn·TRn)은 [Cpu86_system] 이 한다. *)
 
 open Cpu86_state
 open Cpu86_fault
 open Cpu86_decode
 open Cpu86_alu
 
-type width = Word | Dword
+type width = Cpu86_system.width = Word | Dword
 
 let jcc_near_first = 0x80
 let jcc_near_last = 0x8f
@@ -218,44 +218,6 @@ let move_extended t ctx w op2 =
   set_reg w t regf (if extend_sign then sign_extend ~from w v else v);
   3
 
-(* SGDT·SIDT 가 쓰는 바이트: 한계 2, 기준 3, 마지막 1. *)
-let descriptor_table_bytes = 6
-
-(* SGDT·SIDT(286·386 실모드): 한계, 기준의 하위 16비트, 기준의 위 8비트와 마지막
-   바이트를 세 워드로 쓴다. 6 바이트가 세그먼트 끝(FFFFh)을 넘으면 하나도 쓰기
-   전에 결함이다(386 PRM: "Interrupt 13 if any part of the operand would lie
-   outside of the effective address space from 0 to 0FFFFH"). 피연산자 크기
-   (66h)는 보지 않는다. PRM 은 16 비트면 기준 32 비트라 하고 32 비트면 24
-   비트라 해서 서로 어긋나고(OS/2 Museum "SGDT/SIDT Fiction and Reality"), 칩은
-   늘 48 비트를 쓴다고 알려졌다. 실모드 기준은 0 이라 어느 쪽이든 같은 바이트다. *)
-let store_descriptor_table t seg off ~limit ~top_byte =
-  within t seg off descriptor_table_bytes;
-  write16 t seg off limit;
-  write16 t seg (off + 2) (descriptor_table_base land 0xffff);
-  write16 t seg (off + 4)
-    (((descriptor_table_base lsr 16) land 0xff) lor (top_byte lsl 8))
-
-(* 0F 01 /0 SGDT, /1 SIDT, /4 SMSW. LGDT·LIDT·LMSW 처럼 쓰는 쪽은 보호 모드로 가는
-   길이라 아직 없다(RFC 0005). SGDT·SIDT 의 레지스터 피연산자는 INT 6 이다(386
-   PRM "Interrupt 6 if the destination operand is a register"). SMSW 는 66h 로
-   32 비트가 되면 CR0 전체가 오는지 확인하지 못해 16 비트만 받는다. clock 수는
-   PRM 의 SGDT·SIDT 9, SMSW 레지스터 2·메모리 3 이다. *)
-let system_store t ctx w =
-  let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
-  match (regf, rm, w) with
-  | 0, (Mem (seg, off) | Mem32 (seg, off)), _ ->
-    store_descriptor_table t seg off ~limit:gdtr_limit ~top_byte:descriptor_table_top_byte_386;
-    9
-  | 1, (Mem (seg, off) | Mem32 (seg, off)), _ ->
-    store_descriptor_table t seg off ~limit:idtr_limit ~top_byte:descriptor_table_top_byte_386;
-    9
-  | (0 | 1), Reg _, _ -> fault vector_invalid_opcode
-  | 4, Reg _, Word -> op_write t 16 rm msw_real_mode_386; 2
-  | 4, (Mem _ | Mem32 _), Word -> op_write t 16 rm msw_real_mode_386; 3
-  | _ ->
-    let form = match w with Word -> "386" | Dword -> "386, 66h" in
-    unsupported t ctx (Printf.sprintf "0f 01 /%d (%s)" regf form)
-
 let dispatch t ctx w =
   let op2 = fetch8 t in
   match op2 with
@@ -269,8 +231,9 @@ let dispatch t ctx w =
   | 0xa8 -> push_seg t w sreg_gs; 10
   | 0xa9 -> pop_seg t w sreg_gs; 8
   | 0xb6 | 0xb7 | 0xbe | 0xbf -> move_extended t ctx w op2
-  (* CLTS: 실모드에서 CR0 의 TS 를 지운다. CR0 는 모델에 없어 할 일이 없다. *)
-  | 0x06 -> 2
+  | 0x06 -> Cpu86_system.clts t
+  | 0x20 | 0x21 | 0x24 -> Cpu86_system.move_from_special t ctx op2
+  | 0x22 | 0x23 | 0x26 -> Cpu86_system.move_to_special t ctx op2
   | 0xa3 -> bit_by_register t ctx w Bt
   | 0xab -> bit_by_register t ctx w Bts
   | 0xb3 -> bit_by_register t ctx w Btr
@@ -283,7 +246,7 @@ let dispatch t ctx w =
   | 0xaf -> imul_reg t ctx w
   | 0xbc -> bit_scan t ctx w ~forward:true
   | 0xbd -> bit_scan t ctx w ~forward:false
-  | 0x01 -> system_store t ctx w
+  | 0x01 -> Cpu86_system.group7 t ctx w
   | 0xb2 -> load_far_pointer t ctx w sreg_ss
   | 0xb4 -> load_far_pointer t ctx w sreg_fs
   | 0xb5 -> load_far_pointer t ctx w sreg_gs

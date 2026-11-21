@@ -16,6 +16,7 @@ exception Fault of int
 let vector_divide = 0
 let vector_bound = 5
 let vector_invalid_opcode = 6
+let vector_device_not_available = 7
 let vector_stack_fault = 12
 let vector_segment_overrun = 13
 

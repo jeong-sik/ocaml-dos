@@ -93,6 +93,85 @@ let () =
   let default = (restore_exn (save_exn (Dos_machine.create ()))).Dos_state.cpu in
   check "a default machine restores as a 286" (Cpu86.model default = Cpu86.I80286)
 
+(* A 386 machine that writes its system registers, then spins: CR2, CR3, DR0,
+   TR6, the GDTR and IDTR (a 66h-less LGDT loads a 24-bit base) and, through
+   LMSW, CR0. The snapshot has to carry every one of them. *)
+let sys386_com =
+  let code_bytes = 42 in
+  let table = 0x100 + code_bytes in
+  let w16 v = String.init 2 (fun i -> Char.chr ((v lsr (8 * i)) land 0xFF)) in
+  "\x66\xB8\x78\x56\x34\x12"               (* mov eax,12345678h *)
+  ^ "\x0F\x22\xD0"                           (* mov cr2,eax *)
+  ^ "\x66\xB8\xEF\xCD\xAB\x89"             (* mov eax,89ABCDEFh *)
+  ^ "\x0F\x22\xD8"                           (* mov cr3,eax *)
+  ^ "\x0F\x23\xC0"                           (* mov dr0,eax *)
+  ^ "\x0F\x26\xF0"                           (* mov tr6,eax *)
+  ^ "\x0F\x01\x16" ^ w16 table              (* lgdt [table] *)
+  ^ "\x0F\x01\x1E" ^ w16 table              (* lidt [table] *)
+  ^ "\xB8\x0C\x00\x0F\x01\xF0"             (* mov ax,0Ch; lmsw ax *)
+  ^ "\xEB\xFE"                               (* spin: jmp spin *)
+  ^ "\x34\x12\x78\x56\x34\x12"             (* table: limit 1234h, base 12345678h *)
+
+let () =
+  let boot () =
+    let t = Dos_machine.create ~model:Cpu86.I80386 () in
+    Dos_machine.load_com t sys386_com;
+    t
+  in
+  let saved = round_trip ~name:"386 system registers" ~boot ~n:200 ~m:200 in
+  match (Cpu86.save_state (restore_exn saved).Dos_state.cpu).Cpu86.saved_386 with
+  | None -> check "a 386 saves its system registers" false
+  | Some x ->
+    check "386: CR0 comes back" (x.Cpu86.saved_cr0 = 0xC);
+    check "386: CR2 comes back" (x.Cpu86.saved_cr2 = 0x12345678);
+    check "386: CR3 comes back" (x.Cpu86.saved_cr3 = 0x89ABCDEF);
+    check "386: DR0 comes back" (x.Cpu86.saved_dr.(0) = 0x89ABCDEF);
+    check "386: TR6 comes back" (x.Cpu86.saved_tr.(0) = 0x89ABCDEF);
+    check "386: GDTR comes back"
+      (x.Cpu86.saved_gdtr_base = 0x345678 && x.Cpu86.saved_gdtr_limit = 0x1234);
+    check "386: IDTR comes back"
+      (x.Cpu86.saved_idtr_base = 0x345678 && x.Cpu86.saved_idtr_limit = 0x1234)
+
+(* A snapshot whose CR0 has PE or PG on is refused as corrupt, not restored
+   into a machine that cannot run it and not raised from [Cpu86.load_state].
+   The CR0 word is found by the three values the program above left in CR0,
+   CR2 and CR3, then rewritten, and the payload checksum is recomputed. *)
+let () =
+  let boot () =
+    let t = Dos_machine.create ~model:Cpu86.I80386 () in
+    Dos_machine.load_com t sys386_com;
+    t
+  in
+  let a = boot () in
+  run a 200;
+  let saved = save_exn a in
+  let be64 v = String.init 8 (fun i -> Char.chr ((v lsr (8 * (7 - i))) land 0xFF)) in
+  let key = be64 0xC ^ be64 0x12345678 ^ be64 0x89ABCDEF in
+  let rec find i =
+    if i + String.length key > String.length saved then None
+    else if String.sub saved i (String.length key) = key then Some i
+    else find (i + 1)
+  in
+  match find 0 with
+  | None -> check "the CR0, CR2 and CR3 words are in the snapshot" false
+  | Some at ->
+    let header_len = core_at + 32 + 16 in
+    let with_cr0 cr0 =
+      let b = Bytes.of_string saved in
+      Bytes.blit_string (be64 cr0) 0 b at 8;
+      let payload = Bytes.sub_string b header_len (Bytes.length b - header_len) in
+      Bytes.blit_string (Digest.string payload) 0 b (header_len - 16) 16;
+      Bytes.to_string b
+    in
+    let corrupt cr0 =
+      match Dos_snapshot.restore (with_cr0 cr0) with
+      | Error (Dos_snapshot.Corrupt _) -> true
+      | Ok _ | Error _ -> false
+    in
+    check "CR0 = 0Ch restores" (match Dos_snapshot.restore (with_cr0 0xC) with Ok _ -> true | Error _ -> false);
+    check "CR0 with PE is corrupt" (corrupt 0xD);
+    check "CR0 with PG is corrupt" (corrupt 0x8000000C)
+
 (* The CPU refuses a saved state of the other kind before writing anything. *)
 let () =
   let cpu model =

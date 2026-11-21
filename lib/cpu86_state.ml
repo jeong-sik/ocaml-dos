@@ -22,34 +22,62 @@ type model = I8086 | I80186 | I80286 | I80386
 (* 286 실모드의 MSW: 예약 비트 4-15 는 1, PE·MP·EM·TS 는 0. *)
 let msw_real_mode_286 = 0xFFF0
 
-(* 실모드의 기술자 표 레지스터를 SGDT·SIDT 가 6바이트로 쓴다: 한계(16비트),
-   기준의 하위 24비트, 마지막 바이트. 마지막 바이트는 286 이 FFh 를 쓰고
-   386 은 16비트 피연산자에서 0 을 쓴다. 게임은 이 바이트로 286 과 386 을
-   가른다(`push sp` 로 286 이상을 확인한 다음 단계: Charlie the Duck 은
-   `inc bh` 가 0 이면 286).
+(* SGDT·SIDT 는 기술자 표 레지스터를 6바이트로 쓴다: 한계(16비트), 기준의 하위
+   24비트, 마지막 바이트. 286 은 마지막 바이트에 FFh 를 쓰고 386 은 기준의 위
+   8비트를 쓴다. 게임은 이 바이트로 286 과 386 을 가른다(`push sp` 로 286 이상을
+   확인한 다음 단계: Charlie the Duck 은 `inc bh` 가 0 이면 286).
 
    근거: Intel 80386 Programmer's Reference Manual, SGDT/SIDT 의 Compatibility
    Note — "The 80286 stores 1's in these upper bits, whereas the 80386 stores
    0's if the operand-size attribute is 16 bits. These bits were specified as
    undefined by the SGDT/SIDT instructions in the iAPX 286 Programmer's
    Reference Manual." 즉 FFh 는 286 매뉴얼이 정한 값이 아니라 칩이 보이는
-   동작이다.
+   동작이다. 386 이 16비트 피연산자에서도 기준 32비트를 다 쓴다는 보고는
+   OS/2 Museum "SGDT/SIDT Fiction and Reality" 에 있다. 이 코어는 피연산자 크기를
+   보지 않고 늘 48비트를 쓴다(확인 필요: 실칩 386 은 못 봤다). LGDT·LIDT 가
+   16비트 피연산자로 기준의 위 8비트를 0 으로 싣기 때문에, 16비트 명령만 쓰는
+   프로그램은 어느 쪽 해석에서도 0 을 읽는다.
 
-   기준은 0 이다. IDTR 은 386 PRM 10.1 "Processor State After Reset" 이
-   "IDTR: base =0 limit =03FFH" 라고 적었다(실모드 IVT 와 같다). 286 도 같다고
-   보았다(확인 필요: 286 매뉴얼은 못 읽었다). GDTR 은 같은 절이 "All registers
-   not mentioned above are undefined" 라서 값이 정해져 있지 않다 — 0 을
-   돌려준다. 게임이 읽는 것은 마지막 바이트뿐이다. *)
-let gdtr_limit = 0x0000
-let idtr_limit = 0x03FF
-let descriptor_table_base = 0
+   리셋 값: IDTR 은 386 PRM 10.1 "Processor State After Reset" 이 "IDTR: base =0
+   limit =03FFH" 라고 적었다(실모드 IVT 와 같다). 286 도 같다고 보았다(확인 필요:
+   286 매뉴얼은 못 읽었다). GDTR 은 같은 절이 "All registers not mentioned above
+   are undefined" 라서 값이 정해져 있지 않다 — 0 으로 둔다. *)
+let gdtr_reset_limit = 0x0000
+let idtr_reset_limit = 0x03FF
+let descriptor_table_reset_base = 0
 let descriptor_table_top_byte_286 = 0xFF
-let descriptor_table_top_byte_386 = 0x00
 
-(* 386 실모드의 MSW(CR0 의 하위 워드). 386 PRM 10.1: 리셋 뒤 CR0 의 ET 는
-   80387 이 있을 때만 켜진다. 이 기계에는 코프로세서가 없어 PE·MP·EM·TS·ET 가
-   모두 0 이다(확인 필요: 같은 절의 그림 10-2 는 못 읽었다). *)
-let msw_real_mode_386 = 0x0000
+(* 기술자 표 레지스터 하나: GDTR·IDTR. *)
+type descriptor_table = { mutable table_base : int; mutable table_limit : int }
+
+(* CR0 의 비트. PE(보호 모드), MP·EM·TS(코프로세서), ET, PG(페이징). 386 PRM 10.1
+   은 리셋 뒤 CR0 의 ET 가 80387 이 있을 때만 켜진다고 적었다. 이 기계에는
+   코프로세서가 없어 모두 0 이다(확인 필요: 같은 절의 그림 10-2 는 못 읽었다).
+   5-30 은 예약이라 쓰기를 받지 않고 0 으로 읽는다(확인 필요: 실칩이 무엇으로
+   읽는지는 못 봤다). *)
+let cr0_pe = 0x00000001
+let cr0_mp = 0x00000002
+let cr0_em = 0x00000004
+let cr0_ts = 0x00000008
+let cr0_et = 0x00000010
+let cr0_pg = 0x80000000
+let cr0_defined = cr0_pe lor cr0_mp lor cr0_em lor cr0_ts lor cr0_et lor cr0_pg
+
+(* CR0 의 비트 가운데 아직 돌릴 코어가 없는 것: 보호 모드(RFC 0005 3b)와 페이징(5
+   단계). 쓰기와 [load_state] 가 이 비트가 켜진 값을 거절한다. 단계마다 하나씩 뺀다. *)
+let cr0_unsupported_bits = cr0_pe lor cr0_pg
+let cr0_reset = 0
+
+(* 386 의 32 비트 시스템 레지스터(CR2·CR3·DR·TR, 기술자 표 기준)가 담는 폭. *)
+let register32_mask = 0xffffffff
+
+(* LMSW 가 쓰는 CR0 의 아래 네 비트: PE MP EM TS. *)
+let msw_loadable = cr0_pe lor cr0_mp lor cr0_em lor cr0_ts
+
+(* 디버그 레지스터 DR0-DR7 과 시험 레지스터 TR6·TR7 의 수. *)
+let debug_register_count = 8
+let test_register_first = 6
+let test_register_count = 2
 
 let f_carry = 0x001
 let f_parity = 0x004
@@ -167,6 +195,14 @@ type t = {
   mutable df : bool;
   mutable of_ : bool;
   mutable iopl_nt : int;  (** FLAGS bit12-14. 386 만 쓰고, 다른 모델은 늘 0 *)
+  mutable cr0 : int;
+      (** 386 의 CR0. [cr0_defined] 의 비트만 든다. 다른 모델은 리셋 값 그대로다 *)
+  mutable cr2 : int;  (** 페이지 결함 주소. 페이징(RFC 0005 5 단계)이 쓴다 *)
+  mutable cr3 : int;  (** 페이지 디렉터리 주소. 페이징이 쓴다 *)
+  gdtr : descriptor_table;
+  idtr : descriptor_table;
+  dr : int array;  (** DR0-DR7: 쓴 값을 들고 있을 뿐 중단점은 걸지 않는다 *)
+  tr : int array;  (** TR6·TR7: 쓴 값을 들고 있을 뿐이다 *)
   mutable halted : bool;
   mutable cycles : int;
   mutable int_hook : (int -> unit) option;
@@ -201,6 +237,11 @@ let create ?(model = I80186) ~read ~write ~port_in ~port_out () =
     cf = false; pf = false; af = false; zf = false; sf = false;
     tf = false; intf = true; df = false; of_ = false;
     iopl_nt = 0;
+    cr0 = cr0_reset; cr2 = 0; cr3 = 0;
+    gdtr = { table_base = descriptor_table_reset_base; table_limit = gdtr_reset_limit };
+    idtr = { table_base = descriptor_table_reset_base; table_limit = idtr_reset_limit };
+    dr = Array.make debug_register_count 0;
+    tr = Array.make test_register_count 0;
     halted = false;
     cycles = 0;
     int_hook = None;
@@ -356,6 +397,15 @@ type saved_386 = {
   saved_regs_hi : int array;
   saved_fs : int;
   saved_gs : int;
+  saved_cr0 : int;
+  saved_cr2 : int;
+  saved_cr3 : int;
+  saved_gdtr_base : int;
+  saved_gdtr_limit : int;
+  saved_idtr_base : int;
+  saved_idtr_limit : int;
+  saved_dr : int array;
+  saved_tr : int array;
 }
 
 type saved = {
@@ -379,6 +429,7 @@ let save_state t =
         bases = _ (* follows [segs]: [load_state] writes it through [set_seg] *);
         limits = _ (* real mode: always [real_mode_limit] *);
         iopl_nt = _ (* in the flags word, [flags t] *);
+        cr0; cr2; cr3; gdtr; idtr; dr; tr;
         cf = _; pf = _; af = _; zf = _; sf = _; tf = _; intf = _; df = _;
         of_ = _ (* the nine flags travel as one word, [flags t] *);
         halted; cycles;
@@ -393,7 +444,11 @@ let save_state t =
     match model with
     | I80386 ->
       Some { saved_regs_hi = Array.copy regs_hi; saved_fs = segs.(sreg_fs);
-             saved_gs = segs.(sreg_gs) }
+             saved_gs = segs.(sreg_gs);
+             saved_cr0 = cr0; saved_cr2 = cr2; saved_cr3 = cr3;
+             saved_gdtr_base = gdtr.table_base; saved_gdtr_limit = gdtr.table_limit;
+             saved_idtr_base = idtr.table_base; saved_idtr_limit = idtr.table_limit;
+             saved_dr = Array.copy dr; saved_tr = Array.copy tr }
     | I8086 | I80186 | I80286 -> None
   in
   { saved_regs = Array.copy regs; saved_segs = Array.sub segs 0 classic_segments;
@@ -409,7 +464,12 @@ let load_state t s =
   (match t.model, s.saved_386 with
    | I80386, Some x ->
      if Array.length x.saved_regs_hi <> upper_halves I80386 then
-       invalid_arg "Cpu86.load_state: 8 upper halves"
+       invalid_arg "Cpu86.load_state: 8 upper halves";
+     if Array.length x.saved_dr <> debug_register_count
+        || Array.length x.saved_tr <> test_register_count then
+       invalid_arg "Cpu86.load_state: 8 debug registers and 2 test registers";
+     if x.saved_cr0 land cr0_unsupported_bits <> 0 then
+       invalid_arg "Cpu86.load_state: CR0.PE or CR0.PG is on, not supported yet"
    | I80386, None -> invalid_arg "Cpu86.load_state: an 80386 needs its upper halves, FS and GS"
    | (I8086 | I80186 | I80286), Some _ ->
      invalid_arg "Cpu86.load_state: 80386 state for an older model"
@@ -418,7 +478,16 @@ let load_state t s =
    | Some x ->
      Array.iteri (fun i v -> t.regs_hi.(i) <- v land 0xffff) x.saved_regs_hi;
      set_seg t sreg_fs x.saved_fs;
-     set_seg t sreg_gs x.saved_gs
+     set_seg t sreg_gs x.saved_gs;
+     t.cr0 <- x.saved_cr0 land cr0_defined;
+     t.cr2 <- x.saved_cr2 land register32_mask;
+     t.cr3 <- x.saved_cr3 land register32_mask;
+     t.gdtr.table_base <- x.saved_gdtr_base land register32_mask;
+     t.gdtr.table_limit <- x.saved_gdtr_limit land 0xffff;
+     t.idtr.table_base <- x.saved_idtr_base land register32_mask;
+     t.idtr.table_limit <- x.saved_idtr_limit land 0xffff;
+     Array.iteri (fun i v -> t.dr.(i) <- v land register32_mask) x.saved_dr;
+     Array.iteri (fun i v -> t.tr.(i) <- v land register32_mask) x.saved_tr
    | None -> ());
   Array.iteri (fun i v -> set_reg16 t i v) s.saved_regs;
   Array.iteri (fun i v -> set_seg t i v) s.saved_segs;
