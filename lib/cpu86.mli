@@ -131,10 +131,12 @@ val cr0_pg : int
 val set_seg : t -> int -> int -> unit
 (** Loads a segment register. With CR0.PE off the base is the selector times 16
     and the limit, D and B bits stay as they were. With PE on the selector picks
-    a GDT or LDT descriptor, and a load that protected mode answers with a fault
-    (null selector into CS or SS, a selector beyond its table, a system or
-    not-present or expand-down or wrong-type descriptor) raises [Unsupported]
-    until RFC 0005 3c and 4 deliver faults. *)
+    a GDT or LDT descriptor. A load that protected mode answers with a fault
+    (null selector into CS or SS, a selector beyond its table, a wrong-type or
+    not-present descriptor) raises that fault, which stops the core with
+    [Unsupported] until the IDT delivers it (RFC 0005 3c). A load that crosses a
+    privilege level, an expand-down segment and a gate or TSS into CS raise
+    [Unsupported] until RFC 0005 4. *)
 
 val dump_ip : t -> int
 (** [I80386] 은 FFFF 의 마지막 바이트를 지난 뒤 10000h 를 돌려준다. EIP 가

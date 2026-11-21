@@ -2,11 +2,13 @@
    셀렉터가 GDT 나 LDT 의 기술자를 고르고, 그 base·limit·D·B 를 레지스터의 캐시에
    쓴다. 캐시한 뒤 표 메모리를 고쳐도 캐시는 그대로다.
 
-   검사는 4 단계(RFC 0005)다. 형식·존재·표 밖 셀렉터처럼 보호 모드가 결함으로 받는
-   적재는 [Unsupported] 로 멈춘다 — 결함을 IDT 로 전달하는 3c 와 특권 검사가 들어올
-   때까지 조용히 받아 주지 않는다. *)
+   형식·존재·표 밖 셀렉터처럼 보호 모드가 결함으로 받는 적재는 선택자가 실린 결함을
+   던진다([Cpu86_fault.fault]). 링을 넘는 적재와 확장 하향 세그먼트, CS 에 싣는 시스템
+   기술자(호출 게이트·TSS)는 결함이 아니라 아직 없는 기능이라 4 단계(RFC 0005)까지
+   [Unsupported] 로 멈춘다 — 조용히 받아 주지 않는다. *)
 
 open Cpu86_state
+open Cpu86_fault
 
 (* ---------- 기술자 ---------- *)
 
@@ -106,7 +108,7 @@ let read_descriptor t selector =
 let segment_names = [| "ES"; "CS"; "SS"; "DS"; "FS"; "GS" |]
 
 let stop t what =
-  raise (Unsupported (Printf.sprintf "%s @%04x:%04x (protection checks and faults: RFC 0005 3c and 4)"
+  raise (Unsupported (Printf.sprintf "%s @%04x:%04x (privilege levels and gates: RFC 0005 4)"
                         what t.segs.(sreg_cs) t.ip))
 
 let store t n selector d =
@@ -123,50 +125,69 @@ let outside_ring_zero n selector d =
   let rpl = selector land selector_rpl_mask in
   if n = sreg_cs || n = sreg_ss then rpl <> 0 || d.desc_dpl <> 0 else rpl > d.desc_dpl
 
-(* 보호 모드의 적재. 쓰기는 모든 검사를 지난 마지막에 한다 — 멈춘 적재가 반쯤 쓰인
-   캐시를 남기지 않는다.
+(* 오류 코드가 되는 선택자: 위 14 비트(TI 포함). RPL 자리는 오류 코드에서 EXT·IDT 비트다
+   (386 PRM 9.7 "Error Code"). *)
+let selector_error_code selector = selector land selector_null_mask
+
+(* 보호 모드의 적재. 쓰기는 모든 검사를 지난 마지막에 한다 — 던진 결함이나 멈춘 적재가
+   반쯤 쓰인 캐시를 남기지 않는다.
+
+   결함과 오류 코드와 검사 순서는 386 PRM 17 장의 MOV(Sreg)·JMP·RET·IRET 의 Operation 에서
+   읽었다. 종류가 틀리면 #GP(선택자), 그다음에 없음(SS 는 #SS(선택자), 나머지는
+   #NP(선택자))이다. 널 CS·SS 와 표 밖 선택자는 각각 #GP(0)·#GP(선택자)다.
 
    특권 수준은 링 0 하나만 안다(CPL 은 늘 0): CS·SS 는 RPL 과 DPL 이 0 이어야 하고,
    데이터 세그먼트는 RPL 이 DPL 이하여야 한다. 그 밖은 링을 넘는 적재라 4 단계 전에는
-   멈춘다. *)
+   멈춘다. 확인 필요: PRM 의 MOV 는 SS·DS 류의 RPL 불일치도 #GP(선택자)로 적고 conforming
+   코드를 DS 에 싣는 것도 #GP 로 읽히게 적는다. 3b 가 받아 온 동작은 그대로 두었다. *)
 let load_protected t n selector =
   let name = segment_names.(n) in
+  let code = selector_error_code selector in
+  let not_present () =
+    if n = sreg_ss then fault (Stack_fault code) else fault (Segment_not_present code)
+  in
   match read_descriptor t selector with
   | Null_selector ->
-    if n = sreg_cs || n = sreg_ss then stop t (Printf.sprintf "null selector into %s" name)
+    (* MOV(Sreg): "IF selector is null THEN #GP(0)" 는 SS 만이고 DS·ES·FS·GS 는 널을 받는다.
+       far JMP·RET·IRET 의 널 CS 도 #GP(0) 다. *)
+    if n = sreg_cs || n = sreg_ss then fault (General_protection 0)
     else begin
       t.segs.(n) <- selector;
       t.bases.(n) <- 0;
       t.limits.(n) <- no_limit
     end
   | Beyond_table ->
-    stop t (Printf.sprintf "selector %04x into %s is beyond its table" selector name)
+    (* MOV(Sreg)·JMP·RET: "Selector index must be within its descriptor table limits
+       else #GP(selector)" *)
+    fault (General_protection code)
   | Found d ->
-    if not d.desc_present then
-      stop t (Printf.sprintf "selector %04x into %s is not present" selector name)
-    else
-      match d.desc_kind with
-      | System ty ->
-        stop t (Printf.sprintf "selector %04x into %s is a system descriptor (type %x)"
-                  selector name ty)
-      | Data { expand_down = true; _ } ->
-        stop t (Printf.sprintf "selector %04x into %s is an expand-down segment" selector name)
-      | Data { writable; expand_down = false } ->
-        if n = sreg_cs then
-          stop t (Printf.sprintf "selector %04x into CS is a data segment" selector)
-        else if n = sreg_ss && not writable then
-          stop t (Printf.sprintf "selector %04x into SS is read-only" selector)
-        else if outside_ring_zero n selector d then
-          stop t (Printf.sprintf "selector %04x into %s crosses a privilege level" selector name)
-        else store t n selector d
-      | Code { readable; _ } ->
-        if n = sreg_ss then
-          stop t (Printf.sprintf "selector %04x into SS is a code segment" selector)
-        else if n <> sreg_cs && not readable then
-          stop t (Printf.sprintf "selector %04x into %s is execute-only" selector name)
-        else if outside_ring_zero n selector d then
-          stop t (Printf.sprintf "selector %04x into %s crosses a privilege level" selector name)
-        else store t n selector d
+    (match d.desc_kind with
+     | System ty ->
+       (* 데이터·스택 레지스터: "AR byte must indicate data or readable code segment else
+          #GP(selector)"(MOV). CS 의 시스템 기술자는 호출 게이트·TSS 일 수 있어(JMP) 결함이
+          아니라 아직 없는 기능이다. *)
+       if n = sreg_cs then
+         stop t (Printf.sprintf "selector %04x into CS is a system descriptor (type %x): a gate or a TSS"
+                   selector ty)
+       else fault (General_protection code)
+     | Data { writable; expand_down } ->
+       if n = sreg_cs then fault (General_protection code) (* JMP·RET: 코드 세그먼트여야 한다 *)
+       else if n = sreg_ss && not writable then
+         fault (General_protection code) (* MOV: "must indicate a writable data segment" *)
+       else if outside_ring_zero n selector d then
+         stop t (Printf.sprintf "selector %04x into %s crosses a privilege level" selector name)
+       else if not d.desc_present then not_present ()
+       else if expand_down then
+         stop t (Printf.sprintf "selector %04x into %s is an expand-down segment" selector name)
+       else store t n selector d
+     | Code { readable; _ } ->
+       if n = sreg_ss then fault (General_protection code) (* MOV: 쓸 수 있는 데이터여야 한다 *)
+       else if n <> sreg_cs && not readable then
+         fault (General_protection code) (* MOV: "data or readable code segment" *)
+       else if outside_ring_zero n selector d then
+         stop t (Printf.sprintf "selector %04x into %s crosses a privilege level" selector name)
+       else if not d.desc_present then not_present ()
+       else store t n selector d)
 
 (* 세그먼트 레지스터를 싣는 모든 명령(MOV·POP·LDS 류·far JMP/CALL/RET·IRET)이 이것을
    지난다. 8086-286 의 CR0 는 늘 0 이라 실모드 적재다. 실모드 쪽은 [set_real_seg] 와 같은
