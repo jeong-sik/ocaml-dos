@@ -242,11 +242,11 @@ let step t =
              | 4, _ -> op_write t 16 rm msw_real_mode_286; 3
              (* clock 수 11·12 는 iAPX 286 표에서 기억한 값이다(확인 필요: 원문은 못 읽었다) *)
              | 0, Mem (seg, off) ->
-               Cpu86_exec0f.store_descriptor_table t seg off ~limit:gdtr_limit
+               Cpu86_system.store_descriptor_table t seg off t.gdtr
                  ~top_byte:descriptor_table_top_byte_286;
                11
              | 1, Mem (seg, off) ->
-               Cpu86_exec0f.store_descriptor_table t seg off ~limit:idtr_limit
+               Cpu86_system.store_descriptor_table t seg off t.idtr
                  ~top_byte:descriptor_table_top_byte_286;
                12
              | _ -> unsupported t ctx (Printf.sprintf "0f 01 /%d" regf)
@@ -612,7 +612,10 @@ let step t =
          | Reg _ -> (undefined_on_286 t true; unsupported t ctx "bound on register"));
         13
       (* --- wait: 코프로세서 대기. 8087 이 없으니 즉시 통과한다. --- *)
-      | 0x9b -> 4
+      | 0x9b ->
+        if t.cr0 land (cr0_mp lor cr0_ts) = cr0_mp lor cr0_ts then
+          fault vector_device_not_available;
+        4
       (* --- salc (문서 외, 8086 부터 모든 실칩이 구현): AL = CF ? FF : 00 --- *)
       | 0xd6 -> set_reg8 t 0 (if t.cf then 0xff else 0x00); 2
       (* --- esc: 8087 코프로세서 명령. 이 기계는 8087 이 없다 —
@@ -620,6 +623,9 @@ let step t =
              소프트웨어 부동소수 경로를 고른다. 코프로세서 없는 실기
              8086 은 피연산자만 읽고 아무 일도 하지 않는다. --- *)
       | b when b >= 0xd8 && b <= 0xdf ->
+        (* 386 의 CR0.EM·TS 는 코프로세서 명령을 INT 7 로 보낸다. 다른 모델의
+           CR0 는 늘 0 이다. *)
+        if t.cr0 land (cr0_em lor cr0_ts) <> 0 then fault vector_device_not_available;
         let _, _, rm, _ = decode_modrm t ~addr:ctx.addr in
         (* 286 은 워드로 읽는다 — 오프셋 FFFF 면 INT 13(SingleStepTests/80286
            D8). *)
