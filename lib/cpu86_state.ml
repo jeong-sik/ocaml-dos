@@ -62,8 +62,9 @@ let f_direction = 0x400
 let f_overflow = 0x800
 
 (* 주소선 수. 8086·186 은 20개라 FFFF:0010 이 0 으로 감기고, 286 은
-   24개라 실모드에서도 10FFEFh 까지 닿는다. 1MB 에서 감는 것은 286 보드의
-   A20 게이트가 할 일이다(Dos_machine 의 메모리가 감는다). 386DX 는 32개다. *)
+   24개라 실모드에서도 10FFEFh 까지 닿는다. 1MB 에서 감는 것은 보드가 할
+   일이다(Dos_a20 의 마스크를 Dos_machine 의 메모리 접근이 씌운다). 386DX 는
+   32개다. *)
 let address_mask = function
   | I8086 | I80186 -> 0xfffff
   | I80286 -> 0xffffff

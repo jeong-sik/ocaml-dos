@@ -83,6 +83,7 @@ type t = {
   dma : Dos_dma.t;                      (** 포트 00h-0Fh 와 페이지 레지스터 *)
   mutable sb : Dos_sb.t option;         (** 220h 의 Sound Blaster. 스냅숏이 꽂고 뺀다 *)
   kbc : Dos_kbc.t;                      (** 포트 0x60·0x64 *)
+  a20 : Dos_a20.t;                      (** 8042 와 포트 0x92 가 함께 움직이는 A20 게이트 *)
   (* VGA DAC *)
   pal : (int * int * int) array;
   mutable dac_write_index : int;
@@ -162,7 +163,7 @@ let channel0_after_bios () =
 let rise_cycle ~speed pit ~tick =
   Option.map (fun r -> r * speed) (Dos_pit.next_rise pit ~tick)
 
-let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
+let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos ~a20 =
   let pit0 = channel0_after_bios () in
   {
     mem;
@@ -175,7 +176,8 @@ let create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos =
     pic = Dos_pic.create ();
     dma = Dos_dma.create ();
     sb = (if sound_blaster then Some (Dos_sb.create ()) else None);
-    kbc = Dos_kbc.create ();
+    kbc = Dos_kbc.create ~a20 ();
+    a20;
     pal = Array.init dac_entries default_vga_pal;
     dac_write_index = 0;
     dac_read_index = 0;
@@ -435,6 +437,12 @@ let sb_port_out t p v =
     follow_sb_line t sb;
     taken
 let kbc t = t.kbc
+let a20 t = t.a20
+
+(* Port 92h, the fast gate: bit 1 is the A20 line. Bit 0 (fast reset) is not
+   carried out, like the 8042's reset. Only a 16 MB board has the port; a 1 MB
+   board leaves it unserved, which a program reads as 0xFF. *)
+let fast_gate_a20 = 0x02
 let speaker_on t = t.port_b land 0x03 = 0x03
 
 let pit_tick t = t.now / t.speed
@@ -577,6 +585,10 @@ let port_in t p =
     let out2 = if Dos_pit.out t.pit2 ~tick:(pit_tick t) then out2_bit else 0 in
     (t.port_b land lnot (refresh_bit lor out2_bit)) lor refresh lor out2
   | 0x64 -> Dos_kbc.status t.kbc
+  | 0x92 ->
+    (match t.a20.Dos_a20.board with
+     | Dos_a20.Sixteen_megabytes -> if Dos_a20.enabled t.a20 then fast_gate_a20 else 0
+     | Dos_a20.One_megabyte -> 0xff)
   | 0x70 -> Dos_cmos.index t.cmos
   | 0x71 ->
     let v = Dos_cmos.read t.cmos ~now:t.now ~cpu_hz:(cpu_hz t) in
@@ -665,6 +677,10 @@ let port_out t p v =
     let now_high = gate2 t in
     if was <> now_high then Dos_pit.gate_edge t.pit2 ~tick:(pit_tick t) ~high:now_high
   | 0x64 -> Dos_kbc.write_command t.kbc ~hz:(cpu_hz t) v
+  | 0x92 ->
+    (match t.a20.Dos_a20.board with
+     | Dos_a20.Sixteen_megabytes -> Dos_a20.set t.a20 (v land fast_gate_a20 <> 0)
+     | Dos_a20.One_megabyte -> ())
   | 0x70 -> Dos_cmos.select t.cmos v
   | 0x71 ->
     Dos_cmos.write t.cmos v ~now:t.now ~cpu_hz:(cpu_hz t);
@@ -723,7 +739,7 @@ let get_opl_at r =
    snapshot carries it. Keep [write_state] and [read_state] in one order. *)
 let write_state w t =
   let { mem = _; video = _ (* the machine's: it writes them itself *);
-        speed; now; pit0; irq0_at; pic; dma; sb; kbc; pal; dac_write_index; dac_read_index;
+        speed; now; pit0; irq0_at; pic; dma; sb; kbc; a20; pal; dac_write_index; dac_read_index;
         dac_phase; dac_mask; port_b;
         mode_control; cmos; opl_reg; opl_t1_count;
         opl_t2_count; opl_t1_at; opl_t2_at; opl_t1_exp; opl_t2_exp; opl; pit2; mpu;
@@ -743,6 +759,9 @@ let write_state w t =
    | None -> C.put_bool w false
    | Some s -> C.put_bool w true; Dos_sb.write_state w s);
   Dos_kbc.write_state w kbc;
+  (match a20.Dos_a20.board with
+   | Dos_a20.Sixteen_megabytes -> C.put_bool w (Dos_a20.enabled a20)
+   | Dos_a20.One_megabyte -> ());
   put "DAC size" C.count (Array.length pal);
   Array.iter
     (fun (r, g, b) -> put "DAC red" C.byte r; put "DAC green" C.byte g; put "DAC blue" C.byte b)
@@ -783,6 +802,9 @@ let read_state r t =
      end
      else None);
   Dos_kbc.read_state r t.kbc ~hz:(cpu_hz t);
+  (match t.a20.Dos_a20.board with
+   | Dos_a20.Sixteen_megabytes -> Dos_a20.set t.a20 (C.get_bool r)
+   | Dos_a20.One_megabyte -> ());
   if get "DAC size" C.count <> Array.length t.pal then C.fail "DAC size differs";
   Array.iteri
     (fun i _ ->

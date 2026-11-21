@@ -68,9 +68,17 @@ let service_status_mask t v =
   | Some (Bios (Keyboard_irq | Rtc_irq | Video | Equipment | Memory_size | Mouse) | Dos_divide_overflow | Dos_terminate | Dos_keep | Multiplex | Ems)
   | None -> 0
 
+(* A 386 machine has 16 MB and the A20 gate (RFC 0005 stage 2); the others
+   keep their 1 MB. *)
+let board_of_model = function
+  | Cpu86.I80386 -> Dos_a20.Sixteen_megabytes
+  | Cpu86.I8086 | Cpu86.I80186 | Cpu86.I80286 -> Dos_a20.One_megabyte
+
 let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = false)
     ?(sound_blaster = false) () =
-  let mem = Bytes.make (1024 * 1024) '\000' in
+  let board = board_of_model model in
+  let a20 = Dos_a20.create board in
+  let mem = Bytes.make (Dos_a20.memory_bytes board) '\000' in
   let video = Dos_video.create ~mem in
   (* CMOS 시계는 기계의 시각을 읽는다. 기계는 포트 뒤에 만들어지므로
      시계는 아래에서 잇는다. *)
@@ -78,10 +86,12 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
     ref (fun () -> invalid_arg "Dos_machine: CMOS clock read before the machine exists")
   in
   let cmos = Dos_cmos.create ~clock:(fun () -> !wall_clock ()) in
-  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos in
+  let ports = Dos_ports.create ~speed ~mpu401 ~mem ~video ~sound_blaster ~cmos ~a20 in
   (* EGA/VGA 평면 모드에서는 0xA0000 이 평면 넷을 겹쳐 둔 창이다 —
      그래픽 컨트롤러를 지나야 하고, 읽기는 래치를 채우는 부수효과가
-     있다. 나머지 주소는 그대로 1MB 배열이다. *)
+     있다. 나머지 주소는 그대로 배열이다. 주소는 먼저 보드의 마스크를 지난다:
+     1MB 보드는 1MB 에서 감고, 16MB 보드는 24 비트만 쓰며 A20 이 닫히면
+     20번 비트를 0 으로 둔다. *)
   (* A game that reads the keyboard itself polls the BIOS ring's head word
      at 0x41A against its tail instead of calling INT 16h (삼국지3's copy
      protection and name entry measured: no INT 16h after the logo). Reading
@@ -91,13 +101,13 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
      so the answer is wired in below. *)
   let on_ring_poll = ref ignore in
   let read a =
-    let a = a land 0xfffff in
+    let a = a land a20.Dos_a20.mask in
     if a = bda_ring_head then !on_ring_poll ();
     if Dos_video.owns_address video a then Dos_video.mem_read video a
     else Char.code (Bytes.get mem a)
   in
   let write a v =
-    let a = a land 0xfffff in
+    let a = a land a20.Dos_a20.mask in
     if Dos_video.owns_address video a then Dos_video.mem_write video a v
     else Bytes.set mem a (Char.chr (v land 0xff))
   in
@@ -130,7 +140,10 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
       ems_mapped = Array.make Dos_ems.frame_pages None;
       ems_saved = Hashtbl.create 1;
       ems_names = Hashtbl.create 1;
-      xms = Dos_xms.create ();
+      xms =
+        (match board with
+         | Dos_a20.Sixteen_megabytes -> Dos_xms.create ~memory:mem ()
+         | Dos_a20.One_megabyte -> Dos_xms.create ());
       mouse = {
         (* 기본 부착 — 이 기계는 "마우스 드라이버가 상주한 PC"를 모델로 한다.
            KOEI 계열 게임은 부팅에서 INT 33h AX=0 으로 드라이버를 검사하고, 없으면

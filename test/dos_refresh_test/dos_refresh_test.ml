@@ -17,7 +17,8 @@ let test_port () =
   let mem = Bytes.make (1024 * 1024) '\000' in
   let video = Dos_video.create ~mem in
   let t = Dos_ports.create ~speed:Dos_ports.pc_speed ~mpu401:false ~mem ~video ~sound_blaster:false
-    ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test")) in
+    ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
+    ~a20:(Dos_a20.create Dos_a20.One_megabyte) in
   let bit now = Dos_ports.set_now t now; Dos_ports.port_in t refresh_port land refresh_bit in
   List.iter (fun (now, want) -> check_int (Printf.sprintf "bit4 at %d cycles" now) (bit now) want)
     [ (0, 0); (toggle_cycles - 1, 0); (toggle_cycles, refresh_bit);

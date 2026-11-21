@@ -46,12 +46,21 @@ let conventional_limit = 0x100000
 let kb_bytes = 1024
 let max_locks = 0xFF
 
-type block = { base_kb : int; size_kb : int; locks : int; data : Bytes.t }
+(* Byte i of a block is [data.[origin + i]]. A driver without [memory] gives
+   each block bytes of its own (origin 0) that the CPU cannot reach. A driver
+   with it is the machine's extended memory: every block is a view of that
+   memory (data) at the block's physical address (origin). *)
+type block = { base_kb : int; size_kb : int; locks : int; data : Bytes.t; origin : int }
 
 (* Slot i holds handle i + 1. *)
-type t = { slots : block option array }
+type t = { slots : block option array; memory : Bytes.t option }
 
-let create () = { slots = Array.make handle_count None }
+let create ?memory () =
+  (match memory with
+   | Some m when Bytes.length m <> extended_base + (capacity_kb * kb_bytes) ->
+     invalid_arg "Dos_xms.create: memory is not 1 MB plus capacity_kb"
+   | Some _ | None -> ());
+  { slots = Array.make handle_count None; memory }
 
 let block t h =
   if h >= 1 && h <= handle_count then t.slots.(h - 1) else None
@@ -95,6 +104,32 @@ let query_free t =
 
 let fresh kb = Bytes.make (kb * kb_bytes) '\000'
 
+let physical_of_kb base_kb = extended_base + (base_kb * kb_bytes)
+
+(* A new block reads 0, whatever the memory held before. *)
+let place t ~base_kb ~size_kb ~locks =
+  match t.memory with
+  | None -> { base_kb; size_kb; locks; data = fresh size_kb; origin = 0 }
+  | Some mem ->
+    let origin = physical_of_kb base_kb in
+    Bytes.fill mem origin (size_kb * kb_bytes) '\000';
+    { base_kb; size_kb; locks; data = mem; origin }
+
+(* [b] moved to [base_kb] and resized to [size_kb]: its bytes survive up to
+   the smaller size and the rest reads 0. *)
+let resized t b ~base_kb ~size_kb =
+  let keep = min b.size_kb size_kb * kb_bytes in
+  match t.memory with
+  | None ->
+    let data = fresh size_kb in
+    Bytes.blit b.data b.origin data 0 keep;
+    { b with base_kb; size_kb; data }
+  | Some mem ->
+    let origin = physical_of_kb base_kb in
+    Bytes.blit mem b.origin mem origin keep;
+    Bytes.fill mem (origin + keep) ((size_kb * kb_bytes) - keep) '\000';
+    { b with base_kb; size_kb; origin }
+
 let allocate t ~kb =
   let rec free_slot i =
     if i >= handle_count then None
@@ -106,7 +141,7 @@ let allocate t ~kb =
     (match first_fit t ~except:no_handle kb with
      | None -> Error Out_of_memory
      | Some base_kb ->
-       set t h (Some { base_kb; size_kb = kb; locks = 0; data = fresh kb });
+       set t h (Some (place t ~base_kb ~size_kb:kb ~locks:0));
        Ok h)
 
 let release t h =
@@ -115,7 +150,7 @@ let release t h =
   | Some b when b.locks > 0 -> Error Locked
   | Some _ -> set t h None; Ok ()
 
-let address b = extended_base + (b.base_kb * kb_bytes)
+let address b = physical_of_kb b.base_kb
 
 let lock t h =
   match block t h with
@@ -153,9 +188,7 @@ let resize t h ~kb =
     (match if in_place then Some b.base_kb else first_fit t ~except:h kb with
      | None -> Error Out_of_memory
      | Some base_kb ->
-       let data = fresh kb in
-       Bytes.blit b.data 0 data 0 (min (Bytes.length b.data) (Bytes.length data));
-       set t h (Some { b with base_kb; size_kb = kb; data });
+       set t h (Some (resized t b ~base_kb ~size_kb:kb));
        Ok ())
 
 type endpoint = Conventional of int | Block of { handle : int; offset : int }
@@ -178,8 +211,8 @@ let resolve t ~read ~write ~length ~bad_handle ~bad_offset = function
        else if length > size - offset then Error Invalid_length
        else
          Ok { linear = address b + offset;
-              get = (fun i -> Char.code (Bytes.get b.data (offset + i)));
-              put = (fun i v -> Bytes.set b.data (offset + i) (Char.chr (v land 0xff))) })
+              get = (fun i -> Char.code (Bytes.get b.data (b.origin + offset + i)));
+              put = (fun i v -> Bytes.set b.data (b.origin + offset + i) (Char.chr (v land 0xff))) })
 
 let ( let* ) = Result.bind
 
@@ -322,7 +355,9 @@ let write_state w t =
         C.put w ~what:"XMS block base" kb_range b.base_kb;
         C.put w ~what:"XMS block size" kb_range b.size_kb;
         C.put w ~what:"XMS lock count" lock_range b.locks;
-        C.put_bytes w b.data)
+        (* On the machine's memory the bytes are the memory's: the snapshot
+           has them once, with the RAM. *)
+        match t.memory with None -> C.put_bytes w b.data | Some _ -> ())
     t.slots
 
 let read_state r t =
@@ -333,10 +368,14 @@ let read_state r t =
            let base_kb = C.get r ~what:"XMS block base" kb_range in
            let size_kb = C.get r ~what:"XMS block size" kb_range in
            let locks = C.get r ~what:"XMS lock count" lock_range in
-           let data = C.get_bytes r in
            if base_kb + size_kb > capacity_kb then C.fail "XMS block runs past the end";
-           if Bytes.length data <> size_kb * kb_bytes then C.fail "XMS block bytes";
-           Some { base_kb; size_kb; locks; data }
+           (match t.memory with
+            | None ->
+              let data = C.get_bytes r in
+              if Bytes.length data <> size_kb * kb_bytes then C.fail "XMS block bytes";
+              Some { base_kb; size_kb; locks; data; origin = 0 }
+            | Some mem ->
+              Some { base_kb; size_kb; locks; data = mem; origin = physical_of_kb base_kb })
          end
          else None))
     t.slots;

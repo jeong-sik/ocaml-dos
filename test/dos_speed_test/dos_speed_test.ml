@@ -81,6 +81,7 @@ let ports speed =
   let video = Dos_video.create ~mem in
   Dos_ports.create ~speed ~mpu401:false ~mem ~video ~sound_blaster:false
     ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
+    ~a20:(Dos_a20.create Dos_a20.One_megabyte)
 
 let pit_count t =
   let lo = Dos_ports.port_in t 0x40 in

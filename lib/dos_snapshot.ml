@@ -104,8 +104,13 @@ let magic = "OCAML-DOS-SNAPSHOT\000"
    register 5 bit 6; 13h loads that register as 40h.
    41: a handle record may name the EMM device (target tag 4).
    42: the ports no longer carry the port 3DAh bit 0 toggle; bit 0 follows
-   the frame time. *)
-let format_version = 42
+   the frame time.
+   43: a 386 machine has 16 MB of RAM, so its RAM is that long, its ports carry
+   the A20 gate (one bool) right after the keyboard controller, and its XMS
+   blocks write no bytes (they are views of the RAM). The payload of an 8086,
+   186 or 286 machine has the same bytes as format 42; only the header's
+   number differs. *)
+let format_version = 43
 
 let digest_hex_len = 32
 let checksum_len = 16
