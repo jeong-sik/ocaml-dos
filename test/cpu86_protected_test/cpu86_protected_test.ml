@@ -17,7 +17,7 @@
      68h call gate               70h 32-bit data, base 20000h, 64KB (B=1)
      78h 4GB data, base 12345678h   80h 64KB code, DPL 3
      88h 32-bit code, base 0, 512 bytes
-     04h (LDT) data, base 20000h, 64KB *)
+     04h (LDT) data, base 20000h, 64KB   0ch (LDT) code, not present *)
 
 let failed = ref 0
 
@@ -72,7 +72,9 @@ let gdt =
       desc ~base:0 ~limit:0x1ff ~access:0x9a ~flags:big ]
 
 let gdt_limit = String.length gdt - 1
-let ldt = desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:none
+let ldt =
+  desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:none
+  ^ desc ~base:0 ~limit:0xffff ~access:0x1a ~flags:none
 
 let mem_size = 0x100000
 
@@ -316,18 +318,39 @@ let test_stops () =
     check_stopped name (run t) part
   in
   let sel_into reg sel = mov_ax_sel sel ^ mov_sreg reg in
-  stops "null selector into SS" (sel_into ss 0) "null selector into SS";
-  stops "selector beyond the GDT" (sel_into ds 0x90) "beyond its table";
-  stops "LDT selector with no LDT" (sel_into ds 0x04) "beyond its table";
-  stops "not present" (sel_into ds 0x38) "not present";
-  stops "system descriptor into DS" (sel_into ds 0x28) "system descriptor";
-  stops "call gate into DS" (sel_into ds 0x68) "system descriptor";
+  (* a fault the core raises stops with its vector and the selector in the error code
+     (386 PRM 9.7: the upper 14 bits of the selector); what is not a fault but a feature
+     RFC 0005 4 adds stops with a message that names it *)
+  let faults name body vector code =
+    stops name body
+      (Printf.sprintf "fault %d in protected mode needs delivery through the IDT (RFC 0005 3c), error code %04x"
+         vector code)
+  in
+  let load_ldt = mov_ax_sel 0x28 ^ "\x0f\x00\xd0" in
+  faults "null selector into SS" (sel_into ss 0) 13 0;
+  faults "selector beyond the GDT" (sel_into ds 0x90) 13 0x90;
+  faults "beyond the GDT, RPL is not part of the code" (sel_into ds 0x93) 13 0x90;
+  faults "LDT selector with no LDT" (sel_into ds 0x04) 13 0x04;
+  faults "not present data into DS" (sel_into ds 0x38) 11 0x38;
+  faults "not present data into SS" (sel_into ss 0x38) 12 0x38;
+  faults "not present code from the LDT into DS" (load_ldt ^ sel_into ds 0x0c) 11 0x0c;
+  faults "system descriptor into DS" (sel_into ds 0x28) 13 0x28;
+  faults "call gate into DS" (sel_into ds 0x68) 13 0x68;
+  faults "system descriptor into SS" (sel_into ss 0x28) 13 0x28;
   stops "expand-down segment" (sel_into ds 0x40) "expand-down";
-  stops "execute-only code into DS" (sel_into ds 0x58) "execute-only";
-  stops "code segment into SS" (sel_into ss 0x08) "code segment";
-  stops "read-only data into SS" (sel_into ss 0x60) "read-only";
+  faults "execute-only code into DS" (sel_into ds 0x58) 13 0x58;
+  faults "code segment into SS" (sel_into ss 0x08) 13 0x08;
+  faults "read-only data into SS" (sel_into ss 0x60) 13 0x60;
   stops "RPL above DPL" (sel_into ds 0x13) "privilege level";
-  stops "far jump to a data segment" ("\xea" ^ le32 0x120 ^ le16 0x10) "data segment";
+  stops "RPL above DPL on a not present segment: the privilege check comes first"
+    (sel_into ds 0x3b) "privilege level";
+  faults "far jump to a data segment" ("\xea" ^ le32 0x120 ^ le16 0x10) 13 0x10;
+  faults "far jump to a not present data segment: the type comes before presence"
+    ("\xea" ^ le32 0x120 ^ le16 0x38) 13 0x38;
+  faults "far jump to a not present code segment" (load_ldt ^ "\xea" ^ le32 0x120 ^ le16 0x0c) 11 0x0c;
+  faults "far jump to a null selector" ("\xea" ^ le32 0x120 ^ le16 0) 13 0;
+  faults "far jump beyond the GDT" ("\xea" ^ le32 0x120 ^ le16 0x90) 13 0x90;
+  stops "far jump to a gate" ("\xea" ^ le32 0x120 ^ le16 0x68) "a gate or a TSS";
   stops "far jump with RPL 3" ("\xea" ^ le32 0x120 ^ le16 0x0b) "privilege level";
   stops "far jump to DPL 3 code" ("\xea" ^ le32 0x120 ^ le16 0x80) "privilege level";
   stops "SS with DPL 3" (sel_into ss 0x48) "privilege level";
