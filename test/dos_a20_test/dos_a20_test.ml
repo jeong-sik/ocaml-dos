@@ -334,6 +334,13 @@ let () =
      | Ok () -> rd m 0x700 = 0x5A
      | Error _ -> false)
 
+(* The driver takes the RAM of a 16 MB machine and nothing else. *)
+let () =
+  check "XMS: RAM of another size is refused"
+    (match Dos_xms.create ~memory:(Bytes.create 16) () with
+     | _ -> false
+     | exception Invalid_argument _ -> true)
+
 (* ---------- snapshots ---------- *)
 
 let save_exn m =
