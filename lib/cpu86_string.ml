@@ -40,12 +40,12 @@ let string_op t ctx width (unit_kind : string_unit) =
      (SingleStepTests/80386 A5 A7 AB AD AF 6D 6F). [restart] 가 되돌린다. *)
   (* 더블워드와 67h 는 386 에만 있고, 386 의 [guard] 는 접근 자신과 같은
      결함만 내니 따질 것이 없다. *)
-  let crosses off = width = 16 && overruns t off in
+  let crosses sreg off = width = 16 && overruns t sreg off in
   let read opd = if width = 32 then op_read32 t opd else op_read t width opd in
   let write opd v = if width = 32 then op_write32 t opd v else op_write t width opd v in
   let acc () = if width = 32 then get32 t 0 else op_read t width (Reg 0) in
   let guard r sreg ~cx_taken =
-    if crosses t.regs.(r) then begin
+    if crosses sreg t.regs.(r) then begin
       (match t.model with
        | I80386 -> ()
        | I8086 | I80186 | I80286 ->

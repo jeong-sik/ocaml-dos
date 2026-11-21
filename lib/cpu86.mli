@@ -135,11 +135,12 @@ val bus_write : t -> int -> int -> unit
 
 val set_ip : t -> int -> unit
 
-val physical : t -> seg:int -> off:int -> int
-(** [~seg:s ~off:o] 이 CPU 가 버스에 내는 주소 = (s lsl 4) + o 를 주소선
-    수로 자른 값. 8086·186 은 20비트라 1MB 에서 감기고, 286 은 24비트라
-    10FFEFh 까지 간다. 286 보드에서 1MB 에서 감는 것은 A20 게이트의 일이라
-    메모리를 붙이는 쪽이 정한다. *)
+val physical : t -> sreg:int -> off:int -> int
+(** [~sreg:n ~off:o] 이 CPU 가 버스에 내는 주소 = 세그먼트 레지스터 n 의
+    베이스 + o 를 주소선 수로 자른 값. 실모드의 베이스는 셀렉터×16 이다.
+    8086·186 은 20비트라 1MB 에서 감기고, 286 은 24비트라 10FFEFh 까지 간다.
+    286 보드에서 1MB 에서 감는 것은 A20 게이트의 일이라 메모리를 붙이는 쪽이
+    정한다. *)
 
 val flags : t -> int
 (** FLAGS word (bit0 CF, bit2 PF, bit4 AF, bit6 ZF, bit7 SF, bit8 TF,

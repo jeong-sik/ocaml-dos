@@ -57,11 +57,13 @@ let atomic t f =
   | I8086 | I80186 -> f ()
   | I80286 | I80386 ->
     Array.blit t.regs 0 t.undo_regs 0 8;
-    Array.blit t.segs 0 t.undo_segs 0 4;
+    Array.blit t.segs 0 t.undo_segs 0 classic_segments;
+    Array.blit t.bases 0 t.undo_bases 0 classic_segments;
     (try f () with
      | Fault _ as e ->
        Array.blit t.undo_regs 0 t.regs 0 8;
-       Array.blit t.undo_segs 0 t.segs 0 4;
+       Array.blit t.undo_segs 0 t.segs 0 classic_segments;
+       Array.blit t.undo_bases 0 t.bases 0 classic_segments;
        raise e)
 
 (* 386 은 결함 난 POPA·POP r/m 의 SP 를 명령 앞 값으로 되돌린다. POPA 가

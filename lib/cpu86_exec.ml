@@ -116,7 +116,7 @@ let step t =
          | I80286 | I80386 -> push16 t t.regs.(4)
          | I8086 | I80186 ->
            t.regs.(4) <- (t.regs.(4) - 2) land 0xffff;
-           let a = physical t ~seg:t.segs.(2) ~off:t.regs.(4) in
+           let a = physical t ~sreg:sreg_ss ~off:t.regs.(4) in
            t.write a (t.regs.(4) land 0xff);
            t.write (a + 1) (t.regs.(4) lsr 8));
         10

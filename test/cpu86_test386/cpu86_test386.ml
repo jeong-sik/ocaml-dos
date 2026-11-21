@@ -73,9 +73,8 @@ let run_rom rom =
   let push16 v =
     let sp = (Cpu86.reg16 cpu reg_sp - 2) land 0xFFFF in
     Cpu86.set_reg16 cpu reg_sp sp;
-    let ss = Cpu86.seg cpu seg_ss in
-    write (Cpu86.physical cpu ~seg:ss ~off:sp) (v land 0xFF);
-    write (Cpu86.physical cpu ~seg:ss ~off:((sp + 1) land 0xFFFF)) (v lsr 8)
+    write (Cpu86.physical cpu ~sreg:seg_ss ~off:sp) (v land 0xFF);
+    write (Cpu86.physical cpu ~sreg:seg_ss ~off:((sp + 1) land 0xFFFF)) (v lsr 8)
   in
   let deliver n =
     let flags = Cpu86.flags cpu in
