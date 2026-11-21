@@ -347,6 +347,7 @@ let test_stops () =
   faults "far jump to a data segment" ("\xea" ^ le32 0x120 ^ le16 0x10) 13 0x10;
   faults "far jump to a not present data segment: the type comes before presence"
     ("\xea" ^ le32 0x120 ^ le16 0x38) 13 0x38;
+  faults "far jump to a not present code segment" (load_ldt ^ "\xea" ^ le32 0x120 ^ le16 0x0c) 11 0x0c;
   faults "far jump to a null selector" ("\xea" ^ le32 0x120 ^ le16 0) 13 0;
   faults "far jump beyond the GDT" ("\xea" ^ le32 0x120 ^ le16 0x90) 13 0x90;
   stops "far jump to a gate" ("\xea" ^ le32 0x120 ^ le16 0x68) "a gate or a TSS";
