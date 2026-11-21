@@ -534,6 +534,48 @@ let test_paging () =
   let t, _ = build (mov_eax 0x4000 ^ "\x0f\x22\xd8" ^ hlt) in
   check_stopped "CR3 to a directory with no PDE" (run t) "PDE 0 of CR3=00004000";
   check "CR3 stays" (sys t).Cpu86.saved_cr3 0x1000;
+  (* While PG is on a linear address above 1MB stops: the test bus, like the machine's, drops
+     the upper bits, so E0000000h would read the low megabyte and pass by accident *)
+  let flat_ds = load_ds 0x10 in
+  let read_byte a = "\xa0" ^ le32 a and write_byte a = "\xa2" ^ le32 a in
+  let t, mem = build (flat_ds ^ read_byte 0xfffff ^ hlt) in
+  Bytes.set mem 0xfffff '\x5a';
+  check_halted "PG: the last byte of the first megabyte reads" (run t);
+  check "PG: the last byte is the one read" (eax t land 0xff) 0x5a;
+  stops "PG: a read at 1MB" (build (flat_ds ^ read_byte 0x100000 ^ hlt))
+    "linear address 00100000 is above 1MB while CR0.PG is on";
+  stops "PG: a read at E0000000h" (build (flat_ds ^ read_byte 0xe0000000 ^ hlt))
+    "linear address e0000000 is above 1MB while CR0.PG is on";
+  stops "PG: a write at E0000000h" (build (flat_ds ^ write_byte 0xe0000000 ^ hlt))
+    "linear address e0000000 is above 1MB while CR0.PG is on";
+  stops "PG: a dword read across 1MB" (build (flat_ds ^ "\xa1" ^ le32 0xfffff ^ hlt))
+    "linear address 00100000 is above 1MB while CR0.PG is on";
+  stops "PG: an instruction fetch at 1MB" (build (mov_eax 0x100000 ^ "\xff\xe0"))
+    "linear address 00100000 is above 1MB while CR0.PG is on";
+  stops "PG: a table above 1MB" (build (flat_ds ^ mov_eax 0x400000 ^ "\x0f\x01\x10"))
+    "linear address 00400000 is above 1MB while CR0.PG is on";
+  (* the host bus is physical and is not guarded; clearing PG lifts the guard *)
+  let t, _ = build (flat_ds ^ hlt) in
+  ignore (run t);
+  ignore (Cpu86.bus_read t 0x100000);
+  Cpu86.bus_write t 0x100000 0;
+  let clear_pg = "\x0f\x20\xc0" ^ "\x25" ^ le32 0x7fffffff ^ "\x0f\x22\xc0" in
+  let t, mem = build (flat_ds ^ clear_pg ^ read_byte 0x100400 ^ hlt) in
+  Bytes.set mem 0x400 '\x12';
+  check_halted "PG off lifts the guard" (run t);
+  check "PG off: the access wrapped like the bus does" (eax t land 0xff) 0x12;
+  (* a restored PG state is guarded too, and a restored non-PG state is not *)
+  let t, mem = build (flat_ds ^ read_byte 0x100000 ^ hlt) in
+  for _ = 1 to 9 do ignore (Cpu86.step t) done;
+  let s = Cpu86.save_state t in
+  let t2, mem2 = make "" "" in
+  Bytes.blit mem 0 mem2 0 mem_size;
+  Cpu86.load_state t2 s;
+  check_stopped "a restored PG state stops above 1MB" (run t2) "linear address 00100000";
+  let t3, mem3 = make "" "" in
+  Bytes.blit mem 0 mem3 0 mem_size;
+  Cpu86.load_state t3 { s with Cpu86.saved_386 = Option.map (fun x -> { x with Cpu86.saved_cr0 = 1 }) s.Cpu86.saved_386 };
+  check_halted "a restored state without PG does not" (run t3);
   (* PG with PE off, and PE off with PG on, are #GP *)
   let t, _ = make ("\x66\xb8" ^ le32 0x80000000 ^ "\x0f\x22\xc0") "" in
   let taken = ref None in
