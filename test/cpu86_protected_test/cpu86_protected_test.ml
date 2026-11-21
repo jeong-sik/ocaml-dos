@@ -384,6 +384,11 @@ let test_fault_codes () =
     (stop_message name (flat ("\x0f\x20\xc0" ^ "\x0c\x04" ^ "\x0f\x22\xc0" ^ "\xd8\xc0"))) 7 None;
   let name = "word pop at the end of a 64KB stack" in
   expect name (stop_message name (load_ss 0x20 ^ "\x66\xbc\xff\xff" ^ "\x66\x58")) 12 (Some 0);
+  (* a string load through SS or DS at the end of a 64KB segment: 16-bit addresses in 32-bit code *)
+  let name = "string load through SS at the end of its segment" in
+  expect name (stop_message name (load_ss 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x36\x66\xad")) 12 (Some 0);
+  let name = "string load through DS at the end of its segment" in
+  expect name (stop_message name (load_ds 0x20 ^ "\x66\xbe\xff\xff" ^ "\x67\x66\xad")) 13 (Some 0);
   let name = "access through a null DS" in
   expect name
     (stop_message name (mov_ax_sel 0 ^ mov_sreg 3 ^ "\xa1\x00\x00\x00\x00")) 13 (Some 0);
