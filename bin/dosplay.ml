@@ -198,7 +198,7 @@ let mount_dir m dir =
 let () =
   let com = ref "" and exe = ref "" and dirs = ref [] and mounts = ref [] in
   let fps = ref default_fps and mouse = ref true and state = ref "" and save_dir = ref "" in
-  let audio_cmd = ref "" and sound_blaster = ref false and cpu_mhz = ref None in
+  let audio_cmd = ref "" and sound_blaster = ref true and cpu_mhz = ref None in
   let cpu = ref None in
   let specs =
     [ ("--com", Arg.Set_string com, "PATH  COM 이미지");
@@ -221,9 +221,10 @@ let () =
        "286|386  CPU 모델(기본 286). 386 이면 32비트 레지스터·FS·GS·0Fh 명령이 돈다. --state 로 이어 할 때는 상태 파일의 기계를 쓴다");
       ("--cpu-mhz", Arg.Float (fun f -> cpu_mhz := Some f),
        "MHZ  CPU 속도(8086 사이클 기준, 기본 4.77). PIT 정수배로 맞춘다. --state 로 되살린 기계는 저장된 속도를 쓴다");
-      ("--sound-blaster", Arg.Set sound_blaster,
-       "  Sound Blaster 2.0 을 꽂는다(220h, IRQ 7, DMA 1). 게임 설정이 Sound Blaster \
-        인 게임은 카드가 없으면 DSP 를 기다리며 멈춘다. --state 로 이어 할 때는 상태 파일의 기계를 쓴다");
+      ("--no-sound-blaster", Arg.Clear sound_blaster,
+       "  Sound Blaster 2.0(220h, IRQ 7, DMA 1)을 빼고 연다. 기본은 꽂는다. 게임 설정이 \
+        Sound Blaster 인 게임은 카드가 없으면 DSP 를 기다리며 멈춘다. --state 로 이어 할 때는 \
+        상태 파일의 기계를 쓴다");
       ("--audio-cmd", Arg.Set_string audio_cmd,
        "CMD  소리(49716Hz 16비트 모노 raw)를 이 프로그램의 표준 입력으로 흘린다. \
         공백으로 나누고 셸을 거치지 않는다. 예: \"ffplay -nodisp -autoexit -f s16le \
