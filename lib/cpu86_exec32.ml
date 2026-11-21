@@ -88,7 +88,7 @@ let bound32 t ctx =
      let idx = sign32 (get32 t regf) in
      let lower = sign32 (read32 t s o) in
      let upper = sign32 (read32 t s (second_offset rm o 4)) in
-     if idx < lower || idx > upper then fault vector_bound
+     if idx < lower || idx > upper then fault Bound_exceeded
    | Reg _ -> undefined_on_286 t true; unsupported t ctx "bound on register (66h)");
   13
 

@@ -86,7 +86,7 @@ let write_cr0 t ctx v =
   let v = v land cr0_defined in
   let paging = v land cr0_pg <> 0 in
   if paging then begin
-    if v land cr0_pe = 0 then fault vector_general_protection;
+    if v land cr0_pe = 0 then fault (General_protection 0);
     if t.cr0 land cr0_pg = 0 then check_identity_map t ctx ~cr3:t.cr3
   end;
   let paging_was_on = t.cr0 land cr0_pg <> 0 in
@@ -116,7 +116,7 @@ let group7 t ctx w =
   | 3, (Mem (seg, off) | Mem32 (seg, off)), _ ->
     load_descriptor_table t seg off t.idtr w;
     11
-  | (0 | 1 | 2 | 3), Reg _, _ -> fault vector_invalid_opcode
+  | (0 | 1 | 2 | 3), Reg _, _ -> fault Invalid_opcode
   | 4, Reg n, Dword -> put32 t n t.cr0; 2
   | 4, Reg _, Word -> op_write t 16 rm (t.cr0 land 0xffff); 2
   | 4, (Mem _ | Mem32 _), _ -> op_write t 16 rm (t.cr0 land 0xffff); 3
@@ -151,7 +151,7 @@ let debug_register_slot t ctx n =
   | _ -> n
 
 let test_register_slot n =
-  if n < test_register_first then fault vector_invalid_opcode;
+  if n < test_register_first then fault Invalid_opcode;
   n - test_register_first
 
 let move_from_special t ctx op2 =
@@ -163,7 +163,7 @@ let move_from_special t ctx op2 =
        | 0 -> t.cr0
        | 2 -> t.cr2
        | 3 -> t.cr3
-       | _ -> fault vector_invalid_opcode)
+       | _ -> fault Invalid_opcode)
     | 0x21 -> t.dr.(debug_register_slot t ctx n)
     | _ -> t.tr.(test_register_slot n)
   in
@@ -184,7 +184,7 @@ let move_to_special t ctx op2 =
        if t.cr0 land cr0_pg <> 0 then check_identity_map t ctx ~cr3:v;
        t.cr3 <- v;
        4
-     | _ -> fault vector_invalid_opcode)
+     | _ -> fault Invalid_opcode)
   | 0x23 ->
     let slot = debug_register_slot t ctx n in
     if slot = 7 && v land debug_breakpoint_enables <> 0 then

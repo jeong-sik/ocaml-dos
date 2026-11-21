@@ -10,18 +10,36 @@ open Cpu86_state
    오가기 전에 따지고, 여러 번 접근하는 스택 명령은 [atomic] 이 되돌린다.
    실칩이 먼저 고쳐 두는 레지스터(POP r/m 의 SP, 문자열 명령의 SI·DI·CX)는
    그대로 남는다. 386 은 그 둘도 명령 앞 값으로 되돌린다
-   ([restore_sp_on_fault], [Cpu86_string]). step 밖으로 나가지 않는다. *)
-exception Fault of int
+   ([restore_sp_on_fault], [Cpu86_string]). step 밖으로 나가지 않는다.
 
-let vector_divide = 0
-let vector_bound = 5
-let vector_invalid_opcode = 6
-let vector_device_not_available = 7
-let vector_stack_fault = 12
-let vector_segment_overrun = 13
-let vector_general_protection = vector_segment_overrun
+   보호 모드의 #SS·#GP 는 오류 코드를 스택에 쌓는다(386 PRM 9.9 "Error Code").
+   코드를 쌓는 결함만 구성자에 코드를 싣고, 쌓지 않는 결함에는 코드를 달 수 없다.
+   세그먼트 한계를 넘은 접근과 CR0 쓰기의 #SS·#GP 는 코드 0 이다. 실모드는 코드를
+   쌓지 않아 훅이 벡터만 받는다. *)
+type fault =
+  | Divide_error
+  | Bound_exceeded
+  | Invalid_opcode
+  | Device_not_available
+  | Stack_fault of int
+  | General_protection of int
 
-let fault vector = raise (Fault vector)
+exception Fault of fault
+
+let vector_of_fault = function
+  | Divide_error -> 0
+  | Bound_exceeded -> 5
+  | Invalid_opcode -> 6
+  | Device_not_available -> 7
+  | Stack_fault _ -> 12
+  | General_protection _ -> 13
+
+(* 보호 모드에서 스택에 쌓는 오류 코드. 쌓지 않는 결함은 [None]. *)
+let error_code_of_fault = function
+  | Stack_fault code | General_protection code -> Some code
+  | Divide_error | Bound_exceeded | Invalid_opcode | Device_not_available -> None
+
+let fault f = raise (Fault f)
 
 (* 결함을 받는 비용. INT 3 과 같은 값을 쓴다. *)
 let fault_cycles = 25
@@ -33,7 +51,7 @@ let fault_cycles = 25
    62 FF). step 안의 지역 함수로 두면 명령마다 클로저를 만든다. *)
 let undefined_on_286 t cond =
   match t.model with
-  | I80286 | I80386 -> if cond then fault vector_invalid_opcode
+  | I80286 | I80386 -> if cond then fault Invalid_opcode
   | I8086 | I80186 -> ()
 
 (* MOV sreg(8C·8E)의 reg 필드가 고르는 세그먼트. 8086·186 은 아래 두 비트만
@@ -45,7 +63,7 @@ let sreg_field t regf ~load =
   | I8086 | I80186 -> regf land 3
   | I80286 -> undefined_on_286 t (regf >= 4 || (load && regf = 1)); regf
   | I80386 ->
-    if regf >= 6 || (load && regf = 1) then fault vector_invalid_opcode;
+    if regf >= 6 || (load && regf = 1) then fault Invalid_opcode;
     regf
 
 (* 스택을 여러 번 건드리는 명령(PUSHA·POPA·ENTER·LEAVE·far CALL·RETF·
@@ -95,5 +113,5 @@ let do_int t ctx n =
    나눗셈 자신(접두 바이트 포함)으로 돌아가는 결함이다. *)
 let divide_error t ctx =
   match t.model with
-  | I80286 | I80386 -> fault vector_divide
-  | I8086 | I80186 -> do_int t ctx vector_divide
+  | I80286 | I80386 -> fault Divide_error
+  | I8086 | I80186 -> do_int t ctx (vector_of_fault Divide_error)

@@ -612,14 +612,14 @@ let step t =
              (* 186 은 다음 명령으로 돌아가는 트랩으로 둔다. 286 은 BOUND
                 자신을 가리키는 결함이다(SingleStepTests/80286 62). *)
              (match t.model with
-              | I80286 | I80386 -> fault vector_bound
-              | I8086 | I80186 -> do_int t ctx vector_bound)
+              | I80286 | I80386 -> fault Bound_exceeded
+              | I8086 | I80186 -> do_int t ctx (vector_of_fault Bound_exceeded))
          | Reg _ -> (undefined_on_286 t true; unsupported t ctx "bound on register"));
         13
       (* --- wait: 코프로세서 대기. 8087 이 없으니 즉시 통과한다. --- *)
       | 0x9b ->
         if t.cr0 land (cr0_mp lor cr0_ts) = cr0_mp lor cr0_ts then
-          fault vector_device_not_available;
+          fault Device_not_available;
         4
       (* --- salc (문서 외, 8086 부터 모든 실칩이 구현): AL = CF ? FF : 00 --- *)
       | 0xd6 -> set_reg8 t 0 (if t.cf then 0xff else 0x00); 2
@@ -630,7 +630,7 @@ let step t =
       | b when b >= 0xd8 && b <= 0xdf ->
         (* 386 의 CR0.EM·TS 는 코프로세서 명령을 INT 7 로 보낸다. 다른 모델의
            CR0 는 늘 0 이다. *)
-        if t.cr0 land (cr0_em lor cr0_ts) <> 0 then fault vector_device_not_available;
+        if t.cr0 land (cr0_em lor cr0_ts) <> 0 then fault Device_not_available;
         let _, _, rm, _ = decode_modrm t ~addr:ctx.addr in
         (* 286 은 워드로 읽는다 — 오프셋 FFFF 면 INT 13(SingleStepTests/80286
            D8). *)
@@ -649,11 +649,18 @@ let step t =
         if opcode land operand32_form <> 0 then Cpu86_exec32.dispatch t ctx
         else unsupported t ctx (Printf.sprintf "opcode %02x" opcode)
       end
-      with Fault vector ->
+      with Fault f ->
+        let vector = vector_of_fault f in
         t.ip <- base_ip;
-        if t.cr0 land cr0_pe <> 0 then
-          raise (Unsupported (Printf.sprintf "fault %d in protected mode needs %s @%04x:%04x"
-                                vector protected_mode_delivery (seg t 1) base_ip));
+        if t.cr0 land cr0_pe <> 0 then begin
+          let code =
+            match error_code_of_fault f with
+            | Some c -> Printf.sprintf ", error code %04x" c
+            | None -> ""
+          in
+          raise (Unsupported (Printf.sprintf "fault %d in protected mode needs %s%s @%04x:%04x"
+                                vector protected_mode_delivery code (seg t 1) base_ip))
+        end;
         (match t.int_hook with
          | Some f -> f vector
          | None ->

@@ -53,7 +53,7 @@ let string_op t ctx width (unit_kind : string_unit) =
          (match ctx.rep with
           | Some _ -> t.regs.(1) <- (t.regs.(1) - cx_taken) land 0xffff
           | None -> ()));
-      fault (overrun_vector t sreg)
+      fault (overrun_fault t sreg)
     end
   in
   let si_sreg = segment_for ctx.addr ~default:sreg_ds in

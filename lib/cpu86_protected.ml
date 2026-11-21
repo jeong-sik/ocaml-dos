@@ -10,7 +10,7 @@ open Cpu86_fault
 open Cpu86_decode
 
 let require_protected_mode t =
-  if t.cr0 land cr0_pe = 0 then fault vector_invalid_opcode
+  if t.cr0 land cr0_pe = 0 then fault Invalid_opcode
 
 (* ---------- 셀렉터를 올리고 내리기 ---------- *)
 
