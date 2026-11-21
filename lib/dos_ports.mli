@@ -43,8 +43,11 @@ val cga_palette : (int * int * int) array
 
 val create :
   speed:speed -> mpu401:bool -> mem:Bytes.t -> video:Dos_video.t -> sound_blaster:bool ->
-  cmos:Dos_cmos.t -> t
-(** [speed] 는 CPU 속도다. [mpu401] 이면 330h·331h 를 MPU-401 에 넘긴다(MIDI
+  cmos:Dos_cmos.t -> a20:Dos_a20.t -> t
+(** [a20] 는 8042(D1h·DDh·DFh)와 포트 92h 가 함께 움직이는 A20 게이트다. 16MB
+    보드만 포트 92h 를 받는다(bit 1 이 A20 선, bit 0 의 빠른 리셋은 하지 않는다).
+    1MB 보드는 포트 92h 를 받지 않아 읽으면 FFh 다.
+    [speed] 는 CPU 속도다. [mpu401] 이면 330h·331h 를 MPU-401 에 넘긴다(MIDI
     바이트는 버린다). 포트 70h·71h 는 [cmos] 로 넘긴다. [mem] 은 1MB 게스트 메모리 — CRTC 커서 레지스터를 BDA(0x450/0x451)
     와 같은 값으로 유지하는 데 쓴다. 커서의 진실 원천은 하나여야 한다.
     비디오 어댑터의 포트(시퀀서·그래픽 컨트롤러·속성·CRTC)는 [video] 로
@@ -103,6 +106,10 @@ val opl : t -> Dos_opl.t
 
 val kbc : t -> Dos_kbc.t
 (** 포트 0x60·0x64 의 키보드 컨트롤러. *)
+
+val a20 : t -> Dos_a20.t
+(** 8042 와 포트 92h 가 함께 움직이는 A20 게이트. 버스가 이 게이트의 마스크를
+    물리 주소마다 씌운다. *)
 
 val palette : t -> (int * int * int) array
 (** 256색 DAC — 채널당 6비트. 포트 0x3C8/0x3C9 와 INT 10h AH=10h 이

@@ -1251,11 +1251,12 @@ let mouse t =
 
 (* ---------- INT 15h 시스템 ---------- *)
 
-(* SeaBIOS src/system.c(28aa46349b97)를 따른다. 이 기계에는 1MB 위
-   메모리가 없고(A20 이 늘 꺼져 있다) 보호 모드도 없다. 그래서 87h(블록
-   이동)·89h(보호 모드)·24h(A20)·C0h(구성 표)·E8h(메모리 지도)는 "지원
-   안 함" 으로 답한다. 원래 AT BIOS 도 C0h 가 없었다. *)
-let extended_memory_kb = 0
+(* SeaBIOS src/system.c(28aa46349b97)를 따른다. 보호 모드는 없다. 그래서
+   87h(블록 이동)·89h(보호 모드)·24h(A20)·C0h(구성 표)·E8h(메모리 지도)는
+   "지원 안 함" 으로 답한다. 원래 AT BIOS 도 C0h 가 없었다. 88h 는 1MB 위
+   RAM 의 크기를 KB 로 준다. 1MB 보드는 0 이고 16MB 보드(386)는 15360 으로,
+   XMS 가 나눠 주는 크기(Dos_xms.capacity_kb)와 같다. *)
+let extended_memory_kb t = (Bytes.length t.mem / 1024) - 1024
 let unsupported_function = 0x86
 
 (* ---------- RTC 기다리기: INT 15h 83h·86h 와 INT 70h ----------
@@ -1381,7 +1382,7 @@ let rtc_irq t =
 let system t =
   let cpu = t.cpu in
   match Cpu86.reg8 cpu 4 with
-  | 0x88 -> Cpu86.set_reg16 cpu 0 extended_memory_kb; set_cf t false
+  | 0x88 -> Cpu86.set_reg16 cpu 0 (extended_memory_kb t); set_cf t false
   | 0x4F -> set_cf t true (* 키보드 가로채기: 그 스캔 코드를 그대로 쓰라 *)
   | 0x90 | 0x91 -> () (* 장치 바쁨·끝남 알림: SeaBIOS 도 아무것도 안 한다 *)
   | 0x84 when Cpu86.reg16 cpu 2 <= 1 ->

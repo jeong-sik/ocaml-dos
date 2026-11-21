@@ -31,6 +31,7 @@ let fresh () =
   let video = Dos_video.create ~mem in
   Dos_ports.create ~speed:Dos_ports.pc_speed ~mpu401:false ~mem ~video ~sound_blaster:false
     ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
+    ~a20:(Dos_a20.create Dos_a20.One_megabyte)
 
 let write t reg v = Dos_ports.port_out t status_port reg; Dos_ports.port_out t data_port v
 let status t ~now = Dos_ports.set_now t now; Dos_ports.port_in t status_port

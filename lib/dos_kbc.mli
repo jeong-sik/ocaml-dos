@@ -35,15 +35,20 @@
       pressed key sends nothing. While the keyboard is disabled its keys
       wait, and a write to port 0x60 enables it again.
 
-    What this board does not do: the A20 line stays low (memory wraps at
-    1 MB) so bit 1 of the output port reads 0; a CPU reset (FEh, or bit 0
+    DDh and DFh close and open the A20 gate; so does bit 1 of the byte D1h
+    writes, and D0h reads the gate's state in bit 1 ({!Dos_a20}). On a 1 MB
+    board there is no gate: the line stays low and bit 1 reads 0.
+
+    What this board does not do: a CPU reset (FEh, or bit 0
     cleared) is not carried out; there is no aux device, so D3h and D4h
     take their byte and nothing answers; keys keep coming in the set the
     BIOS expects, whichever set or translation a program picks. *)
 
 type t
 
-val create : unit -> t
+val create : ?a20:Dos_a20.t -> unit -> t
+(** [a20] is the gate the controller drives; the default is a 1 MB board's,
+    which has none. *)
 
 val press : t -> hz:int -> now:int -> int -> unit
 (** [hz] is the CPU's cycles per second; every function that takes it

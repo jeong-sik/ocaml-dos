@@ -30,6 +30,7 @@ let ports ~speed ~mode =
   Dos_video.set_mode video mode ~clear:true;
   Dos_ports.create ~speed ~mpu401:false ~mem ~video ~sound_blaster:false
     ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
+    ~a20:(Dos_a20.create Dos_a20.One_megabyte)
 
 let status_port = 0x3DA
 let vsync_bit p = Dos_ports.port_in p status_port land 0x08 <> 0

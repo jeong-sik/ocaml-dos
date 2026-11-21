@@ -9,9 +9,16 @@
     DOSBox's default 16 MB machine) starts at physical address 100000h.
     Blocks are placed first fit in kilobyte units, so freeing a block in
     the middle leaves a hole and the largest free block can be smaller
-    than the total. A lock returns the block's physical address. The CPU
-    never reaches these addresses: only moves (0Bh) read and write them.
-    New memory reads 0.
+    than the total. A lock returns the block's physical address. New memory
+    reads 0.
+
+    {b Where the bytes live.} [create ()] gives each block bytes of its own,
+    which the CPU cannot reach: only moves (0Bh) read and write them. That
+    is a 1 MB machine's driver. [create ~memory] is a 16 MB machine's: the
+    blocks are views of that memory, so a block's lock address is where the
+    CPU finds its bytes once the A20 gate is open ({!Dos_a20}), and a store
+    through the CPU shows in a move. The snapshot then leaves the block
+    bytes to the RAM it saves.
 
     {b Handles.} [handle_count] (32, the MS-DOS 6.22 default that DOSBox
     names), numbered 1 to 32. A block may be 0 KB.
@@ -76,7 +83,9 @@ val conventional_limit : int
 
 type t
 
-val create : unit -> t
+val create : ?memory:Bytes.t -> unit -> t
+(** [memory] is the machine's RAM: 1 MB plus [capacity_kb]. Any other size is
+    [Invalid_argument]. *)
 
 type free = { largest_kb : int; total_kb : int }
 

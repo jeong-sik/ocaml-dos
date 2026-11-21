@@ -20,6 +20,7 @@ let make () =
   let video = Dos_video.create ~mem in
   Dos_ports.create ~speed:Dos_ports.pc_speed ~mpu401:false ~mem ~video ~sound_blaster:false
     ~cmos:(Dos_cmos.create ~clock:(fun () -> invalid_arg "no clock in this test"))
+    ~a20:(Dos_a20.create Dos_a20.One_megabyte)
 
 let cycles_per_pit_tick = Dos_ports.speed_hz Dos_ports.pc_speed / Dos_ports.pit_hz
 

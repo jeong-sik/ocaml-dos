@@ -30,9 +30,9 @@ let cb_translate = 0x40
 let command_byte_after_post = 0x61
 
 (* The output port (D0h/D1h). Bit 0 high keeps the CPU running, bit 1 is
-   the A20 gate, and bits 2-3 and 6-7 read 1 (QEMU KBD_OUT_ONES). This
-   board's A20 line stays low: memory wraps at 1 MB, so the bit reads 0
-   whatever a program writes. *)
+   the A20 gate, and bits 2-3 and 6-7 read 1 (QEMU KBD_OUT_ONES). Bit 1 is
+   not kept here: it is the gate's line ([Dos_a20]), which a 1 MB board
+   holds low whatever a program writes. *)
 let out_a20 = 0x02
 let output_port_after_post = 0xCD
 
@@ -138,7 +138,8 @@ type t = {
   mutable full : bool;
   mutable last_read : int option; (* None: nothing was ever read *)
   mutable command_byte : int;
-  mutable output_port : int;
+  mutable output_port : int;  (* bit 1 is always 0: the A20 line is [a20]'s *)
+  a20 : Dos_a20.t;
   mutable controller_wants : controller_arg option;
   mutable keyboard_wants : keyboard_arg option;
   mutable scanning : bool;
@@ -166,10 +167,10 @@ let update_ready t ~hz =
        | None, [], next :: _ -> if keyboard_enabled t then after_gap t ~hz next.due else never
        | None, [], [] -> never)
 
-let create () =
+let create ?(a20 = Dos_a20.create Dos_a20.One_megabyte) () =
   { queue = []; replies = []; controller_reply = None; data = 0; word = None; full = false;
     last_read = None; command_byte = command_byte_after_post;
-    output_port = output_port_after_post; controller_wants = None; keyboard_wants = None;
+    output_port = output_port_after_post; a20; controller_wants = None; keyboard_wants = None;
     scanning = true; leds = 0; scan_set = default_set; ready_at = never }
 
 (* Insert after every byte due no later: two keys pressed together keep
@@ -294,7 +295,9 @@ let write_data t ~hz ~now v =
      t.controller_wants <- None;
      (match arg with
       | Command_byte -> t.command_byte <- v
-      | Output_port -> t.output_port <- v land lnot out_a20
+      | Output_port ->
+        t.output_port <- v land lnot out_a20;
+        Dos_a20.set t.a20 (v land out_a20 <> 0)
       | Keyboard_buffer -> controller_answers t v
       | Aux_buffer | Aux_device -> () (* no aux device behind this controller *))
    | None ->
@@ -310,13 +313,16 @@ let write_command t ~hz v =
    | Take arg -> t.controller_wants <- Some arg
    | Aux_disabled true -> t.command_byte <- t.command_byte lor cb_aux_disabled
    | Aux_disabled false -> t.command_byte <- t.command_byte land lnot cb_aux_disabled
-   | Gate_a20 _ (* the A20 line stays low *) | Reset_cpu (* not carried out *) | Ignored -> ()
+   | Gate_a20 open_ -> Dos_a20.set t.a20 open_
+   | Reset_cpu (* not carried out *) | Ignored -> ()
    | Test_aux | Test_keyboard -> controller_answers t interface_ok
    | Self_test -> controller_answers t self_test_ok
    | Keyboard_disabled true -> t.command_byte <- t.command_byte lor cb_keyboard_disabled
    | Keyboard_disabled false -> t.command_byte <- t.command_byte land lnot cb_keyboard_disabled
    | Read_input_port -> controller_answers t input_port
-   | Read_output_port -> controller_answers t t.output_port);
+   | Read_output_port ->
+     controller_answers t
+       (t.output_port lor if Dos_a20.enabled t.a20 then out_a20 else 0));
   update_ready t ~hz
 
 let command_byte t = t.command_byte
@@ -383,8 +389,8 @@ let scan_sets = C.range 1 3
 
 let write_state w
     { queue; replies; controller_reply; data; word; full; last_read; command_byte;
-      output_port; controller_wants; keyboard_wants; scanning; leds; scan_set;
-      ready_at = _ (* derived *) } =
+      output_port; a20 = _ (* the ports save the gate *); controller_wants; keyboard_wants;
+      scanning; leds; scan_set; ready_at = _ (* derived *) } =
   put_bytes_out w "keyboard byte" queue;
   put_bytes_out w "keyboard reply" replies;
   (match controller_reply with
