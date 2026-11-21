@@ -12,10 +12,12 @@ open Cpu86_state
    그대로 남는다. 386 은 그 둘도 명령 앞 값으로 되돌린다
    ([restore_sp_on_fault], [Cpu86_string]). step 밖으로 나가지 않는다.
 
-   보호 모드의 #SS·#GP 는 오류 코드를 스택에 쌓는다(386 PRM 9.9 "Error Code").
-   코드를 쌓는 결함만 구성자에 코드를 싣고, 쌓지 않는 결함에는 코드를 달 수 없다.
-   세그먼트 한계를 넘은 접근과 CR0 쓰기의 #SS·#GP 는 코드 0 이다. 실모드는 코드를
-   쌓지 않아 훅이 벡터만 받는다. *)
+   보호 모드의 #SS·#GP 는 오류 코드를 스택에 쌓고 0·5·6·7 번 결함은 쌓지 않는다(386 PRM
+   9.10 Table 9-7). 코드를 쌓는 결함만 구성자에 코드를 싣고, 쌓지 않는 결함에는 코드를
+   달 수 없다. 기술자를 적재하다 난 결함이 아니면 코드는 0 이다: 세그먼트 한계를 넘은
+   접근은 #SS 가 "otherwise the error code is zero"(9.8.12), #GP 는 "otherwise, the error
+   code is null"(9.8.13)이고 CR0 의 PG=1·PE=0 쓰기도 9.8.13 의 목록에 든다. 실모드는
+   코드를 쌓지 않아 훅이 벡터만 받는다. *)
 type fault =
   | Divide_error
   | Bound_exceeded

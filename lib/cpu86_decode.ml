@@ -151,8 +151,9 @@ let overruns t sreg off =
 
 (* 세그먼트 끝을 넘은 접근의 결함. 386 은 SS 면 INT 12(#SS), 다른
    세그먼트면 INT 13(#GP)이다(SingleStepTests/80386: SP=FFFF 의 POP·LEAVE 는
-   12, SI=FFFF 의 LODSW 는 13). 286 은 모두 INT 13 이다. 오류 코드는 0 이다(386 PRM
-   9.9 의 표: 세그먼트 한계 위반은 코드 0). *)
+   12, SI=FFFF 의 LODSW 는 13). 286 은 모두 INT 13 이다. 오류 코드는 0 이다(386 PRM 9.8.12
+   #SS 의 limit 위반, 9.8.13 #GP 의 "Exceeding segment limit when using CS, DS, ES, FS, or
+   GS": 기술자를 적재하다 난 결함이 아니라 코드가 0). *)
 let overrun_fault t sreg =
   match t.model with
   | I80386 -> if sreg = sreg_ss then Stack_fault 0 else General_protection 0
