@@ -712,6 +712,14 @@ let load_exe ?name ?(tail = "") t image =
   | Ok Com_image -> invalid_arg "not an MZ image"
   | Error e -> invalid_arg (mz_error_message e)
 
+(* [load_exe] 가 이 이미지를 받는지 싣기 전에 묻는다. 받으면 메모리에 들어가는
+   바이트 수, 아니면 [load_exe] 가 [Invalid_argument] 로 내는 그 글이다. *)
+let exe_payload_bytes image =
+  match loadable image with
+  | Ok (Exe_image m) -> Ok (max 0 (m.load_end - m.header_bytes))
+  | Ok Com_image -> Error "not an MZ image"
+  | Error e -> Error (mz_error_message e)
+
 (* ---------- EXEC (AH=4Bh) · 자식 종료 ----------
 
    자식은 같은 기계 위에서 이어서 돈다 — CPU 레지스터와 프로세스
