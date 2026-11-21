@@ -16,6 +16,7 @@
      58h execute-only code       60h read-only data
      68h call gate               70h 32-bit data, base 20000h, 64KB (B=1)
      78h 4GB data, base 12345678h   80h 64KB code, DPL 3
+     88h 32-bit code, base 0, 512 bytes
      04h (LDT) data, base 20000h, 64KB *)
 
 let failed = ref 0
@@ -67,7 +68,8 @@ let gdt =
       desc ~base:0 ~limit:0xffff ~access:0x8c ~flags:none;
       desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:big;
       desc ~base:0x12345678 ~limit:0xfffff ~access:0x92 ~flags:granular_big;
-      desc ~base:0 ~limit:0xffff ~access:0xfa ~flags:none ]
+      desc ~base:0 ~limit:0xffff ~access:0xfa ~flags:none;
+      desc ~base:0 ~limit:0x1ff ~access:0x9a ~flags:big ]
 
 let gdt_limit = String.length gdt - 1
 let ldt = desc ~base:0x20000 ~limit:0xffff ~access:0x92 ~flags:none
@@ -252,6 +254,28 @@ let test_stack_width () =
   check_halted "push on a 32-bit stack" (run t);
   check "ESP not wrapped" (esp t) 0x2fffc;
   check "the dword is at ESP" (Char.code (Bytes.get mem 0x2fffc)) 0x44;
+  (* a word push and pop on the same 32-bit stack *)
+  let t, mem = make enter_flat (load_ss 0x10 ^ mov_esp 0x30000 ^ mov_eax 0x11223344 ^ "\x66\x50" ^ hlt) in
+  check_halted "word push on a 32-bit stack" (run t);
+  check "ESP drops by two without wrapping" (esp t) 0x2fffe;
+  check "the word is at ESP" (Char.code (Bytes.get mem 0x2fffe)) 0x44;
+  let t, mem = make enter_flat (load_ss 0x10 ^ mov_esp 0x2fffe ^ "\x66\x5b" ^ hlt) in
+  Bytes.set mem 0x2fffe '\x66';
+  Bytes.set mem 0x2ffff '\x55';
+  check_halted "word pop on a 32-bit stack" (run t);
+  check "ESP rises by two" (esp t) 0x30000;
+  check "BX is the word" (ebx t land 0xffff) 0x5566;
+  (* LEAVE on a 32-bit stack takes EBP whole: both operand sizes *)
+  let leave_test name leave pop_bytes =
+    let t, mem = make enter_flat (load_ss 0x10 ^ mov_esp 0x50000 ^ "\xbd" ^ le32 0x30000 ^ leave ^ hlt) in
+    String.iteri (fun i c -> Bytes.set mem (0x30000 + i) c) (le32 0x55667788);
+    check_halted name (run t);
+    check (name ^ ": ESP") (esp t) (0x30000 + pop_bytes);
+    check (name ^ ": EBP") (Cpu86.reg32 t 5 land (if pop_bytes = 2 then 0xffff else 0xffffffff))
+      (if pop_bytes = 2 then 0x7788 else 0x55667788)
+  in
+  leave_test "LEAVE 32-bit" "\xc9" 4;
+  leave_test "LEAVE 16-bit" "\x66\xc9" 2;
   (* on a 16-bit stack the same push wraps SP, not ESP *)
   let t, mem = make enter_flat (load_ss 0x20 ^ mov_esp 0x30000 ^ mov_eax 0x11223344 ^ "\x50" ^ hlt) in
   check_halted "push on a 16-bit stack" (run t);
@@ -275,7 +299,7 @@ let test_stops () =
   in
   let sel_into reg sel = mov_ax_sel sel ^ mov_sreg reg in
   stops "null selector into SS" (sel_into ss 0) "null selector into SS";
-  stops "selector beyond the GDT" (sel_into ds 0x88) "beyond its table";
+  stops "selector beyond the GDT" (sel_into ds 0x90) "beyond its table";
   stops "LDT selector with no LDT" (sel_into ds 0x04) "beyond its table";
   stops "not present" (sel_into ds 0x38) "not present";
   stops "system descriptor into DS" (sel_into ds 0x28) "system descriptor";
@@ -315,6 +339,11 @@ let test_fetch_limit () =
   Bytes.set mem 0xffff '\x90';
   check_stopped "fetch past the CS limit" (run t) "fault 13 in protected mode";
   check "EIP wound back to the NOP" (Cpu86.dump_ip t) 0x10000;
+  (* 512-byte 32-bit code segment: the fetch after the last byte stops, well below 64KB *)
+  let t, mem = make enter_flat ("\xea" ^ le32 0x1ff ^ le16 0x88) in
+  Bytes.set mem 0x1ff '\x90';
+  check_stopped "fetch past a 512-byte CS limit" (run t) "fault 13 in protected mode";
+  check "EIP wound back to the next instruction" (Cpu86.dump_ip t) 0x200;
   (* a far jump checks its offset against the limit of the code segment it loads:
      from 16-bit code into flat code past 64KB *)
   let t, mem = make enter_flat ("\xea" ^ le32 0x200 ^ le16 0x18) in
@@ -349,6 +378,7 @@ let test_ldt_and_task_register () =
     check_stopped name (run t) part
   in
   stops "LLDT of a code selector" (mov_ax_sel 0x08 ^ "\x0f\x00\xd0") "not an LDT descriptor";
+  stops "LLDT of a TSS" (mov_ax_sel 0x30 ^ "\x0f\x00\xd0") "not an LDT descriptor";
   stops "LLDT of an LDT entry" (mov_ax_sel 0x04 ^ "\x0f\x00\xd0") "names an LDT entry";
   stops "LTR of an LDT descriptor" (mov_ax_sel 0x28 ^ "\x0f\x00\xd8") "not an available TSS";
   stops "LTR of a busy TSS"
@@ -386,7 +416,7 @@ let test_queries () =
   check_bool "VERR conforming code with RPL 3" (zf (after (verr 0x53))) true;
   check_bool "VERR system descriptor" (zf (after (verr 0x28))) false;
   check_bool "VERR null" (zf (after (verr 0))) false;
-  check_bool "VERR beyond the table" (zf (after (verr 0x88))) false;
+  check_bool "VERR beyond the table" (zf (after (verr 0x90))) false;
   check_bool "VERR RPL above DPL" (zf (after (verr 0x13))) false;
   check_bool "VERR DPL 3 data with RPL 3" (zf (after (verr 0x4b))) true;
   check_bool "VERW data" (zf (after (verw 0x10))) true;
@@ -400,9 +430,9 @@ let test_queries () =
   check "LAR call gate" (eax t) 0x00008c00;
   let t = after (lar 0x38) in
   check "LAR not present data still reads" (eax t) 0x00001200;
-  let t = after (lar 0x88) in
+  let t = after (lar 0x90) in
   check_bool "LAR beyond the table: ZF" (zf t) false;
-  check "LAR beyond the table leaves EAX" (eax t) 0xffff0088;
+  check "LAR beyond the table leaves EAX" (eax t) 0xffff0090;
   let t = after (lar 0x13) in
   check_bool "LAR RPL above DPL: ZF" (zf t) false;
   let t = after (mov_eax 0xffffffff ^ mov_ax_sel 0x10 ^ "\x66\x89\xc3" ^ "\x66\x0f\x02\xc3") in
