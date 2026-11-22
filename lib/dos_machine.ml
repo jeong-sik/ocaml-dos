@@ -164,6 +164,7 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
         mouse_drawn = Dos_state.Not_drawn;
       };
       on_unserved = (fun _ ~vector:_ ~ax:_ -> ());
+      on_int = (fun ~vector:_ ~ax:_ ~bx:_ ~cx:_ ~dx:_ -> ())
     }
   in
   on_ring_poll :=
@@ -185,6 +186,8 @@ let create ?(model = Cpu86.I80286) ?(speed = Dos_ports.pc_speed) ?(mpu401 = fals
   Dos_dos.set_date_from_clock t;
   Cpu86.set_int_hook cpu (fun vec ->
       let raw = vec land 0xff in
+      t.on_int ~vector:raw ~ax:(Cpu86.reg16 cpu 0) ~bx:(Cpu86.reg16 cpu 3)
+        ~cx:(Cpu86.reg16 cpu 1) ~dx:(Cpu86.reg16 cpu 2);
       match Dos_bios.private_service_vector t raw with
       | Some v ->
         (* A guest hook chaining to its saved old vector already chose this
@@ -551,6 +554,8 @@ let mem_write t a v = wr8 t a v
 let tick_count t = read_ticks t
 
 let on_unserved t f = t.on_unserved <- f
+
+let on_int t f = t.on_int <- f
 let speaker_on t = Dos_ports.speaker_on t.ports
 
 (* 포트 쪽 시각은 스텝 처음에 맞춘다. 스텝 밖에서 부르면 지금 사이클로

@@ -249,6 +249,12 @@ val on_unserved : t -> (Dos_state.unserved -> vector:int -> ax:int -> unit) -> u
     때, [Iret_stub] 은 프로그램이 부른 INT 가 ROM 의 IRET 스텁으로 갔을 때다.
     [ax] 는 호출 순간의 AX 다. *)
 
+val on_int : t -> (vector:int -> ax:int -> bx:int -> cx:int -> dx:int -> unit) -> unit
+(** 게스트가 부른 INT 의 진입마다 불릴 관찰자를 건다. 기계 동작은 그대로다.
+    진입 시점의 범용 레지스터만 보이고 서비스의 반환값은 보이지 않는다 —
+    반환 흐름은 다음 호출에서 게스트가 무엇을 하는가로 읽는다. 관찰자는
+    기계 상태가 아니어서 스냅숏에 담기지 않는다. *)
+
 val tick_count : t -> int
 (** BIOS 타이머 틱(0x40:0x6C). 자정부터 센 수라 처음 값은 기준시각의
     틱이다(08:00:00 이면 524348). 18.2Hz 가 기본이고 게스트가 PIT
