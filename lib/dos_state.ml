@@ -334,6 +334,10 @@ type t = {
   mouse : mouse;
   mutable on_unserved : unserved -> vector:int -> ax:int -> unit;
         (** 관찰자. 기계 상태가 아니어서 스냅숏에 싣지 않는다 *)
+  mutable on_int : vector:int -> ax:int -> bx:int -> cx:int -> dx:int -> unit;
+        (** 게스트가 부른 INT 진입마다 부르는 관찰자. 진입 레지스터만
+            보이고 반환값은 보이지 않는다. 하네스 진단용이며 기계
+            상태가 아니어서 스냅숏에 싣지 않는다 *)
 }
 
 let report_unserved t kind ~vector = t.on_unserved kind ~vector ~ax:(Cpu86.reg16 t.cpu 0)
