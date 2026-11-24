@@ -551,6 +551,7 @@ let () =
       ("device CON with an extension", "/C CHILD > CON.TXT", invalid_function);
       ("append", "/C CHILD >> R.TXT", invalid_function);
       ("append without a blank", "/C CHILD >>R.TXT", invalid_function);
+      ("multiple redirects", "/C CHILD > R>OUT.TXT", invalid_function);
       ("input and output", "/C CHILD < IN > R.TXT", invalid_function);
       ("pipe and output", "/C CHILD | MORE > R.TXT", invalid_function);
       ("no file word", "/C CHILD >", invalid_function);

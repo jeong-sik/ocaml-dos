@@ -942,9 +942,8 @@ let split_stdout_redirect line =
     | Some i ->
       let n = String.length line in
       let word = String.trim (String.sub line (i + 1) (n - i - 1)) in
-      if (i + 1 < n && line.[i + 1] = '>')
-         || word = ""
-         || String.exists (fun c -> c = ' ' || c = '\t') word
+      if word = ""
+         || String.exists (fun c -> c = '>' || c = ' ' || c = '\t') word
       then Error ()
       else begin
         let rec cut k = if k > 0 && (line.[k - 1] = ' ' || line.[k - 1] = '\t') then cut (k - 1) else k in
