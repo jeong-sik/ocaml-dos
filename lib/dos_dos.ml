@@ -223,6 +223,21 @@ let open_file t h name seed ~access ~inheritable =
     { target = File { hname = name; data }; access; inheritable; pos = 0 };
   data
 
+(* 3Ch·5Bh·6Ch 의 몸통: [name] 을 비우거나 새로 만든 파일의 핸들 기록. 새
+   파일은 읽고 쓰는 용으로 열리고 자식이 물려받는다(CREATE.ASM). 번호는
+   [create_file] 이 붙인다. *)
+let create_file_handle t name =
+  let data = shared_buffer t name Bytes.empty in
+  Hashtbl.replace t.host_files name Bytes.empty;
+  (* [shared_buffer] joins a buffer already shared by another live handle on
+     [name] instead of seeding a fresh empty one -- create truncates
+     regardless, so force it empty here too, visible to whoever else
+     already has [name] open. *)
+  data := Bytes.empty;
+  { target = File { hname = name; data }; access = Read_write; inheritable = true; pos = 0 }
+
+let create_file t h name = Hashtbl.replace t.handles h (create_file_handle t name)
+
 (* AL of AH=3Dh (DOS/FILEMODE.INC): bit 7 keeps the handle from EXEC's
    child, bits 4-6 are the sharing mode, bits 0-3 the access. $Open
    (FILE.ASM) masks bit 7 off; Check_Access_AX (OPEN.ASM) then refuses a
@@ -875,6 +890,7 @@ let load_overlay t image =
   | Error (Header_too_short | Pages_end_in_header | File_short_by_a_page
           | Relocations_past_file) -> fail t 11
 
+let stdout_handle = 1
 let exec_load_and_run = 0x00
 let exec_load_overlay = 0x03
 
@@ -890,10 +906,13 @@ let dos_output_color = 0x07
    - 첫 낱말이 COPY 면 내장 COPY 를 한다(아래 「내장 COPY」). 실기도 내장
      명령을 같은 이름의 파일보다 먼저 찾는다.
    - 아니면 첫 낱말을 .COM·.EXE 파일로 찾아 자식으로 돌리고, 나머지 글을
-     자식의 꼬리로 준다.
-   COPY 말고 다른 내장 명령(DIR, CLS, ECHO ...)·리디렉션·파이프·배치 파일은
-   하지 않는다. 그 줄은 AH=4Bh 가 오류 1(지원 안 함)이나 2(프로그램 없음)로
-   답한다. 자식의 종료 코드는 AH=4Dh 가 그대로 준다(내장 COPY 는 0). *)
+     자식의 꼬리로 준다. 줄 끝에 `> 파일` 이 있으면 자식의 표준 출력(핸들 1)이
+     그 파일이다. 파일은 비워서 만들고, 자식이 끝나면 닫혀 마운트 표로
+     돌아간다. `> 파일` 앞의 공백은 꼬리에서 뗀다.
+   COPY 말고 다른 내장 명령(DIR, CLS, ECHO ...)·`>>`·`<`·파이프·장치로 가는
+   `>`(NUL 등)·배치 파일은 하지 않는다. 그 줄은 AH=4Bh 가 오류 1(지원 안 함)이나
+   2(프로그램 없음)로 답한다. 자식의 종료 코드는 AH=4Dh 가 그대로 준다(내장
+   COPY 는 0). *)
 
 (* 꼬리 글 "/C 프로그램 인자들" 을 (프로그램 낱말, 인자 글) 로 가른다. 인자
    글은 프로그램 낱말 바로 뒤부터라 앞의 공백이 남는다 — 자식 꼬리에 넘기는
@@ -912,10 +931,31 @@ let split_command_line line =
   end
   else None
 
-let has_redirection line =
-  String.exists (fun c -> c = '<' || c = '>' || c = '|') line
+(* 줄 끝의 `> 파일` 을 떼어 (그 앞 글, 파일 낱말) 로 가른다. 앞 글은 `>` 앞의
+   공백을 뗀다. 지원하는 것은 표준 출력을 파일 하나로 보내는 `>` 뿐이다.
+   `>>`·`<`·`|`, 파일 낱말이 없거나 둘 이상인 줄은 Error 다. *)
+let split_stdout_redirect line =
+  if String.exists (fun c -> c = '<' || c = '|') line then Error ()
+  else
+    match String.index_opt line '>' with
+    | None -> Ok (line, None)
+    | Some i ->
+      let n = String.length line in
+      let word = String.trim (String.sub line (i + 1) (n - i - 1)) in
+      if word = ""
+         || String.exists (fun c -> c = '>' || c = ' ' || c = '\t') word
+      then Error ()
+      else begin
+        let rec cut k = if k > 0 && (line.[k - 1] = ' ' || line.[k - 1] = '\t') then cut (k - 1) else k in
+        Ok (String.sub line 0 (cut i), Some word)
+      end
 
-type command_target = { program : Dos_path.t; image : Bytes.t; args : string }
+type command_target = {
+  program : Dos_path.t;
+  image : Bytes.t;
+  args : string;
+  stdout_to : string option;  (** `> 파일` 의 파일 낱말 *)
+}
 
 type command =
   | Run_program of command_target
@@ -927,12 +967,13 @@ let copy_command = "COPY"
    확장자가 없으면 .COM 을 먼저, 없으면 .EXE 를 본다(COMMAND.COM 의 순서).
    .COM·.EXE 가 아닌 확장자와 .BAT 는 지원 밖이다. *)
 let command_target t line =
-  if has_redirection line then Error invalid_function
-  else
+  match split_stdout_redirect line with
+  | Error () -> Error invalid_function
+  | Ok (line, stdout_to) ->
     match split_command_line line with
     | None -> Error invalid_function
     | Some (word, args) when String.uppercase_ascii word = copy_command ->
-      Ok (Copy_files args)
+      if stdout_to = None then Ok (Copy_files args) else Error invalid_function
     | Some (word, args) ->
       let last =
         match String.rindex_opt word '\\' with
@@ -952,13 +993,13 @@ let command_target t line =
       let runnable p = ends_with ".COM" p || ends_with ".EXE" p in
       if String.contains last '.' then
         match find word with
-        | Some (p, image) when runnable p -> Ok (Run_program { program = p; image; args })
+        | Some (p, image) when runnable p -> Ok (Run_program { program = p; image; args; stdout_to })
         | Some _ -> Error invalid_function
         | None -> Error file_not_found
       else
         match find (word ^ ".COM"), find (word ^ ".EXE") with
         | Some (p, image), _ | None, Some (p, image) ->
-          Ok (Run_program { program = p; image; args })
+          Ok (Run_program { program = p; image; args; stdout_to })
         | None, None ->
           if find (word ^ ".BAT") <> None then Error invalid_function else Error file_not_found
 
@@ -1008,18 +1049,50 @@ let ( let* ) = Result.bind
 let console_write t s =
   String.iter (fun c -> teletype t (Char.code c) dos_output_color) s
 
+(* [count] bytes at the handle's position in its file, byte [i] from
+   [byte i]. Returns how many were written: [count], or 0 when the disk has
+   no room. CX = 0 sets the file's length to the position, shorter or longer
+   (DISK3.ASM WRTEOF). A gap a write leaves reads as 0. *)
+let file_write hd data ~count ~byte =
+  let len = Bytes.length !data in
+  let new_len = if count = 0 then hd.pos else max len (hd.pos + count) in
+  if clusters new_len - clusters len > free_clusters then
+    (* No room: nothing is written, AX = 0 and CF stays clear
+       (DISK3.ASM WRTERR). *)
+    0
+  else begin
+    (* A new buffer each time: the mount table and snapshots may hold the
+       old one. *)
+    let next = Bytes.make new_len '\000' in
+    Bytes.blit !data 0 next 0 (min len new_len);
+    for i = 0 to count - 1 do
+      Bytes.set next (hd.pos + i) (Char.chr (byte i))
+    done;
+    data := next;
+    hd.pos <- hd.pos + count;
+    count
+  end
+
+(* AH=02h and AH=09h write to standard output, which is handle 1: the
+   console, unless an EXEC with `> file` put a file there. *)
+let stdout_put t c =
+  match Hashtbl.find_opt t.handles stdout_handle with
+  | Some ({ target = File { data; _ }; access = Write_only | Read_write; _ } as hd) ->
+    ignore (file_write hd data ~count:1 ~byte:(fun _ -> c))
+  | Some _ | None -> teletype t c dos_output_color
+
 let copy_unsupported_chars = "+/,;="
 
 let copy_wild s = String.contains s '*' || String.contains s '?'
 
-let copy_device_stems =
+let device_stems =
   [ "CON"; "PRN"; "AUX"; "NUL"; "COM1"; "COM2"; "COM3"; "COM4"; "LPT1"; "LPT2";
     "LPT3"; "CLOCK$"; device_name Emm ]
 
 (* 마지막 낱말이 장치를 부르는지. DOS 는 첫 점 앞의 이름만 본다. *)
-let copy_names_device last =
+let names_device last =
   let stem = match String.index_opt last '.' with Some i -> String.sub last 0 i | None -> last in
-  List.mem (String.uppercase_ascii stem) copy_device_stems
+  List.mem (String.uppercase_ascii stem) device_stems
 
 type copy_operand =
   | Operand_directory of Dos_path.t
@@ -1038,7 +1111,7 @@ let copy_operand t token =
   if String.exists (String.contains copy_unsupported_chars) token then Error ()
   else if copy_wild token then
     match Dos_path.parse_pattern ~cwd:t.cwd token with
-    | Ok (dir, pattern) when dir_exists t dir && not (copy_names_device pattern) ->
+    | Ok (dir, pattern) when dir_exists t dir && not (names_device pattern) ->
       Ok (Operand_name (dir, pattern))
     | Ok _ | Error _ -> Error ()
   else
@@ -1049,7 +1122,7 @@ let copy_operand t token =
     | Ok _ when trimmed <> token -> Error ()  (* 끝의 `\` 는 디렉터리만 뜻한다 *)
     | Ok p ->
       (match Dos_path.parent p, Dos_path.base p with
-       | Some dir, Some last when dir_exists t dir && not (copy_names_device last) ->
+       | Some dir, Some last when dir_exists t dir && not (names_device last) ->
          Ok (Operand_name (dir, last))
        | Some _, Some _ | Some _, None | None, _ -> Error ())
 
@@ -1217,7 +1290,7 @@ let epb_tail t =
 (* [image] 를 자식으로 돌린다. [name] 은 환경 꼬리에 들어가는 이름, [tail] 은
    자식 PSP 의 명령줄 꼬리(None 이면 비워 둔다). EPB 의 환경·FCB 는 ES:BX 에서
    읽는다. *)
-let exec_image t ~return_to ~image ~name ~tail =
+let exec_image ?stdout_to t ~return_to ~image ~name ~tail =
   let cpu = t.cpu in
   (* EPB(ES:BX) 는 자식 적재 전에 읽는다 — 적재가 ES 를 바꾼다 *)
   let epb = (Cpu86.seg cpu 0 lsl 4) + Cpu86.reg16 cpu 3 in
@@ -1274,6 +1347,12 @@ let exec_image t ~return_to ~image ~name ~tail =
      Hashtbl.filter_map_inplace
        (fun _ hd -> if hd.inheritable then Some hd else None)
        t.handles;
+     (* `> 파일`: 자식의 표준 출력은 그 파일이다. 부모의 표는 위 프레임에
+        그대로 있다. 자식이 끝나면 이 핸들은 자식이 연 것이라 닫히고, 쓴
+        바이트가 마운트 표로 돌아간다. *)
+     Option.iter
+       (fun name -> Hashtbl.replace t.handles stdout_handle (create_file_handle t name))
+       stdout_to;
      let env = env_word env in
      (match kind with
       | Exe_image m -> load_exe_module ~psp_seg:psp ~child:true ~env t image m
@@ -1296,6 +1375,20 @@ let exec_image t ~return_to ~image ~name ~tail =
      copy_dword_into (cpsp + 0x5C) fcb1_seg fcb1_off 12;
      copy_dword_into (cpsp + 0x6C) fcb2_seg fcb2_off 12;
      Control_transferred
+
+(* `> 파일` 이 가리키는 파일의 키. 디렉터리가 있어야 하고(없으면 3), 디렉터리
+   이름이면 안 된다(5). 장치 이름은 지원 밖이다(1) — 이 기계는 NUL 같은 장치를
+   이름으로 열지 못해, 그냥 만들면 이름이 NUL 인 파일이 생긴다. *)
+let stdout_redirect_name t word =
+  match Dos_path.parse ~cwd:t.cwd word with
+  | Error _ -> Error path_not_found
+  | Ok p ->
+    (match Dos_path.parent p, Dos_path.base p with
+     | Some dir, Some last when dir_exists t dir ->
+       if names_device last then Error invalid_function
+       else if dir_exists t p then Error access_denied
+       else Ok (Dos_path.key p)
+     | Some _, Some _ | Some _, None | None, _ -> Error path_not_found)
 
 (* INT 21h AH=4Bh — AL=00 불러 실행하기, AL=03 오버레이 싣기. AL=01(불러만)
    은 아직 계약 밖이다: 실패로 답해 조용히 넘어가는 일이 없게 한다. *)
@@ -1330,9 +1423,17 @@ let exec_program t ~return_to =
               ok t;
               Completed)
          | Ok (Run_program target) ->
-           exec_image t ~return_to ~image:(Bytes.to_string target.image)
-             ~name:(Printf.sprintf "%c:\\%s" boot_drive_letter (Dos_path.key target.program))
-             ~tail:(Some target.args))
+           let redirect =
+             match target.stdout_to with
+             | None -> Ok None
+             | Some word -> Result.map Option.some (stdout_redirect_name t word)
+           in
+           (match redirect with
+            | Error code -> fail t code; Completed
+            | Ok stdout_to ->
+              exec_image ?stdout_to t ~return_to ~image:(Bytes.to_string target.image)
+                ~name:(Printf.sprintf "%c:\\%s" boot_drive_letter (Dos_path.key target.program))
+                ~tail:(Some target.args)))
     | None -> fail t file_not_found; Completed
 
 (* INT 27h — 옛 방식의 상주 종료. DX 는 '마지막 상주 바이트 다음
@@ -1937,17 +2038,6 @@ let set_date_from_clock t =
 
 (* ---------- INT 21h ---------- *)
 
-(* 3Ch·5Bh·6Ch 의 몸통: [name] 을 비우거나 새로 만들고 빈 번호 [h] 로
-   연다. 새 파일은 읽고 쓰는 용으로 열리고 자식이 물려받는다(CREATE.ASM). *)
-let create_file t h name =
-  let data = open_file t h name Bytes.empty ~access:Read_write ~inheritable:true in
-  Hashtbl.replace t.host_files name Bytes.empty;
-  (* [open_file] joins a buffer already shared by another live handle on
-     [name] instead of seeding a fresh empty one -- create truncates
-     regardless, so force it empty here too, visible to whoever else
-     already has [name] open. *)
-  data := Bytes.empty
-
 (* AH=6Ch 확장 열기 — MS-DOS 4.0 FILE.ASM $Extended_Open, 상수는
    FILEMODE.INC. DX 의 아래 4 비트는 파일이 있을 때(0 실패, 1 열기,
    2 비우고 열기), 위 4 비트는 없을 때(0 실패, 1 만들기) 할 일이다.
@@ -2158,7 +2248,7 @@ let service_immediate t =
     Cpu86.set_reg8 cpu 0 t.last_child_code;
     Cpu86.set_reg8 cpu 4 0;
     ok t
-  | 0x02 -> teletype t (Cpu86.reg8 cpu 2) dos_output_color
+  | 0x02 -> stdout_put t (Cpu86.reg8 cpu 2)
   | 0x06 ->
     (* 직접 콘솔 입출력. DL=FF 면 읽기(ZF 로 있고없음), 아니면 쓰기.
        Turbo Pascal 런타임의 에러 메시지가 이 길로 나온다 — 없으면
@@ -2181,7 +2271,7 @@ let service_immediate t =
     while (not !stop) && !i < 65536 do
       let c = rd8 t (base + !i) in
       if c = Char.code '$' then stop := true
-      else begin teletype t c dos_output_color; incr i end
+      else begin stdout_put t c; incr i end
     done
   | 0x0B -> Cpu86.set_reg8 cpu 0 (if console_ready t then 0xFF else 0x00)
   | 0x0D -> ()                              (* 디스크 리셋 *)
@@ -2345,26 +2435,7 @@ let service_immediate t =
      | Some { target = Device Emm; _ } ->
        unmodelled_transfer t Emm ~count:n ~needs:emm_needs
      | Some ({ target = File { data; _ }; _ } as hd) ->
-       let len = Bytes.length !data in
-       (* CX = 0 sets the file's length to the position, shorter or
-          longer (DISK3.ASM WRTEOF). A gap a write leaves reads as 0. *)
-       let new_len = if n = 0 then hd.pos else max len (hd.pos + n) in
-       if clusters new_len - clusters len > free_clusters then
-         (* No room: nothing is written, AX = 0 and CF stays clear
-            (DISK3.ASM WRTERR). *)
-         Cpu86.set_reg16 cpu 0 0
-       else begin
-         (* A new buffer each time: the mount table and snapshots may
-            hold the old one. *)
-         let next = Bytes.make new_len '\000' in
-         Bytes.blit !data 0 next 0 (min len new_len);
-         for i = 0 to n - 1 do
-           Bytes.set next (hd.pos + i) (Char.chr (bus_rd8 t (src + i)))
-         done;
-         data := next;
-         hd.pos <- hd.pos + n;
-         Cpu86.set_reg16 cpu 0 n
-       end;
+       Cpu86.set_reg16 cpu 0 (file_write hd data ~count:n ~byte:(fun i -> bus_rd8 t (src + i)));
        ok t)
   | 0x41 ->
     (match guest_file t (seg_off t 3 2) with
