@@ -235,7 +235,7 @@ let dispatch t ctx =
         8)
   | 0xca -> ret_far t (fetch16 t)
   | 0xcb -> ret_far t 0
-  | 0xcf -> iretd t
+  | 0xcf -> iretd t ctx
   | 0xd1 | 0xd3 ->
     let _, regf, rm, _ = decode_modrm t ~addr:ctx.addr in
     let count = if opcode = 0xd1 then 1 else reg8 t 1 in

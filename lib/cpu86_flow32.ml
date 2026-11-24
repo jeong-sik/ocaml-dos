@@ -130,11 +130,17 @@ let ret_far t n =
       drop_stack t n;
       18)
 
-let iretd t =
+let iretd t ctx =
+  refuse_iret_task_return t ctx;
+  let sp = stack_pointer t in
   atomic t (fun () ->
       let off = pop32 t in
       let sg = pop32 t land 0xffff in
       let fl = pop32 t in
+      if iret_enters_v86 t fl then begin
+        set_stack_pointer t sp;
+        refuse_iret t ctx "to a virtual-8086 task"
+      end;
       let target = check_target_in ~limit:(code_limit_after t sg) off in
       set_seg t sreg_cs sg;
       t.ip <- target;

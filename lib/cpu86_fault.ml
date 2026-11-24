@@ -99,19 +99,12 @@ let restore_sp_on_fault t f =
   let sp = stack_pointer t in
   try f () with Fault _ as e -> set_stack_pointer t sp; raise e
 
-(* 보호 모드의 INT·결함은 IDT 의 게이트로 간다. 그 전달은 3c(RFC 0005)라, 그때까지
-   호스트가 IVT 로 받는 것은 실모드뿐이다. 보호 모드에서는 틀린 표로 보내지 않고
-   멈춘다. *)
-let protected_mode_delivery = "delivery through the IDT (RFC 0005 3c)"
-
+(* 호스트가 IVT 로 받는 실모드의 INT. 보호 모드의 INT·결함은 IDT 의 게이트로 가고
+   [Cpu86_interrupt] 가 전달한다. 8086·186 은 늘 실모드다. *)
 let do_int t ctx n =
-  if t.cr0 land cr0_pe <> 0 then
-    unsupported t ctx (Printf.sprintf "int %02x in protected mode needs %s" n
-                         protected_mode_delivery)
-  else
-    match t.int_hook with
-    | Some f -> f n
-    | None -> unsupported t ctx (Printf.sprintf "int %02x (no hook)" n)
+  match t.int_hook with
+  | Some f -> f n
+  | None -> unsupported t ctx (Printf.sprintf "int %02x (no hook)" n)
 
 (* 8086·186 의 나눗셈 오류는 다음 명령으로 돌아가는 트랩이고, 286 부터는
    나눗셈 자신(접두 바이트 포함)으로 돌아가는 결함이다. *)
@@ -119,3 +112,19 @@ let divide_error t ctx =
   match t.model with
   | I80286 | I80386 -> fault Divide_error
   | I8086 | I80186 -> do_int t ctx (vector_of_fault Divide_error)
+
+(* 보호 모드의 IRET 은 EFLAGS 의 NT 가 켜져 있으면 작업 복귀(TSS 의 back link 로 작업
+   전환)이고, 스택에서 꺼낸 EFLAGS 에 VM 이 있으면 V86 으로의 복귀다(386 PRM IRET 의
+   Operation: "IF NT = 1 THEN GOTO TASK-RETURN", "IF VM = 1 in flags image on stack THEN GO
+   TO STACK-RETURN-TO-V86"). 둘 다 6 단계의 기능이다. FLAGS 만 올리고 돌아가면 틀린
+   곳으로 가므로 멈춘다. *)
+let f_nested_task = 0x4000
+let eflags_vm = 0x20000
+
+let refuse_iret t ctx what = unsupported t ctx (Printf.sprintf "iret %s (RFC 0005 6)" what)
+
+let refuse_iret_task_return t ctx =
+  if t.cr0 land cr0_pe <> 0 && t.iopl_nt land f_nested_task <> 0 then
+    refuse_iret t ctx "with NT set returns to the previous task"
+
+let iret_enters_v86 t eflags_image = t.cr0 land cr0_pe <> 0 && eflags_image land eflags_vm <> 0
